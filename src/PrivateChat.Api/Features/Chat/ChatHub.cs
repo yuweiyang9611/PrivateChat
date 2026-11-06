@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using PrivateChat.Api.Features.Auth;
+using PrivateChat.Api.Features.Notifications;
 using PrivateChat.Api.Infrastructure;
 
 namespace PrivateChat.Api.Features.Chat;
@@ -63,7 +64,7 @@ public sealed class PresenceTracker
 }
 
 [Authorize]
-public sealed class ChatHub(AppDbContext db, MessageService messages, PresenceTracker presence) : Hub
+public sealed class ChatHub(AppDbContext db, MessageService messages, PresenceTracker presence, PushService push) : Hub
 {
     public override async Task OnConnectedAsync()
     {
@@ -90,8 +91,10 @@ public sealed class ChatHub(AppDbContext db, MessageService messages, PresenceTr
         var (message, created) = await messages.SendAsync(Context.User!.UserId(), req, Context.ConnectionAborted);
         var dto = MessageDto.From(message);
         if (created)
+        {
             await Clients.Group(ChatEvents.ConversationGroup(req.ConversationId)).SendAsync(ChatEvents.MessageReceived, dto);
-        // TODO: 离线成员入队 Web Push（去抖 3 s，静音会话不推）
+            await push.QueueMessageAsync(message, Context.ConnectionAborted);
+        }
         return dto;
     }
 

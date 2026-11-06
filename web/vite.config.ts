@@ -24,7 +24,12 @@ export default defineConfig({
       dts: 'src/components.d.ts',
     }),
     VitePWA({
+      // 自定义 SW（src/sw.ts）：预缓存之外还要处理 Web Push
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.ts',
       registerType: 'autoUpdate',
+      devOptions: { enabled: true, type: 'module' },
       includeAssets: ['icon.svg'],
       manifest: {
         name: 'PrivateChat',
@@ -40,9 +45,8 @@ export default defineConfig({
           { src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'maskable' },
         ],
       },
-      workbox: {
-        // 仅缓存应用壳与静态资源；API、媒体、SignalR 一律走网络
-        navigateFallbackDenylist: [/^\/api\//, /^\/hubs\//, /^\/ws\//, /^\/s\//, /^\/openapi\//, /^\/healthz/],
+      injectManifest: {
+        // 仅预缓存应用壳与静态资源；API、媒体、SignalR 的放行规则在 sw.ts 里
         globPatterns: ['**/*.{js,css,html,svg,woff2}'],
       },
     }),

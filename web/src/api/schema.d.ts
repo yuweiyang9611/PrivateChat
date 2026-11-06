@@ -4,6 +4,146 @@
  */
 
 export interface paths {
+    "/api/push/vapid-public-key": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["VapidPublicKeyResponse"];
+                        "application/json": components["schemas"]["VapidPublicKeyResponse"];
+                        "text/json": components["schemas"]["VapidPublicKeyResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/push/subscribe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PushSubscribeRequest"];
+                    "text/json": components["schemas"]["PushSubscribeRequest"];
+                    "application/*+json": components["schemas"]["PushSubscribeRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["PushStatusResponse"];
+                        "application/json": components["schemas"]["PushStatusResponse"];
+                        "text/json": components["schemas"]["PushStatusResponse"];
+                    };
+                };
+            };
+        };
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PushUnsubscribeRequest"];
+                    "text/json": components["schemas"]["PushUnsubscribeRequest"];
+                    "application/*+json": components["schemas"]["PushUnsubscribeRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["PushStatusResponse"];
+                        "application/json": components["schemas"]["PushStatusResponse"];
+                        "text/json": components["schemas"]["PushStatusResponse"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/push/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/family/members": {
         parameters: {
             query?: never;
@@ -1225,6 +1365,23 @@ export interface components {
         PullTracksRequest: {
             tracks: components["schemas"]["PullTrackInput"][];
         };
+        PushKeys: {
+            p256dh: string;
+            auth: string;
+        };
+        PushStatusResponse: {
+            subscribed: boolean;
+            /** Format: int32 */
+            deviceCount: number;
+        };
+        PushSubscribeRequest: {
+            endpoint: string;
+            keys: components["schemas"]["PushKeys"];
+            userAgent?: null | string;
+        };
+        PushUnsubscribeRequest: {
+            endpoint: string;
+        };
         ReactionDto: {
             /** Format: uuid */
             userId: string;
@@ -1283,6 +1440,9 @@ export interface components {
         };
         /** @enum {unknown} */
         UserRole: "Admin" | "Member" | "Child";
+        VapidPublicKeyResponse: {
+            publicKey: string;
+        };
     };
     responses: never;
     parameters: never;

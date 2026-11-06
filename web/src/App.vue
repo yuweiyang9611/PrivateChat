@@ -8,6 +8,7 @@ import LocalLoginPage from '@/features/auth/LocalLoginPage.vue'
 import { useSessionStore } from '@/stores/session'
 import { useConversationsStore } from '@/stores/conversations'
 import { useUiStore } from '@/stores/ui'
+import { refreshPushState } from '@/push'
 
 // 设计稿 5.4：≥1024px 桌面三栏，否则手机底部 Tab
 const breakpoints = useBreakpoints({ desktop: 1024 })
@@ -20,7 +21,10 @@ useUiStore()
 
 onMounted(async () => {
   await session.load()
-  if (session.user) await conversations.load()
+  if (session.user) {
+    await conversations.load()
+    void refreshPushState()
+  }
 })
 </script>
 

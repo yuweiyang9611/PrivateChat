@@ -9,6 +9,7 @@ using PrivateChat.Api.Features.Auth;
 using PrivateChat.Api.Features.Blobs;
 using PrivateChat.Api.Features.Calls;
 using PrivateChat.Api.Features.Chat;
+using PrivateChat.Api.Features.Notifications;
 using PrivateChat.Api.Infrastructure;
 using PrivateChat.Api.Infrastructure.Blobs;
 using PrivateChat.Api.Infrastructure.Keys;
@@ -107,6 +108,9 @@ builder.Services.AddScoped<BlobIngestService>();
 builder.Services.AddScoped<BlobAccessService>();
 builder.Services.AddHostedService<MediaWorker>();
 builder.Services.AddHostedService<TusCleanupService>();
+builder.Services.AddHttpClient(nameof(PushService));
+builder.Services.AddSingleton<PushService>();
+builder.Services.AddHostedService<PushWorker>();
 
 var app = builder.Build();
 

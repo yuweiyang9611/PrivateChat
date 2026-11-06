@@ -2,12 +2,13 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using PrivateChat.Api.Features.Auth;
+using PrivateChat.Api.Features.Notifications;
 
 namespace PrivateChat.Api.Features.Chat;
 
 [ApiController]
 [Authorize]
-public sealed class MessagesController(MessageService messages, IHubContext<ChatHub> hub) : ControllerBase
+public sealed class MessagesController(MessageService messages, IHubContext<ChatHub> hub, PushService push) : ControllerBase
 {
     /// <summary>向前翻页：seq 小于 beforeSeq 的消息，按 seq 倒序。</summary>
     [HttpGet("api/conversations/{conversationId:guid}/messages")]
@@ -24,7 +25,11 @@ public sealed class MessagesController(MessageService messages, IHubContext<Chat
     {
         var (message, created) = await messages.SendAsync(User.UserId(), req with { ConversationId = conversationId }, ct);
         var dto = MessageDto.From(message);
-        if (created) await hub.Clients.Group(ChatEvents.ConversationGroup(conversationId)).SendAsync(ChatEvents.MessageReceived, dto, ct);
+        if (created)
+        {
+            await hub.Clients.Group(ChatEvents.ConversationGroup(conversationId)).SendAsync(ChatEvents.MessageReceived, dto, ct);
+            await push.QueueMessageAsync(message, ct);
+        }
         return dto;
     }
 

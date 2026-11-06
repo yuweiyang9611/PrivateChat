@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Search, Plus } from '@element-plus/icons-vue'
 import { useConversationsStore } from '@/stores/conversations'
+import PushPrompt from '@/components/PushPrompt.vue'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -27,6 +28,8 @@ function formatTime(iso?: string | null): string {
       <el-input v-model="keyword" :placeholder="t('chat.search')" :prefix-icon="Search" clearable />
       <el-button :icon="Plus" circle :title="t('chat.newGroup')" />
     </div>
+
+    <PushPrompt />
 
     <el-empty v-if="conversations.loaded && !conversations.sorted.length" :description="t('chat.noConversations')" />
 

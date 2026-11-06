@@ -55,6 +55,17 @@ export default {
     notifications: '通知',
     devices: '我的设备',
   },
+  push: {
+    prompt: '开启通知，家人发消息时手机会提醒你',
+    enable: '开启',
+    title: '新消息通知',
+    desc: '不在线时通过系统通知提醒；静音的会话不会推送',
+    unsupported: '当前浏览器或访问方式不支持通知（需要 HTTPS）',
+    denied: '通知权限已被浏览器拒绝，请在浏览器设置里允许后再试',
+    test: '发送测试通知',
+    testSent: '已发送，稍等片刻',
+    testNone: '没有可用的订阅',
+  },
   login: {
     subtitle: '局域网直连 / 本地模式登录',
     account: '用户名或邮箱',

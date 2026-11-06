@@ -43,7 +43,7 @@ public sealed class ConversationsController(AppDbContext db, IHubContext<ChatHub
         }).ToList();
     }
 
-    private static string Preview(Message m) => m.DeletedAt is not null ? "[已撤回]" : m.Type switch
+    public static string Preview(Message m) => m.DeletedAt is not null ? "[已撤回]" : m.Type switch
     {
         MessageType.Text => m.Body ?? "",
         MessageType.Image => "[图片]",

@@ -29,6 +29,7 @@ declare module 'vue' {
     ElSwitch: typeof import('element-plus/es')['ElSwitch']
     ElTag: typeof import('element-plus/es')['ElTag']
     PlaceholderPage: typeof import('./components/PlaceholderPage.vue')['default']
+    PushPrompt: typeof import('./components/PushPrompt.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
   }
