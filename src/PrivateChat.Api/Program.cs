@@ -101,10 +101,11 @@ builder.Services.AddHttpClient<CloudflareRealtimeClient>();
 builder.Services.AddSingleton<PresenceTracker>();
 builder.Services.AddScoped<MessageService>();
 builder.Services.AddSingleton<DerivedStore>();
-builder.Services.AddSingleton<ThumbnailQueue>();
+builder.Services.AddSingleton<MediaQueue>();
+builder.Services.AddSingleton<PrivateChat.Api.Infrastructure.Media.Ffmpeg>();
 builder.Services.AddScoped<BlobIngestService>();
 builder.Services.AddScoped<BlobAccessService>();
-builder.Services.AddHostedService<ThumbnailWorker>();
+builder.Services.AddHostedService<MediaWorker>();
 builder.Services.AddHostedService<TusCleanupService>();
 
 var app = builder.Build();

@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Document, VideoPlay } from '@element-plus/icons-vue'
+import VoiceBubble from './VoiceBubble.vue'
 import { parseMeta, type LocalMessage } from '@/db'
 import { blobUrl, formatSize } from '@/upload'
 import { useMessagesStore } from '@/stores/messages'
@@ -28,6 +29,8 @@ const thumbUrl = computed(() =>
 )
 const fullUrl = computed(() => (pending.value ? '' : blobUrl(att.value!.blobId, { v: 'thumb-1280', r: version.value })))
 const originalUrl = computed(() => (pending.value ? props.message.localUrl ?? '' : blobUrl(att.value!.blobId, { name: meta.value.name })))
+/** 语音统一请求转码后的 m4a；没生成时服务端回退原件（录制端浏览器本来就能放） */
+const audioUrl = computed(() => (pending.value ? props.message.localUrl ?? '' : blobUrl(att.value!.blobId, { v: 'audio-m4a', r: version.value })))
 const downloadUrl = computed(() => (pending.value ? '' : blobUrl(att.value!.blobId, { name: meta.value.name, download: true })))
 const percent = computed(() => Math.round((props.message.uploadProgress ?? 0) * 100))
 </script>
@@ -57,9 +60,8 @@ const percent = computed(() => Math.round((props.message.uploadProgress ?? 0) * 
     </div>
 
     <!-- 语音 / 音频 -->
-    <div v-else-if="att.kind === 'Audio'" class="flex items-center gap-2" style="min-width: 220px">
-      <audio v-if="!pending" :src="originalUrl" controls preload="metadata" class="h-9 w-full" />
-      <span v-else class="text-sm">{{ meta.name }}</span>
+    <div v-else-if="att.kind === 'Audio'" class="px-1 py-1">
+      <VoiceBubble :src="audioUrl" :duration="meta.duration" :pending="pending" />
     </div>
 
     <!-- 文件卡片 -->

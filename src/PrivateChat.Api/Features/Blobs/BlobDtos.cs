@@ -28,6 +28,11 @@ public static class MimeRules
     public static bool IsImage(string mime) =>
         mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase) && !mime.Equals("image/svg+xml", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>浏览器录音多为 webm/opus 或 ogg，Safari 放不了，统一转 m4a；本来就是 AAC / MP3 的不动。</summary>
+    public static bool NeedsAudioTranscode(string mime) =>
+        mime.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
+        && mime is not ("audio/mp4" or "audio/x-m4a" or "audio/aac" or "audio/mpeg" or "audio/mp3");
+
     /// <summary>只接受形如 type/subtype 的值，否则退回 octet-stream。</summary>
     public static string Normalize(string? mime)
     {

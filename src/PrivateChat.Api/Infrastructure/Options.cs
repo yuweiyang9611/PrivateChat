@@ -11,6 +11,9 @@ public sealed class AppOptions
     public string AdminPassword { get; set; } = "";
     /// <summary>keys / blobs / derived / tus 的根目录。</summary>
     public string DataRoot { get; set; } = "data";
+    /// <summary>ffmpeg / ffprobe 可执行文件；容器镜像里在 PATH 上。</summary>
+    public string FfmpegPath { get; set; } = "ffmpeg";
+    public string FfprobePath { get; set; } = "ffprobe";
 }
 
 /// <summary>环境变量 CloudflareAccess__TeamDomain / CloudflareAccess__Audience。</summary>

@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api, type MessageDto } from '@/api/client'
-import { db, type LocalMessage } from '@/db'
+import { db, type AttachmentMeta, type LocalMessage } from '@/db'
 import { markRead, sendMessage } from '@/realtime/connection'
 import { imageSize, kindOf, uploadFile, type UploadHandle } from '@/upload'
 import { useConversationsStore } from './conversations'
@@ -127,15 +127,20 @@ export const useMessagesStore = defineStore('messages', () => {
     await Promise.all(files.map((f) => sendFile(conversationId, f)))
   }
 
-  async function sendFile(conversationId: string, file: File): Promise<void> {
+  /** 语音：带时长，气泡宽度与进度条都靠它 */
+  async function sendVoice(conversationId: string, file: File, duration: number): Promise<void> {
+    await sendFile(conversationId, file, { duration })
+  }
+
+  async function sendFile(conversationId: string, file: File, extra: Partial<AttachmentMeta> = {}): Promise<void> {
     const kind = kindOf(file)
     const size = kind === 'Image' ? await imageSize(file) : null
-    const meta = JSON.stringify({ name: file.name, size: file.size, mime: file.type || 'application/octet-stream', ...(size ?? {}) })
+    const meta = JSON.stringify({ name: file.name, size: file.size, mime: file.type || 'application/octet-stream', ...(size ?? {}), ...extra })
     const pending = newPending(conversationId, {
       type: kind,
       attachments: [{ id: '', blobId: '', kind, meta }],
       uploadProgress: 0,
-      localUrl: kind === 'Image' || kind === 'Video' ? URL.createObjectURL(file) : undefined,
+      localUrl: kind === 'File' ? undefined : URL.createObjectURL(file),
     })
     pendingFiles.set(pending.clientMessageId, file)
     upsert(list(conversationId), pending)
@@ -221,5 +226,5 @@ export const useMessagesStore = defineStore('messages', () => {
     }
   }
 
-  return { byConversation, blobVersion, list, lastSeqs, load, applyIncoming, sendText, sendFiles, retry, cancel, read }
+  return { byConversation, blobVersion, list, lastSeqs, load, applyIncoming, sendText, sendFiles, sendVoice, retry, cancel, read }
 })

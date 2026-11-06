@@ -9,7 +9,7 @@ namespace PrivateChat.Api.Features.Blobs;
 /// <summary>
 /// 上传完成后的入库：校验 / 计算 SHA-256，按内容去重，移入 Blob 存储，写 blobs 行，入队派生任务。
 /// </summary>
-public sealed class BlobIngestService(AppDbContext db, IBlobStore store, ThumbnailQueue thumbnails, ILogger<BlobIngestService> logger)
+public sealed class BlobIngestService(AppDbContext db, IBlobStore store, MediaQueue media, ILogger<BlobIngestService> logger)
 {
     public sealed record IngestResult(Blob Blob, bool Created);
 
@@ -67,15 +67,16 @@ public sealed class BlobIngestService(AppDbContext db, IBlobStore store, Thumbna
         return new IngestResult(blob, true);
     }
 
-    /// <summary>图片：登记两档缩略图待生成。视频 / 音频转码留到 ffmpeg 接入后。</summary>
+    /// <summary>图片：两档缩略图；音频（除已是 AAC / MP3 的）：转 m4a。视频转码留到 M2。</summary>
     private async Task EnqueueDerivedAsync(Blob blob, CancellationToken ct)
     {
-        if (!MimeRules.IsImage(blob.Mime)) return;
-        db.DerivedBlobs.AddRange(
-            new DerivedBlob { BlobId = blob.Id, Variant = Variants.Thumb320 },
-            new DerivedBlob { BlobId = blob.Id, Variant = Variants.Thumb1280 });
+        var variants = new List<string>();
+        if (MimeRules.IsImage(blob.Mime)) variants.AddRange([Variants.Thumb320, Variants.Thumb1280]);
+        if (MimeRules.NeedsAudioTranscode(blob.Mime)) variants.Add(Variants.AudioM4a);
+        if (variants.Count == 0) return;
+        db.DerivedBlobs.AddRange(variants.Select(v => new DerivedBlob { BlobId = blob.Id, Variant = v }));
         await db.SaveChangesAsync(ct);
-        thumbnails.Enqueue(blob.Id);
+        media.Enqueue(blob.Id);
     }
 
     public static async Task<string> Sha256HexAsync(Stream stream, CancellationToken ct)

@@ -17,6 +17,22 @@ public sealed class DerivedStore(IOptions<AppOptions> options)
     public Task<Stream> OpenReadAsync(string key, CancellationToken ct = default) => _fs.OpenReadAsync(key, ct);
     public Task DeleteAsync(string key, CancellationToken ct = default) => _fs.DeleteAsync(key, ct);
 
+    public void Write(string key, Action<string> writeTo)
+    {
+        var path = _fs.PathFor(key);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var tmp = path + ".tmp-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            writeTo(tmp);
+            File.Move(tmp, path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(tmp)) File.Delete(tmp);
+        }
+    }
+
     /// <summary>先写临时文件再原子改名。</summary>
     public async Task WriteAsync(string key, Func<string, Task> writeTo, CancellationToken ct = default)
     {
