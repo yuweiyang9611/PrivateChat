@@ -20,6 +20,30 @@ function upsert(list: LocalMessage[], m: LocalMessage): void {
   list.sort((a, b) => a.seq - b.seq)
 }
 
+/** 批量版：只排一次序，翻页 / 读缓存时不会 O(n² log n) */
+function upsertMany(list: LocalMessage[], items: LocalMessage[]): void {
+  if (items.length === 1) { upsert(list, items[0]!); return }
+  const byId = new Map<string, number>()
+  const byClient = new Map<string, number>()
+  list.forEach((m, i) => { byId.set(m.id, i); if (m.clientMessageId) byClient.set(m.clientMessageId, i) })
+  const appended: LocalMessage[] = []
+  for (const m of items) {
+    const idx = byId.get(m.id) ?? (m.clientMessageId ? byClient.get(m.clientMessageId) : undefined)
+    if (idx !== undefined) {
+      const old = list[idx]!
+      if (old.localUrl && !m.localUrl && old.status !== 'sent' && m.status === 'sent') URL.revokeObjectURL(old.localUrl)
+      list[idx] = m
+    } else {
+      appended.push(m)
+      byId.set(m.id, list.length + appended.length - 1)
+    }
+  }
+  if (appended.length) {
+    list.push(...appended)
+    list.sort((a, b) => a.seq - b.seq)
+  }
+}
+
 /** 会话列表里的一行摘要 */
 export function previewOf(m: Pick<MessageDto, 'type' | 'body' | 'deleted'>): string {
   if (m.deleted) return '[已撤回]'
@@ -58,25 +82,52 @@ export const useMessagesStore = defineStore('messages', () => {
     return result
   }
 
+  /** 服务端是否还有更早的消息；向上翻到头后置 false */
+  const hasMore = ref<Record<string, boolean>>({})
+  const loadingOlder = ref<Record<string, boolean>>({})
+  const PAGE = 50
+
   /** 先读 IndexedDB 秒开，再拉最新一页 */
-  async function load(conversationId: string, limit = 50): Promise<void> {
+  async function load(conversationId: string, limit = PAGE): Promise<void> {
     const cached = await db.messages.where('[conversationId+seq]').between([conversationId, 0], [conversationId, Infinity]).toArray()
-    if (cached.length) {
-      const target = list(conversationId)
-      for (const m of cached) upsert(target, m)
-    }
+    if (cached.length) upsertMany(list(conversationId), cached)
     const { data } = await api.GET('/api/conversations/{conversationId}/messages', {
       params: { path: { conversationId }, query: { limit } },
     })
-    if (data) await applyIncoming(data)
+    if (data) {
+      await applyIncoming(data)
+      if (data.length < limit) hasMore.value[conversationId] = false
+      else if (!(conversationId in hasMore.value)) hasMore.value[conversationId] = true
+    }
+  }
+
+  /** 向上翻页：取比本地最早一条还早的消息。返回拿到的条数 */
+  async function loadOlder(conversationId: string, limit = PAGE): Promise<number> {
+    if (hasMore.value[conversationId] === false || loadingOlder.value[conversationId]) return 0
+    const first = list(conversationId).find((m) => m.status === 'sent')
+    if (!first) return 0
+    loadingOlder.value[conversationId] = true
+    try {
+      const { data } = await api.GET('/api/conversations/{conversationId}/messages', {
+        params: { path: { conversationId }, query: { beforeSeq: first.seq, limit } },
+      })
+      if (!data) return 0
+      await applyIncoming(data)
+      if (data.length < limit) hasMore.value[conversationId] = false
+      return data.length
+    } finally {
+      loadingOlder.value[conversationId] = false
+    }
   }
 
   /** 服务端来的消息（实时、Sync、分页）统一走这里：替换 pending、写缓存、更新会话摘要 */
   async function applyIncoming(messages: MessageDto[], opts: { bumpBlobs?: boolean } = {}): Promise<void> {
     const conversations = useConversationsStore()
+    const byConv = new Map<string, LocalMessage[]>()
     for (const m of messages) {
-      const local: LocalMessage = { ...m, status: 'sent' }
-      upsert(list(m.conversationId), local)
+      const bucket = byConv.get(m.conversationId) ?? []
+      bucket.push({ ...m, status: 'sent' })
+      byConv.set(m.conversationId, bucket)
       conversations.bumpLastSeq(m.conversationId, m.seq, previewOf(m), m.createdAt)
       pendingFiles.delete(m.clientMessageId)
       uploads.delete(m.clientMessageId)
@@ -84,6 +135,7 @@ export const useMessagesStore = defineStore('messages', () => {
         for (const a of m.attachments) blobVersion.value[a.blobId] = (blobVersion.value[a.blobId] ?? 0) + 1
       }
     }
+    for (const [cid, bucket] of byConv) upsertMany(list(cid), bucket)
     await db.messages.bulkPut(messages.map((m) => ({ ...m, status: 'sent' as const })))
   }
 
@@ -273,7 +325,7 @@ export const useMessagesStore = defineStore('messages', () => {
   }
 
   return {
-    byConversation, blobVersion, list, lastSeqs, load, applyIncoming, sendText, sendFiles, sendVoice, retry, cancel, read,
+    byConversation, blobVersion, hasMore, loadingOlder, list, lastSeqs, load, loadOlder, applyIncoming, sendText, sendFiles, sendVoice, retry, cancel, read,
     toggleReaction, applyReactions, markDeleted, recall,
   }
 })
