@@ -1,0 +1,101 @@
+# PrivateChat 一键部署（草案 v0.3）
+# 入口：Cloudflare Tunnel（cloudflared 出站隧道）+ Cloudflare Access 身份门禁；通话媒体走 Cloudflare Realtime
+# 服务器零入站端口、无需证书。必需：cloudflared / web(nginx) / api / postgres
+# 可选：docker compose --profile rustdesk up -d   （RustDesk 远程控制兜底）
+# 用法：./init-env.sh 生成 .env，然后 docker compose up -d
+name: privatechat
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      - web
+    # Zero Trust 控制台：隧道的公共主机名 ${DOMAIN} → http://web:80
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    image: privatechat/web:local
+    restart: unless-stopped
+    ports:
+      - "8080:8080"            # 可选：局域网直连（无 Access 头，api 回退密码登录）；不需要可删
+    depends_on:
+      - api
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    image: privatechat/api:local
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_URLS: http://0.0.0.0:8080
+      ConnectionStrings__Default: Host=postgres;Database=privatechat;Username=privatechat;Password=${POSTGRES_PASSWORD}
+      App__PublicUrl: https://${DOMAIN}
+      App__AdminEmail: ${ADMIN_EMAIL}            # 该邮箱登录后自动成为管理员
+      App__AdminPassword: ${ADMIN_PASSWORD:-}    # 可选：局域网 8080 直连时的管理员密码
+      App__DataRoot: /data                       # keys（首次自动生成）、blobs、derived、tus
+      CloudflareAccess__TeamDomain: https://${CF_ACCESS_TEAM}.cloudflareaccess.com
+      CloudflareAccess__Audience: ${CF_ACCESS_AUD}
+      CloudflareRealtime__AppId: ${CF_REALTIME_APP_ID}           # Realtime → SFU 应用
+      CloudflareRealtime__AppSecret: ${CF_REALTIME_APP_SECRET}
+      CloudflareRealtime__TurnKeyId: ${CF_TURN_KEY_ID}           # Realtime → TURN 密钥
+      CloudflareRealtime__TurnApiToken: ${CF_TURN_KEY_API_TOKEN}
+      WebPush__Subject: mailto:${ADMIN_EMAIL}
+    volumes:
+      - data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: privatechat
+      POSTGRES_USER: privatechat
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U privatechat -d privatechat"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # ---- 可选：RustDesk 自托管（远程控制兜底，需要自己开端口） ----
+  hbbs:
+    image: rustdesk/rustdesk-server:latest
+    profiles: [rustdesk]
+    command: hbbs
+    restart: unless-stopped
+    ports:
+      - "21115:21115"
+      - "21116:21116"
+      - "21116:21116/udp"
+      - "21118:21118"
+    volumes:
+      - rustdesk:/root
+    depends_on:
+      - hbbr
+
+  hbbr:
+    image: rustdesk/rustdesk-server:latest
+    profiles: [rustdesk]
+    command: hbbr
+    restart: unless-stopped
+    ports:
+      - "21117:21117"
+      - "21119:21119"
+    volumes:
+      - rustdesk:/root
+
+volumes:
+  data:
+  pgdata:
+  rustdesk:

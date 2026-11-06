@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PrivateChat.Agent/PrivateChat.Agent.csproj" />
+    <Project Path="src/PrivateChat.Api/PrivateChat.Api.csproj" />
+    <Project Path="src/PrivateChat.Contracts/PrivateChat.Contracts.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PrivateChat.Api.Tests/PrivateChat.Api.Tests.csproj" />
+  </Folder>
+</Solution>

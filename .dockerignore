@@ -1,0 +1,15 @@
+# 构建上下文为仓库根目录（deploy/Dockerfile.api 与 Dockerfile.web）
+.git
+.github
+docs
+**/bin
+**/obj
+**/node_modules
+web/dist
+web/dev-dist
+deploy/.env
+.env
+data
+tests/**/TestResults
+*.md
+!web/**/*.md

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>PrivateChat.Agent</RootNamespace>
+    <UserSecretsId>privatechat-agent</UserSecretsId>
+    <!-- 被控端全部是 Windows：ddagrab 采集 + SendInput 注入，见 docs/DESIGN.md 4.8 -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PrivateChat.Contracts\PrivateChat.Contracts.csproj" />
+  </ItemGroup>
+</Project>

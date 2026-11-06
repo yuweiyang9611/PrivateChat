@@ -1,0 +1,8 @@
+# 统一用 LF 入库，Windows 检出时按 core.autocrlf 处理
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff2 binary

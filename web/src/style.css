@@ -1,0 +1,56 @@
+@import "tailwindcss";
+@import "element-plus/theme-chalk/dark/css-vars.css";
+
+/* 家庭感配色：主色暖橙、底色奶油白；暗色用深棕灰 */
+:root {
+  --pc-primary: #e8873a;
+  --pc-primary-soft: #fbe3cf;
+  --pc-bg: #fdf8f2;
+  --pc-surface: #ffffff;
+  --pc-border: #efe4d8;
+  --pc-text: #2b211a;
+  --pc-text-muted: #8a7a6d;
+  --pc-radius: 12px;
+
+  /* 让 Element Plus 跟随主色 */
+  --el-color-primary: var(--pc-primary);
+  --el-border-radius-base: 8px;
+  color-scheme: light;
+}
+
+html.dark {
+  --pc-primary: #f09a52;
+  --pc-primary-soft: #4a3326;
+  --pc-bg: #1d1916;
+  --pc-surface: #272220;
+  --pc-border: #3a322d;
+  --pc-text: #f3ece5;
+  --pc-text-muted: #a3958a;
+  color-scheme: dark;
+}
+
+/* 长辈模式：全局字号 +25%，触控目标更大 */
+html.elder {
+  font-size: 125%;
+}
+html.elder .el-button {
+  min-height: 56px;
+}
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--pc-bg);
+  color: var(--pc-text);
+  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 通用组件尺寸：触控目标不小于 44px */
+.touch-target {
+  min-width: 44px;
+  min-height: 44px;
+}

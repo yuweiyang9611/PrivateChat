@@ -1,0 +1,60 @@
+// 全部界面文案集中在这里，后续加英文只需新增一个文件
+export default {
+  app: {
+    name: 'PrivateChat',
+    home: '家',
+  },
+  nav: {
+    messages: '消息',
+    calls: '通话',
+    drive: '网盘',
+    moments: '时光',
+    devices: '设备',
+    settings: '设置',
+    family: '家庭',
+    me: '我的',
+  },
+  chat: {
+    search: '搜索消息 / 文件',
+    newGroup: '新建群聊',
+    placeholder: '输入消息…',
+    send: '发送',
+    empty: '选择一个会话开始聊天',
+    noConversations: '还没有会话，邀请家人加入吧',
+    pending: '发送中',
+    failed: '发送失败，点击重试',
+    members: '{n} 人',
+    today: '今天',
+    recalled: '[消息已撤回]',
+  },
+  placeholder: {
+    title: '{name}',
+    note: 'M1+ 实现',
+    desc: '这个页面会在后续里程碑中实现。',
+  },
+  settings: {
+    elderMode: '长辈模式',
+    elderModeDesc: '更大的字号和按钮，只保留消息、通话、时光',
+    darkMode: '暗色模式',
+    profile: '个人资料',
+    notifications: '通知',
+    devices: '我的设备',
+  },
+  login: {
+    subtitle: '局域网直连 / 本地模式登录',
+    account: '用户名或邮箱',
+    password: '密码',
+    submit: '登录',
+    hint: '通过 Cloudflare 访问时无需此页面，身份由 Access 自动识别。',
+  },
+  session: {
+    loading: '正在连接…',
+    reconnecting: '连接已断开，正在重连…',
+    offline: '离线',
+  },
+  common: {
+    retry: '重试',
+    cancel: '取消',
+    confirm: '确定',
+  },
+}
