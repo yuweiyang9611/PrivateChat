@@ -13,9 +13,9 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - run: dotnet restore src/PrivateChat.Api tests/PrivateChat.Api.Tests
-      - run: dotnet build src/PrivateChat.Api -c Release --no-restore
-      - run: dotnet test tests/PrivateChat.Api.Tests -c Release --no-restore
+      - run: dotnet restore tests/PrivateChat.Api.Tests
+      - run: dotnet build tests/PrivateChat.Api.Tests -c Release --no-restore
+      - run: dotnet test tests/PrivateChat.Api.Tests -c Release --no-build
 
   frontend:
     runs-on: ubuntu-latest
