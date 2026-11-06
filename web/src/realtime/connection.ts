@@ -87,7 +87,8 @@ async function sync(): Promise<void> {
 
 function registerHandlers(conn: HubConnection): void {
   conn.on('MessageReceived', (m: MessageDto) => void useMessagesStore().applyIncoming([m]))
-  conn.on('MessageUpdated', (m: MessageDto) => void useMessagesStore().applyIncoming([m]))
+  // 缩略图 / 转码完成也走 MessageUpdated，附件 blob 版本 +1 让 img 重新取图
+  conn.on('MessageUpdated', (m: MessageDto) => void useMessagesStore().applyIncoming([m], { bumpBlobs: true }))
   conn.on('MessageDeleted', (m: MessageDto) => void useMessagesStore().applyIncoming([m]))
   conn.on('ReadReceipt', (e: ReadReceiptEvent) => useConversationsStore().applyReadReceipt(e))
   conn.on('Typing', (e: TypingEvent) => {
@@ -107,12 +108,15 @@ function registerHandlers(conn: HubConnection): void {
   conn.on('Notification', () => { /* M1：站内通知 */ })
 }
 
-export async function sendMessage(dto: {
+export interface SendMessageDto {
   conversationId: string
   clientMessageId: string
   type: MessageDto['type']
   body?: string
-}): Promise<void> {
+  attachments?: { blobId: string; kind: MessageDto['attachments'][number]['kind']; meta: string | null }[]
+}
+
+export async function sendMessage(dto: SendMessageDto): Promise<void> {
   await getConnection().invoke('SendMessage', dto)
 }
 

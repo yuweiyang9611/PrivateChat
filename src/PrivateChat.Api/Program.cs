@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.EntityFrameworkCore;
 using PrivateChat.Api.Domain;
 using PrivateChat.Api.Features.Auth;
+using PrivateChat.Api.Features.Blobs;
 using PrivateChat.Api.Features.Calls;
 using PrivateChat.Api.Features.Chat;
 using PrivateChat.Api.Infrastructure;
@@ -99,6 +100,12 @@ builder.Services.AddHttpClient<CloudflareRealtimeClient>();
 // ---- Features ----
 builder.Services.AddSingleton<PresenceTracker>();
 builder.Services.AddScoped<MessageService>();
+builder.Services.AddSingleton<DerivedStore>();
+builder.Services.AddSingleton<ThumbnailQueue>();
+builder.Services.AddScoped<BlobIngestService>();
+builder.Services.AddScoped<BlobAccessService>();
+builder.Services.AddHostedService<ThumbnailWorker>();
+builder.Services.AddHostedService<TusCleanupService>();
 
 var app = builder.Build();
 
@@ -108,6 +115,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+app.MapUploads();
 app.MapHub<ChatHub>("/hubs/chat");
 app.MapOpenApi("/openapi/{documentName}.json");
 app.MapScalarApiReference("/scalar", o => o.WithOpenApiRoutePattern("/openapi/{documentName}.json"));

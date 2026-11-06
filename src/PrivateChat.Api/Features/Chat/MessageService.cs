@@ -6,7 +6,7 @@ using PrivateChat.Api.Infrastructure;
 namespace PrivateChat.Api.Features.Chat;
 
 /// <summary>消息写入：幂等（sender + clientMessageId）、事务内 last_seq 自增、严格递增 seq。</summary>
-public sealed class MessageService(AppDbContext db)
+public sealed class MessageService(AppDbContext db, PrivateChat.Api.Features.Blobs.BlobAccessService blobAccess)
 {
     public const int SyncLimitPerConversation = 500;
 
@@ -16,6 +16,7 @@ public sealed class MessageService(AppDbContext db)
     public async Task<(Message Message, bool Created)> SendAsync(Guid senderId, SendMessageRequest req, CancellationToken ct)
     {
         if (!await IsMemberAsync(req.ConversationId, senderId, ct)) throw ApiException.Forbidden("不是该会话成员");
+        await ValidateAsync(senderId, req, ct);
 
         var existing = await db.Messages.Include(m => m.Attachments).Include(m => m.Reactions)
             .FirstOrDefaultAsync(m => m.SenderId == senderId && m.ClientMessageId == req.ClientMessageId, ct);
@@ -63,6 +64,29 @@ public sealed class MessageService(AppDbContext db)
             .ExecuteUpdateAsync(s => s.SetProperty(m => m.LastReadSeq, seq), ct);
 
         return (message, true);
+    }
+
+    /// <summary>类型与载荷一致；引用的 blob 必须存在且发送者有权引用（自己上传或本来就能读到）。</summary>
+    private async Task ValidateAsync(Guid senderId, SendMessageRequest req, CancellationToken ct)
+    {
+        var attachments = req.Attachments ?? [];
+        switch (req.Type)
+        {
+            case MessageType.Text when string.IsNullOrWhiteSpace(req.Body):
+                throw ApiException.BadRequest("文字消息不能为空");
+            case MessageType.Text when req.Body!.Length > 10_000:
+                throw ApiException.BadRequest("消息过长");
+            case MessageType.Image or MessageType.Video or MessageType.Audio or MessageType.File when attachments.Count == 0:
+                throw ApiException.BadRequest("附件消息必须带附件");
+            case MessageType.Call or MessageType.System:
+                throw ApiException.BadRequest("该类型由服务端生成");
+        }
+        if (attachments.Count > 9) throw ApiException.BadRequest("一条消息最多 9 个附件");
+        foreach (var a in attachments)
+        {
+            if (a.Meta is { Length: > 4_000 }) throw ApiException.BadRequest("附件元数据过长");
+            if (!await blobAccess.CanReferenceAsync(a.BlobId, senderId, ct)) throw ApiException.Forbidden("无权引用该文件");
+        }
     }
 
     private async Task<long> NextSeqAsync(Guid conversationId, CancellationToken ct)

@@ -26,6 +26,13 @@ export default {
     members: '{n} 人',
     today: '今天',
     recalled: '[消息已撤回]',
+    attach: '发送文件',
+    uploading: '上传中 {p}%',
+    download: '下载',
+    cancelUpload: '取消',
+    tooLarge: '文件超过 {max}，无法发送',
+    tooMany: '一次最多发送 {n} 个文件',
+    dropHint: '松开发送文件',
   },
   placeholder: {
     title: '{name}',
