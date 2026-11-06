@@ -142,6 +142,28 @@ public sealed class MessageService(AppDbContext db, PrivateChat.Api.Features.Blo
         return member.LastReadSeq;
     }
 
+    /// <summary>表情回应开关：已有则取消，没有则添加。emoji 只允许短字符串（≤ 8 个码点）。</summary>
+    public async Task<ReactionsDto> ToggleReactionAsync(Guid messageId, Guid userId, string emoji, CancellationToken ct)
+    {
+        emoji = (emoji ?? "").Trim();
+        if (emoji.Length == 0 || emoji.EnumerateRunes().Count() > 8 || emoji.Any(char.IsWhiteSpace) || emoji.Any(char.IsAsciiLetterOrDigit))
+            throw ApiException.BadRequest("无效的表情");
+        var m = await db.Messages.Include(x => x.Reactions).FirstOrDefaultAsync(x => x.Id == messageId, ct) ?? throw ApiException.NotFound("消息");
+        if (m.DeletedAt is not null) throw ApiException.BadRequest("消息已撤回");
+        if (!await IsMemberAsync(m.ConversationId, userId, ct)) throw ApiException.Forbidden("不是该会话成员");
+
+        var existing = m.Reactions.FirstOrDefault(r => r.UserId == userId && r.Emoji == emoji);
+        if (existing is not null) m.Reactions.Remove(existing);
+        else
+        {
+            // 每人每条最多 3 种回应，免得刷屏
+            if (m.Reactions.Count(r => r.UserId == userId) >= 3) throw ApiException.BadRequest("最多 3 种回应");
+            m.Reactions.Add(new MessageReaction { MessageId = m.Id, UserId = userId, Emoji = emoji });
+        }
+        await db.SaveChangesAsync(ct);
+        return new ReactionsDto(m.Id, m.ConversationId, m.Seq, m.Reactions.Select(r => new ReactionDto(r.UserId, r.Emoji)).ToList());
+    }
+
     /// <summary>撤回：发送者本人 2 分钟内，或 Admin 任意时间。</summary>
     public async Task<Message> RecallAsync(Guid messageId, Guid userId, UserRole role, CancellationToken ct)
     {

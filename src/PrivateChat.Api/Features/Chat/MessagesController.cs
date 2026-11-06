@@ -33,6 +33,15 @@ public sealed class MessagesController(MessageService messages, IHubContext<Chat
         return dto;
     }
 
+    /// <summary>表情回应开关（REST 备用通道，主通道是 ChatHub.React）。</summary>
+    [HttpPost("api/messages/{id:guid}/reactions")]
+    public async Task<ActionResult<ReactionsDto>> React(Guid id, [FromBody] ReactRequest req, CancellationToken ct)
+    {
+        var dto = await messages.ToggleReactionAsync(id, User.UserId(), req.Emoji, ct);
+        await hub.Clients.Group(ChatEvents.ConversationGroup(dto.ConversationId)).SendAsync(ChatEvents.ReactionChanged, dto, ct);
+        return dto;
+    }
+
     /// <summary>撤回。</summary>
     [HttpDelete("api/messages/{id:guid}")]
     public async Task<IActionResult> Recall(Guid id, CancellationToken ct)

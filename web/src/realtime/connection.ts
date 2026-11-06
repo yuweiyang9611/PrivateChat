@@ -5,6 +5,8 @@ import { useMessagesStore } from '@/stores/messages'
 import { useConversationsStore } from '@/stores/conversations'
 import { reloadForAccessLogin } from '@/api/client'
 
+export interface ReactionsEvent { messageId: string; conversationId: string; seq: number; reactions: { userId: string; emoji: string }[] }
+export interface MessageDeletedEvent { messageId: string; conversationId: string; seq: number }
 export interface ReadReceiptEvent { conversationId: string; userId: string; seq: number }
 export interface TypingEvent { conversationId: string; userId: string }
 export interface PresenceEvent { userId: string; online: boolean; lastSeenAt?: string | null }
@@ -89,7 +91,8 @@ function registerHandlers(conn: HubConnection): void {
   conn.on('MessageReceived', (m: MessageDto) => void useMessagesStore().applyIncoming([m]))
   // 缩略图 / 转码完成也走 MessageUpdated，附件 blob 版本 +1 让 img 重新取图
   conn.on('MessageUpdated', (m: MessageDto) => void useMessagesStore().applyIncoming([m], { bumpBlobs: true }))
-  conn.on('MessageDeleted', (m: MessageDto) => void useMessagesStore().applyIncoming([m]))
+  conn.on('MessageDeleted', (e: MessageDeletedEvent) => void useMessagesStore().markDeleted(e))
+  conn.on('ReactionChanged', (e: ReactionsEvent) => void useMessagesStore().applyReactions(e))
   conn.on('ReadReceipt', (e: ReadReceiptEvent) => useConversationsStore().applyReadReceipt(e))
   conn.on('Typing', (e: TypingEvent) => {
     const list = new Set(typing.value[e.conversationId] ?? [])
@@ -118,6 +121,10 @@ export interface SendMessageDto {
 
 export async function sendMessage(dto: SendMessageDto): Promise<void> {
   await getConnection().invoke('SendMessage', dto)
+}
+
+export async function react(messageId: string, emoji: string): Promise<ReactionsEvent> {
+  return await getConnection().invoke<ReactionsEvent>('React', messageId, emoji)
 }
 
 export async function markRead(conversationId: string, seq: number): Promise<void> {

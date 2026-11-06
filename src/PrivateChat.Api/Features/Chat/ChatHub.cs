@@ -106,6 +106,13 @@ public sealed class ChatHub(AppDbContext db, MessageService messages, PresenceTr
             .SendAsync(ChatEvents.Typing, new TypingDto(conversationId, userId));
     }
 
+    public async Task<ReactionsDto> React(Guid messageId, string emoji)
+    {
+        var dto = await messages.ToggleReactionAsync(messageId, Context.User!.UserId(), emoji, Context.ConnectionAborted);
+        await Clients.Group(ChatEvents.ConversationGroup(dto.ConversationId)).SendAsync(ChatEvents.ReactionChanged, dto);
+        return dto;
+    }
+
     public async Task MarkRead(Guid conversationId, long seq)
     {
         var userId = Context.User!.UserId();

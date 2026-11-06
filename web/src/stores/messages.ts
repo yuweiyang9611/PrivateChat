@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api, type MessageDto } from '@/api/client'
 import { db, type AttachmentMeta, type LocalMessage } from '@/db'
-import { markRead, sendMessage } from '@/realtime/connection'
+import { markRead, react, sendMessage, type MessageDeletedEvent, type ReactionsEvent } from '@/realtime/connection'
 import { imageSize, kindOf, uploadFile, type UploadHandle } from '@/upload'
 import { useConversationsStore } from './conversations'
 import { useSessionStore } from './session'
@@ -226,5 +226,54 @@ export const useMessagesStore = defineStore('messages', () => {
     }
   }
 
-  return { byConversation, blobVersion, list, lastSeqs, load, applyIncoming, sendText, sendFiles, sendVoice, retry, cancel, read }
+  function find(conversationId: string, messageId: string): LocalMessage | undefined {
+    return list(conversationId).find((m) => m.id === messageId)
+  }
+
+  /** 乐观切换：先改本地，再发 Hub；失败回滚。服务端的 ReactionChanged 会再校正一次 */
+  async function toggleReaction(conversationId: string, messageId: string, emoji: string): Promise<void> {
+    const m = find(conversationId, messageId)
+    const me = useSessionStore().user?.id ?? ''
+    if (!m || !me) return
+    const before = m.reactions
+    const idx = before.findIndex((r) => r.userId === me && r.emoji === emoji)
+    m.reactions = idx >= 0 ? before.filter((_, i) => i !== idx) : [...before, { userId: me, emoji }]
+    try {
+      await react(messageId, emoji)
+    } catch {
+      m.reactions = before
+    }
+  }
+
+  async function applyReactions(e: ReactionsEvent): Promise<void> {
+    const m = find(e.conversationId, e.messageId)
+    if (!m) return
+    m.reactions = e.reactions
+    await db.messages.update(m.id, { reactions: e.reactions })
+  }
+
+  async function markDeleted(e: MessageDeletedEvent): Promise<void> {
+    const m = find(e.conversationId, e.messageId)
+    if (!m) return
+    m.deleted = true
+    m.body = null
+    m.payload = null
+    m.attachments = []
+    await db.messages.update(m.id, { deleted: true, body: null, payload: null, attachments: [] })
+    const conversations = useConversationsStore()
+    const c = conversations.byId(e.conversationId)
+    if (c && c.lastSeq === e.seq) c.lastMessagePreview = previewOf(m)
+  }
+
+  /** 撤回：服务端会向会话广播 MessageDeleted（含自己），这里只处理失败 */
+  async function recall(conversationId: string, messageId: string): Promise<boolean> {
+    const { response } = await api.DELETE('/api/messages/{id}', { params: { path: { id: messageId } } })
+    if (response.ok) await markDeleted({ conversationId, messageId, seq: find(conversationId, messageId)?.seq ?? 0 })
+    return response.ok
+  }
+
+  return {
+    byConversation, blobVersion, list, lastSeqs, load, applyIncoming, sendText, sendFiles, sendVoice, retry, cancel, read,
+    toggleReaction, applyReactions, markDeleted, recall,
+  }
 })

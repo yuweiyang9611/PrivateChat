@@ -425,6 +425,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/messages/{id}/reactions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ReactRequest"];
+                    "text/json": components["schemas"]["ReactRequest"];
+                    "application/*+json": components["schemas"]["ReactRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["ReactionsDto"];
+                        "application/json": components["schemas"]["ReactionsDto"];
+                        "text/json": components["schemas"]["ReactionsDto"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/messages/{id}": {
         parameters: {
             query?: never;
@@ -1385,6 +1430,18 @@ export interface components {
         ReactionDto: {
             /** Format: uuid */
             userId: string;
+            emoji: string;
+        };
+        ReactionsDto: {
+            /** Format: uuid */
+            messageId: string;
+            /** Format: uuid */
+            conversationId: string;
+            /** Format: int64 */
+            seq: number;
+            reactions: components["schemas"]["ReactionDto"][];
+        };
+        ReactRequest: {
             emoji: string;
         };
         RenegotiateApiRequest: {

@@ -30,6 +30,10 @@ public sealed record MessageDto(
         m.Reactions.Select(r => new ReactionDto(r.UserId, r.Emoji)).ToList());
 }
 
+public sealed record ReactRequest(string Emoji);
+/// <summary>ReactionChanged 事件与 POST reactions 的返回：该消息当前全部回应。</summary>
+public sealed record ReactionsDto(Guid MessageId, Guid ConversationId, long Seq, List<ReactionDto> Reactions);
+
 public sealed record ReadReceiptDto(Guid ConversationId, Guid UserId, long Seq);
 public sealed record TypingDto(Guid ConversationId, Guid UserId);
 public sealed record SyncResultDto(Dictionary<Guid, List<MessageDto>> Messages, List<Guid> NeedFullReload);

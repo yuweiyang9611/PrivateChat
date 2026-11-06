@@ -54,3 +54,9 @@ body {
   min-width: 44px;
   min-height: 44px;
 }
+
+/* 消息操作菜单 */
+.pc-actions.el-popover.el-popper {
+  padding: 8px;
+  border-radius: 14px;
+}
