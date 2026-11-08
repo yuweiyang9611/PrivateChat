@@ -31,6 +31,12 @@ const thumbUrl = computed(() =>
 const fullUrl = computed(() => (pending.value ? '' : blobUrl(att.value!.blobId, { v: 'thumb-1280', r: version.value })))
 const originalUrl = computed(() => (pending.value ? props.message.localUrl ?? '' : blobUrl(att.value!.blobId, { name: meta.value.name })))
 /** 语音统一请求转码后的 m4a；没生成时服务端回退原件（录制端浏览器本来就能放） */
+/**
+ * 视频：播放 720p 转码版（没转 / 不需要转时服务端回退原件，带上文件名，浏览器自带的"下载"仍是原名），封面用抽帧缩略图。
+ * 播放地址不带版本号：转码完成时换 src 会把正在播的视频打断；回退原件是 no-store，下次加载自然拿到转码版。
+ */
+const videoUrl = computed(() => (pending.value ? props.message.localUrl ?? '' : blobUrl(att.value!.blobId, { v: 'play-720p', name: meta.value.name })))
+const posterUrl = computed(() => (pending.value ? undefined : blobUrl(att.value!.blobId, { v: 'thumb-1280', r: version.value })))
 const audioUrl = computed(() => (pending.value ? props.message.localUrl ?? '' : blobUrl(att.value!.blobId, { v: 'audio-m4a', r: version.value })))
 const downloadUrl = computed(() => (pending.value ? '' : blobUrl(att.value!.blobId, { name: meta.value.name, download: true })))
 const percent = computed(() => Math.round((props.message.uploadProgress ?? 0) * 100))
@@ -61,10 +67,10 @@ const overlayLabel = computed(() => {
       />
     </div>
 
-    <!-- 视频：M1 先直接播原件，转码 720p 等 ffmpeg 接入 -->
+    <!-- 视频 -->
     <div v-else-if="att.kind === 'Video'" class="overflow-hidden rounded-lg" style="width: 260px; background: #000">
       <video v-if="pending" :src="originalUrl" muted playsinline class="block max-h-[320px] w-full" />
-      <video v-else :src="originalUrl" controls preload="metadata" playsinline class="block max-h-[320px] w-full" />
+      <video v-else :src="videoUrl" :poster="posterUrl" controls preload="metadata" playsinline class="block max-h-[320px] w-full" />
     </div>
 
     <!-- 语音 / 音频 -->

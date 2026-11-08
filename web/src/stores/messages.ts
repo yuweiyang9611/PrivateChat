@@ -255,6 +255,21 @@ export const useMessagesStore = defineStore('messages', () => {
     }
   }
 
+  /**
+   * MessageUpdated（缩略图 / 转码完成，也包括服务器启动时给存量媒体补处理）：只刷新已经有的消息，绝不插入。
+   * 广播的可能是很久以前的消息，插进当前列表会让翻页以它为界、跳过中间的历史。
+   * 附件 blob 版本照样 +1，让还开着的 img 重新取图。
+   */
+  async function applyUpdated(m: MessageDto): Promise<void> {
+    for (const a of m.attachments) blobVersion.value[a.blobId] = (blobVersion.value[a.blobId] ?? 0) + 1
+    const msgs = byConversation.value[m.conversationId]
+    const idx = msgs ? msgs.findIndex((x) => x.id === m.id) : -1
+    if (msgs && idx >= 0) msgs[idx] = { ...m, status: 'sent' }
+    // update 对不存在的主键什么也不做：只刷新缓存里本来就有的
+    const { id: _id, ...changes } = m
+    await db.messages.update(m.id, { ...changes, status: 'sent' }).catch(() => undefined)
+  }
+
   async function refreshOutboxCount(): Promise<void> {
     try {
       const rows = await db.outbox.toCollection().primaryKeys()
@@ -525,6 +540,12 @@ export const useMessagesStore = defineStore('messages', () => {
     if (!m) return true
     const att = m.attachments[0]
     if (att && !att.blobId && !pendingFiles.has(clientMessageId)) return false
+    // 已上传但没发出去、原文件还在：重新走一遍上传。秒传会重新登记持有凭证；
+    // 隔了很久、blob 已被垃圾回收的话就真的重新上传，不会一直拿着失效的 blobId 失败下去
+    if (att?.blobId && pendingFiles.has(clientMessageId)) {
+      att.blobId = ''
+      m.uploadProgress = 0
+    }
     m.status = 'pending'
     await persist(m).catch(() => undefined)
     void flushOutbox()
@@ -631,7 +652,7 @@ export const useMessagesStore = defineStore('messages', () => {
 
   return {
     byConversation, blobVersion, hasMore, loadingOlder, outboxCount,
-    list, lastSeqs, load, loadOlder, applyIncoming,
+    list, lastSeqs, load, loadOlder, applyIncoming, applyUpdated,
     sendText, sendFiles, sendVoice, retry, cancel, restoreOutbox, flushOutbox,
     read, flushPendingReads, toggleReaction, applyReactions, markDeleted, recall,
   }

@@ -18,6 +18,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<MessageReaction> MessageReactions => Set<MessageReaction>();
 
     public DbSet<Blob> Blobs => Set<Blob>();
+    public DbSet<BlobClaim> BlobClaims => Set<BlobClaim>();
     public DbSet<DerivedBlob> DerivedBlobs => Set<DerivedBlob>();
     public DbSet<Space> Spaces => Set<Space>();
     public DbSet<DriveNode> DriveNodes => Set<DriveNode>();
@@ -75,10 +76,25 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             e.HasMany(x => x.Reactions).WithOne().HasForeignKey(x => x.MessageId);
             // TODO: 迁移里追加 pg_trgm 扩展与 body 的 GIN 索引（gin_trgm_ops）
         });
-        b.Entity<MessageAttachment>(e => e.Property(x => x.Meta).HasColumnType("jsonb"));
+        b.Entity<MessageAttachment>(e =>
+        {
+            e.Property(x => x.Meta).HasColumnType("jsonb");
+            e.HasIndex(x => x.BlobId);
+        });
         b.Entity<MessageReaction>(e => e.HasKey(x => new { x.MessageId, x.UserId, x.Emoji }));
 
-        b.Entity<Blob>(e => e.HasIndex(x => x.Sha256).IsUnique());
+        b.Entity<Blob>(e =>
+        {
+            e.HasIndex(x => x.Sha256).IsUnique();
+            e.HasIndex(x => x.MediaProbedAt);
+        });
+        b.Entity<BlobClaim>(e =>
+        {
+            e.HasKey(x => new { x.BlobId, x.UserId });
+            e.HasIndex(x => x.UserId);
+        });
+        // 每人一个个人空间、全家一个家庭空间（家庭空间 owner 为空，NULLS NOT DISTINCT 保证只有一个）
+        b.Entity<Space>(e => e.HasIndex(x => new { x.Type, x.OwnerUserId }).IsUnique().AreNullsDistinct(false));
         b.Entity<DerivedBlob>(e =>
         {
             e.HasIndex(x => new { x.BlobId, x.Variant }).IsUnique();
@@ -87,7 +103,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<DriveNode>(e =>
         {
             e.HasIndex(x => new { x.SpaceId, x.ParentId });
-            e.HasIndex(x => new { x.ParentId, x.Name }).IsUnique().HasFilter("deleted_at IS NULL");
+            // 同一目录下（含空间根目录，parent 为空）不能重名；回收站里的不算
+            e.HasIndex(x => new { x.SpaceId, x.ParentId, x.Name }).IsUnique().HasFilter("deleted_at IS NULL").AreNullsDistinct(false);
+            e.HasIndex(x => x.BlobId);
+            e.HasIndex(x => x.TrashRootId);
         });
         b.Entity<NodeShare>(e =>
         {

@@ -56,7 +56,8 @@ public static class TusUploads
                     OnFileCompleteAsync = OnFileCompleteAsync,
                 },
             }))
-            .RequireAuthorization(AuthPolicies.Member);
+            // 写入权限在登记成网盘文件 / 发消息时判定；这里只要求已登录（孩子账号也能发照片）
+            .RequireAuthorization();
     }
 
     private static async Task OnFileCompleteAsync(FileCompleteContext ctx)

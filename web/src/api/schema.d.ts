@@ -290,6 +290,675 @@ export interface paths {
         };
         trace?: never;
     };
+    "/api/drive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["DriveOverviewDto"];
+                        "application/json": components["schemas"]["DriveOverviewDto"];
+                        "text/json": components["schemas"]["DriveOverviewDto"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/drive/spaces/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PatchSpaceRequest"];
+                    "text/json": components["schemas"]["PatchSpaceRequest"];
+                    "application/*+json": components["schemas"]["PatchSpaceRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["SpaceDto"];
+                        "application/json": components["schemas"]["SpaceDto"];
+                        "text/json": components["schemas"]["SpaceDto"];
+                    };
+                };
+            };
+        };
+        trace?: never;
+    };
+    "/api/drive/list": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    spaceId?: string;
+                    folderId?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["ListingDto"];
+                        "application/json": components["schemas"]["ListingDto"];
+                        "text/json": components["schemas"]["ListingDto"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/drive/spaces/{id}/folders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["FolderRefDto"][];
+                        "application/json": components["schemas"]["FolderRefDto"][];
+                        "text/json": components["schemas"]["FolderRefDto"][];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/drive/folders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateFolderRequest"];
+                    "text/json": components["schemas"]["CreateFolderRequest"];
+                    "application/*+json": components["schemas"]["CreateFolderRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["NodeDto"];
+                        "application/json": components["schemas"]["NodeDto"];
+                        "text/json": components["schemas"]["NodeDto"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/drive/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateFileRequest"];
+                    "text/json": components["schemas"]["CreateFileRequest"];
+                    "application/*+json": components["schemas"]["CreateFileRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["NodeDto"];
+                        "application/json": components["schemas"]["NodeDto"];
+                        "text/json": components["schemas"]["NodeDto"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/drive/nodes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PatchNodeRequest"];
+                    "text/json": components["schemas"]["PatchNodeRequest"];
+                    "application/*+json": components["schemas"]["PatchNodeRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["NodeDto"];
+                        "application/json": components["schemas"]["NodeDto"];
+                        "text/json": components["schemas"]["NodeDto"];
+                    };
+                };
+            };
+        };
+        trace?: never;
+    };
+    "/api/drive/trash": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["TrashItemDto"][];
+                        "application/json": components["schemas"]["TrashItemDto"][];
+                        "text/json": components["schemas"]["TrashItemDto"][];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": number;
+                        "application/json": number;
+                        "text/json": number;
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/drive/trash/{id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["NodeDto"];
+                        "application/json": components["schemas"]["NodeDto"];
+                        "text/json": components["schemas"]["NodeDto"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/drive/trash/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/drive/shared-with-me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["SharedNodeDto"][];
+                        "application/json": components["schemas"]["SharedNodeDto"][];
+                        "text/json": components["schemas"]["SharedNodeDto"][];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/drive/nodes/{id}/shares": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["ShareDto"][];
+                        "application/json": components["schemas"]["ShareDto"][];
+                        "text/json": components["schemas"]["ShareDto"][];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateShareRequest"];
+                    "text/json": components["schemas"]["CreateShareRequest"];
+                    "application/*+json": components["schemas"]["CreateShareRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["ShareDto"];
+                        "application/json": components["schemas"]["ShareDto"];
+                        "text/json": components["schemas"]["ShareDto"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/drive/shares/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/drive/nodes/{id}/send": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SendToChatRequest"];
+                    "text/json": components["schemas"]["SendToChatRequest"];
+                    "application/*+json": components["schemas"]["SendToChatRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["MessageDto"];
+                        "application/json": components["schemas"]["MessageDto"];
+                        "text/json": components["schemas"]["MessageDto"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/drive/gallery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    before?: string;
+                    beforeId?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["GalleryPageDto"];
+                        "application/json": components["schemas"]["GalleryPageDto"];
+                        "text/json": components["schemas"]["GalleryPageDto"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/conversations": {
         parameters: {
             query?: never;
@@ -1270,6 +1939,23 @@ export interface components {
             title: null | string;
             memberIds: string[];
         };
+        CreateFileRequest: {
+            /** Format: uuid */
+            spaceId: string;
+            /** Format: uuid */
+            parentId: null | string;
+            /** Format: uuid */
+            blobId: string;
+            name: string;
+            onConflict?: components["schemas"]["NameConflict"];
+        };
+        CreateFolderRequest: {
+            /** Format: uuid */
+            spaceId: string;
+            /** Format: uuid */
+            parentId: null | string;
+            name: string;
+        };
         CreateInviteRequest: {
             email: string;
             role?: components["schemas"]["UserRole"];
@@ -1278,6 +1964,16 @@ export interface components {
              * @default 30
              */
             expiresInDays: number;
+        };
+        CreateShareRequest: {
+            /** Format: uuid */
+            granteeUserId: null | string;
+            permission?: components["schemas"]["SharePermission"];
+            /** @default false */
+            link: boolean;
+            password?: null | string;
+            /** Format: int32 */
+            expiresInDays?: null | number;
         };
         DeviceCodeResponse: {
             code: string;
@@ -1295,6 +1991,50 @@ export interface components {
             deviceToken: null | string;
             /** Format: uuid */
             deviceId: null | string;
+        };
+        DriveOverviewDto: {
+            spaces: components["schemas"]["SpaceDto"][];
+            /** Format: int64 */
+            diskTotalBytes: number;
+            /** Format: int64 */
+            diskFreeBytes: number;
+        };
+        /** @enum {unknown} */
+        DrivePermission: "None" | "Read" | "Write" | "Owner";
+        FolderRefDto: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            parentId: null | string;
+            name: string;
+        };
+        GalleryItemDto: {
+            /** Format: uuid */
+            blobId: string;
+            mime: string;
+            /** Format: date-time */
+            sortAt: string;
+            /** Format: date-time */
+            takenAt: null | string;
+            /** Format: int32 */
+            width: null | number;
+            /** Format: int32 */
+            height: null | number;
+            /** Format: double */
+            durationSeconds: null | number;
+            source: string;
+            /** Format: uuid */
+            sourceId: string;
+            /** Format: uuid */
+            contextId: string;
+            name: null | string;
+        };
+        GalleryPageDto: {
+            items: components["schemas"]["GalleryItemDto"][];
+            /** Format: date-time */
+            nextBefore: null | string;
+            /** Format: uuid */
+            nextBeforeId: null | string;
         };
         IceServers: {
             urls: string[];
@@ -1317,6 +2057,13 @@ export interface components {
             cfSessionId: string;
             iceServers: components["schemas"]["IceServers"];
             call: components["schemas"]["CallDto"];
+        };
+        ListingDto: {
+            space: components["schemas"]["SpaceDto"];
+            folder: null | components["schemas"]["NodeDto"];
+            path: components["schemas"]["NodeDto"][];
+            permission: components["schemas"]["DrivePermission"];
+            items: components["schemas"]["NodeDto"][];
         };
         LocalLoginRequest: {
             usernameOrEmail: string;
@@ -1362,6 +2109,47 @@ export interface components {
         };
         /** @enum {unknown} */
         MessageType: "Text" | "Image" | "Video" | "Audio" | "File" | "Sticker" | "Call" | "System";
+        MoveTarget: {
+            /** Format: uuid */
+            spaceId: string;
+            /** Format: uuid */
+            parentId: null | string;
+        };
+        /**
+         * @default Rename
+         * @enum {unknown}
+         */
+        NameConflict: "Rename" | "Replace";
+        NodeDto: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            spaceId: string;
+            /** Format: uuid */
+            parentId: null | string;
+            name: string;
+            isFolder: boolean;
+            /** Format: uuid */
+            blobId: null | string;
+            /** Format: int64 */
+            size: number;
+            mime: null | string;
+            /** Format: uuid */
+            createdBy: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+            hasShares: boolean;
+            /** Format: int32 */
+            width: null | number;
+            /** Format: int32 */
+            height: null | number;
+            /** Format: double */
+            durationSeconds: null | number;
+            /** Format: date-time */
+            takenAt: null | string;
+        };
         ParticipantDto: {
             /** Format: uuid */
             id: string;
@@ -1375,6 +2163,16 @@ export interface components {
             role: null | components["schemas"]["UserRole"];
             elderMode: null | boolean;
             disabled: null | boolean;
+        };
+        PatchNodeRequest: {
+            name: null | string;
+            moveTo: null | components["schemas"]["MoveTarget"];
+        };
+        PatchSpaceRequest: {
+            /** Format: int64 */
+            quotaBytes: null | number;
+            clearQuota: null | boolean;
+            childReadOnly: null | boolean;
         };
         PrecheckRequest: {
             sha256: string;
@@ -1459,10 +2257,60 @@ export interface components {
             replyToId?: null | string;
             attachments?: null | components["schemas"]["AttachmentInput"][];
         };
+        SendToChatRequest: {
+            /** Format: uuid */
+            conversationId: string;
+            /** Format: uuid */
+            clientMessageId: string;
+        };
         SessionDescription: {
             type: string;
             sdp: string;
         };
+        SharedNodeDto: {
+            node: components["schemas"]["NodeDto"];
+            /** Format: uuid */
+            ownerUserId: string;
+            ownerName: string;
+            permission: components["schemas"]["SharePermission"];
+            /** Format: date-time */
+            expiresAt: null | string;
+        };
+        ShareDto: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            nodeId: string;
+            /** Format: uuid */
+            granteeUserId: null | string;
+            granteeName: null | string;
+            permission: components["schemas"]["SharePermission"];
+            isLink: boolean;
+            url: null | string;
+            hasPassword: boolean;
+            /** Format: date-time */
+            expiresAt: null | string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        /** @enum {unknown} */
+        SharePermission: "Read" | "Write";
+        SpaceDto: {
+            /** Format: uuid */
+            id: string;
+            type: components["schemas"]["SpaceType"];
+            name: string;
+            /** Format: uuid */
+            ownerUserId: null | string;
+            /** Format: int64 */
+            usedBytes: number;
+            /** Format: int64 */
+            quotaBytes: null | number;
+            permission: components["schemas"]["DrivePermission"];
+            childReadOnly: boolean;
+        };
+        /** @enum {unknown} */
+        SpaceType: "Personal" | "Family";
         TrackDto: {
             trackName: string;
             kind: components["schemas"]["TrackKind"];
@@ -1482,6 +2330,18 @@ export interface components {
             tracks: null | components["schemas"]["TrackResult"][];
             errorCode: null | string;
             errorDescription: null | string;
+        };
+        TrashItemDto: {
+            node: components["schemas"]["NodeDto"];
+            /** Format: date-time */
+            deletedAt: string;
+            /** Format: uuid */
+            deletedBy: null | string;
+            spaceName: string;
+            /** Format: int64 */
+            totalBytes: number;
+            /** Format: int32 */
+            itemCount: number;
         };
         UserDto: {
             /** Format: uuid */

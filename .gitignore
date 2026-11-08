@@ -32,3 +32,6 @@ Thumbs.db
 
 # 日志
 *.log
+
+# e2e 生成的截图
+web/e2e/fixtures/*.png

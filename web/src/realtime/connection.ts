@@ -4,6 +4,7 @@ import { fetchMe, handleAuthLoss, reauthenticate, type MessageDto } from '@/api/
 import { isOnline, onOnline } from '@/net/online'
 import { useMessagesStore } from '@/stores/messages'
 import { useConversationsStore } from '@/stores/conversations'
+import { useDriveStore } from '@/stores/drive'
 
 export interface ReactionsEvent { messageId: string; conversationId: string; seq: number; reactions: { userId: string; emoji: string }[] }
 export interface MessageDeletedEvent { messageId: string; conversationId: string; seq: number }
@@ -140,6 +141,8 @@ async function onConnected(): Promise<void> {
   }
   void messages.flushOutbox()
   void messages.flushPendingReads()
+  // 服务器重启 / 隧道恢复后网盘的出错、离线状态也要恢复（没打开过网盘时什么也不做）
+  useDriveStore().resync()
 }
 
 if (typeof window !== 'undefined') {
@@ -169,8 +172,8 @@ async function sync(): Promise<void> {
 
 function registerHandlers(conn: HubConnection): void {
   conn.on('MessageReceived', (m: MessageDto) => void useMessagesStore().applyIncoming([m]))
-  // 缩略图 / 转码完成也走 MessageUpdated，附件 blob 版本 +1 让 img 重新取图
-  conn.on('MessageUpdated', (m: MessageDto) => void useMessagesStore().applyIncoming([m], { bumpBlobs: true }))
+  // 缩略图 / 转码完成走 MessageUpdated：只刷新已有的消息，附件 blob 版本 +1 让 img 重新取图
+  conn.on('MessageUpdated', (m: MessageDto) => void useMessagesStore().applyUpdated(m))
   conn.on('MessageDeleted', (e: MessageDeletedEvent) => void useMessagesStore().markDeleted(e))
   conn.on('ReactionChanged', (e: ReactionsEvent) => void useMessagesStore().applyReactions(e))
   conn.on('ReadReceipt', (e: ReadReceiptEvent) => useConversationsStore().applyReadReceipt(e))
@@ -186,6 +189,7 @@ function registerHandlers(conn: HubConnection): void {
   })
   conn.on('Presence', (e: PresenceEvent) => { presence.value = { ...presence.value, [e.userId]: e } })
   conn.on('ConversationUpdated', () => void useConversationsStore().load())
+  conn.on('DriveChanged', (e: { spaceId: string; parentId?: string | null }) => useDriveStore().onChanged(e))
   conn.on('IncomingCall', (e: IncomingCallEvent) => { incomingCall.value = e })
   conn.on('CallUpdated', () => { /* M3：通话状态 */ })
   conn.on('Notification', () => { /* M1：站内通知 */ })

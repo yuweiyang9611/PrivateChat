@@ -11,7 +11,7 @@
     "gen:api": "openapi-typescript http://localhost:8080/openapi/v1.json -o src/api/schema.d.ts",
     "gen:icons": "pwa-assets-generator",
     "test": "vitest run",
-    "e2e": "node e2e/pwa-offline.cjs && node e2e/pwa-session.cjs"
+    "e2e": "node e2e/pwa-offline.cjs && node e2e/pwa-session.cjs && node e2e/drive.cjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

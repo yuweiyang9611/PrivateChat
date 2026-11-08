@@ -16,8 +16,26 @@ public static class Variants
     public static readonly string[] All = [Thumb320, Thumb1280, Poster, Play720, AudioM4a];
 }
 
+/** 每种内容要生成哪些派生产物。 */
+public static class DerivedPlan
+{
+    public static List<string> For(string mime)
+    {
+        var v = new List<string>();
+        if (MimeRules.IsImage(mime) || MimeRules.IsVideo(mime)) v.AddRange([Variants.Thumb320, Variants.Thumb1280]);
+        // 视频是否需要转码要先探测编码才知道；先登记，探测后不需要就删掉这一行
+        if (MimeRules.IsVideo(mime)) v.Add(Variants.Play720);
+        if (MimeRules.NeedsAudioTranscode(mime)) v.Add(Variants.AudioM4a);
+        return v;
+    }
+
+    public static bool NeedsProbe(string mime) => MimeRules.IsImage(mime) || MimeRules.IsVideo(mime);
+}
+
 public static class MimeRules
 {
+    public static bool IsVideo(string mime) => mime.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>可以 inline 展示的类型；其它一律 attachment + nosniff，防止上传 HTML 之类的内容在同源下执行。</summary>
     public static bool IsInlineSafe(string mime) =>
         mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase) && !mime.Equals("image/svg+xml", StringComparison.OrdinalIgnoreCase)

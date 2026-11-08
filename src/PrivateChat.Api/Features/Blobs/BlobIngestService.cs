@@ -35,6 +35,8 @@ public sealed class BlobIngestService(AppDbContext db, IBlobStore store, MediaQu
         if (existing is not null)
         {
             File.Delete(tempPath);
+            // 别人先传过同样的内容：这个人完整上传过一遍，同样算持有
+            await BlobAccessService.ClaimAsync(db, existing.Id, userId, ct);
             return new IngestResult(existing, false);
         }
 
@@ -59,24 +61,29 @@ public sealed class BlobIngestService(AppDbContext db, IBlobStore store, MediaQu
             // 两个人同时上传同一文件：唯一索引冲突，用先落库的那条
             db.ChangeTracker.Clear();
             var winner = await db.Blobs.FirstAsync(b => b.Sha256 == sha, ct);
+            await BlobAccessService.ClaimAsync(db, winner.Id, userId, ct);
             return new IngestResult(winner, false);
         }
 
+        await BlobAccessService.ClaimAsync(db, blob.Id, userId, ct);
         await EnqueueDerivedAsync(blob, ct);
         logger.LogInformation("Blob 入库 {BlobId} {Mime} {Size}B by {UserId}", blob.Id, blob.Mime, blob.Size, userId);
         return new IngestResult(blob, true);
     }
 
-    /// <summary>图片：两档缩略图；音频（除已是 AAC / MP3 的）：转 m4a。视频转码留到 M2。</summary>
+    /// <summary>
+    /// 派生产物：图片两档缩略图；视频封面缩略图 + 必要时转 720p；音频（除已是 AAC / MP3 的）转 m4a。
+    /// 图片 / 视频另有媒体信息探测（拍摄时间、尺寸、时长），由 MediaWorker 按 media_probed_at 补做。
+    /// </summary>
     private async Task EnqueueDerivedAsync(Blob blob, CancellationToken ct)
     {
-        var variants = new List<string>();
-        if (MimeRules.IsImage(blob.Mime)) variants.AddRange([Variants.Thumb320, Variants.Thumb1280]);
-        if (MimeRules.NeedsAudioTranscode(blob.Mime)) variants.Add(Variants.AudioM4a);
-        if (variants.Count == 0) return;
-        db.DerivedBlobs.AddRange(variants.Select(v => new DerivedBlob { BlobId = blob.Id, Variant = v }));
-        await db.SaveChangesAsync(ct);
-        media.Enqueue(blob.Id);
+        var variants = DerivedPlan.For(blob.Mime);
+        if (variants.Count > 0)
+        {
+            db.DerivedBlobs.AddRange(variants.Select(v => new DerivedBlob { BlobId = blob.Id, Variant = v }));
+            await db.SaveChangesAsync(ct);
+        }
+        if (variants.Count > 0 || DerivedPlan.NeedsProbe(blob.Mime)) media.Enqueue(blob.Id);
     }
 
     public static async Task<string> Sha256HexAsync(Stream stream, CancellationToken ct)

@@ -316,6 +316,28 @@ describe('发件箱：附件', () => {
     expect(ctl.uploads).toHaveLength(1)
   })
 
+  it('已上传但发送被拒：重试时原文件还在就重新上传（blob 可能已被回收），拿到新 blobId 再发', async () => {
+    const { store, db } = await boot()
+    ctl.connected = true
+    ctl.sendBehaviour = ['reject']
+    await store.sendFiles(CID, [new File(['x'], 'd.jpg', { type: 'image/jpeg' })])
+    await settle()
+    ctl.uploads[0]!.resolve('blob-old')
+    await vi.waitFor(() => expect(store.list(CID)[0]!.status).toBe('failed'))
+
+    const m = store.list(CID)[0]!
+    expect(await store.retry(CID, m.clientMessageId)).toBe(true)
+    await settle()
+    expect(ctl.uploads).toHaveLength(2)
+    expect((await db.outbox.get(m.clientMessageId))!.message.attachments[0]!.blobId).toBe('')
+
+    ctl.uploads[1]!.resolve('blob-new')
+    await vi.waitFor(() => expect(ctl.sent).toHaveLength(2))
+    expect(ctl.sent[1]).toMatchObject({ attachments: [{ blobId: 'blob-new' }] })
+    await settle()
+    expect(store.list(CID)[0]!.status).toBe('sent')
+  })
+
   it('网络类上传失败继续排队；连着服务器时被明确拒绝才算失败', async () => {
     const { store } = await boot()
     ctl.connected = true
@@ -503,5 +525,29 @@ describe('发件箱：容错', () => {
     } finally {
       delete (navigator as { locks?: unknown }).locks
     }
+  })
+})
+
+describe('MessageUpdated（缩略图 / 转码完成）', () => {
+  it('只刷新已有的消息：不认识的旧消息不插进列表、不写进缓存，但 blob 版本照样 +1', async () => {
+    const { store, db } = await boot()
+    const old = { ...echo({ conversationId: CID, clientMessageId: 'old', type: 'Image', attachments: [{ blobId: 'b-old', kind: 'Image', meta: null }] }), senderId: 'someone-else', seq: 3 }
+    await store.applyUpdated(old as never)
+    expect(store.list(CID)).toHaveLength(0)
+    expect(await db.messages.get(old.id)).toBeUndefined()
+    expect(store.blobVersion['b-old']).toBe(1)
+  })
+
+  it('已有的消息原地替换，缓存里的也更新', async () => {
+    const { store, db } = await boot()
+    const m = { ...echo({ conversationId: CID, clientMessageId: 'm1', type: 'Video', attachments: [{ blobId: 'b-v', kind: 'Video', meta: '{"name":"a.mp4"}' }] }), senderId: 'someone-else' }
+    await store.applyIncoming([m as never])
+    const updated = { ...m, attachments: [{ ...m.attachments[0]!, meta: '{"name":"a.mp4","duration":3}' }] }
+    await store.applyUpdated(updated as never)
+    expect(store.list(CID)).toHaveLength(1)
+    expect(store.list(CID)[0]!.attachments[0]!.meta).toContain('duration')
+    expect((await db.messages.get(m.id))!.attachments[0]!.meta).toContain('duration')
+    expect((await db.messages.get(m.id))!.status).toBe('sent')
+    expect(store.blobVersion['b-v']).toBe(1)
   })
 })

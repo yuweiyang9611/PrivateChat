@@ -45,7 +45,11 @@ export function imageSize(file: File): Promise<ImageSize | null> {
 export interface UploadHandle {
   /** 返回 blobId */
   done: Promise<string>
+  /** 取消并删除服务器上的半截文件 */
   abort: () => Promise<void>
+  /** 暂停（服务器保留已传部分）/ 继续（从断点续传） */
+  pause: () => void
+  resume: () => void
 }
 
 export interface UploadOptions {
@@ -63,6 +67,12 @@ export interface UploadOptions {
 export function uploadFile(file: File, opts: UploadOptions = {}): UploadHandle {
   let upload: tus.Upload | null = null
   let aborted = false
+  let paused = false
+  /** tus 对象建好、续传信息也查过了，才允许 start */
+  let ready = false
+  const startIfAllowed = (): void => {
+    if (upload && ready && !aborted && !paused) upload.start()
+  }
 
   const done = (async () => {
     const sha256 = opts.sha256 ?? (await sha256Of(file))
@@ -93,10 +103,11 @@ export function uploadFile(file: File, opts: UploadOptions = {}): UploadHandle {
         },
         onError: (err) => reject(err),
       })
-      // 同一文件刷新页面后接着传
+      // 同一文件刷新页面后接着传；查续传信息期间被取消 / 暂停就先不开始
       void upload.findPreviousUploads().then((prev) => {
         if (prev.length) upload!.resumeFromPreviousUpload(prev[0]!)
-        upload!.start()
+        ready = true
+        startIfAllowed()
       })
     })
   })()
@@ -106,6 +117,14 @@ export function uploadFile(file: File, opts: UploadOptions = {}): UploadHandle {
     abort: async () => {
       aborted = true
       await upload?.abort(true)
+    },
+    pause: () => {
+      paused = true
+      void upload?.abort(false)
+    },
+    resume: () => {
+      paused = false
+      startIfAllowed()
     },
   }
 }

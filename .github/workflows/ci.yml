@@ -8,6 +8,19 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    # 集成测试（网盘权限、回收站、外链、相册、垃圾回收）跑在真实 PostgreSQL 上
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: privatechat
+          POSTGRES_PASSWORD: privatechat
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U privatechat"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PC_TEST_PG: Host=localhost;Port=5432;Username=privatechat;Password=privatechat;Database=postgres
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4

@@ -95,6 +95,18 @@ namespace PrivateChat.Api.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("created_by");
 
+                    b.Property<double?>("DurationSeconds")
+                        .HasColumnType("double precision")
+                        .HasColumnName("duration_seconds");
+
+                    b.Property<int?>("Height")
+                        .HasColumnType("integer")
+                        .HasColumnName("height");
+
+                    b.Property<DateTimeOffset?>("MediaProbedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("media_probed_at");
+
                     b.Property<string>("Mime")
                         .IsRequired()
                         .HasColumnType("text")
@@ -114,14 +126,48 @@ namespace PrivateChat.Api.Migrations
                         .HasColumnType("text")
                         .HasColumnName("storage_key");
 
+                    b.Property<DateTimeOffset?>("TakenAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("taken_at");
+
+                    b.Property<int?>("Width")
+                        .HasColumnType("integer")
+                        .HasColumnName("width");
+
                     b.HasKey("Id")
                         .HasName("pk_blobs");
+
+                    b.HasIndex("MediaProbedAt")
+                        .HasDatabaseName("ix_blobs_media_probed_at");
 
                     b.HasIndex("Sha256")
                         .IsUnique()
                         .HasDatabaseName("ix_blobs_sha256");
 
                     b.ToTable("blobs", (string)null);
+                });
+
+            modelBuilder.Entity("PrivateChat.Api.Domain.BlobClaim", b =>
+                {
+                    b.Property<Guid>("BlobId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("blob_id");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.HasKey("BlobId", "UserId")
+                        .HasName("pk_blob_claims");
+
+                    b.HasIndex("UserId")
+                        .HasDatabaseName("ix_blob_claims_user_id");
+
+                    b.ToTable("blob_claims", (string)null);
                 });
 
             modelBuilder.Entity("PrivateChat.Api.Domain.CallParticipant", b =>
@@ -497,6 +543,10 @@ namespace PrivateChat.Api.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at");
 
+                    b.Property<Guid?>("DeletedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("deleted_by");
+
                     b.Property<bool>("IsFolder")
                         .HasColumnType("boolean")
                         .HasColumnName("is_folder");
@@ -522,6 +572,10 @@ namespace PrivateChat.Api.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("space_id");
 
+                    b.Property<Guid?>("TrashRootId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("trash_root_id");
+
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("updated_at");
@@ -529,13 +583,21 @@ namespace PrivateChat.Api.Migrations
                     b.HasKey("Id")
                         .HasName("pk_drive_nodes");
 
-                    b.HasIndex("ParentId", "Name")
-                        .IsUnique()
-                        .HasDatabaseName("ix_drive_nodes_parent_id_name")
-                        .HasFilter("deleted_at IS NULL");
+                    b.HasIndex("BlobId")
+                        .HasDatabaseName("ix_drive_nodes_blob_id");
+
+                    b.HasIndex("TrashRootId")
+                        .HasDatabaseName("ix_drive_nodes_trash_root_id");
 
                     b.HasIndex("SpaceId", "ParentId")
                         .HasDatabaseName("ix_drive_nodes_space_id_parent_id");
+
+                    b.HasIndex("SpaceId", "ParentId", "Name")
+                        .IsUnique()
+                        .HasDatabaseName("ix_drive_nodes_space_id_parent_id_name")
+                        .HasFilter("deleted_at IS NULL");
+
+                    NpgsqlIndexBuilderExtensions.AreNullsDistinct(b.HasIndex("SpaceId", "ParentId", "Name"), false);
 
                     b.ToTable("drive_nodes", (string)null);
                 });
@@ -760,6 +822,9 @@ namespace PrivateChat.Api.Migrations
 
                     b.HasKey("Id")
                         .HasName("pk_message_attachments");
+
+                    b.HasIndex("BlobId")
+                        .HasDatabaseName("ix_message_attachments_blob_id");
 
                     b.HasIndex("MessageId")
                         .HasDatabaseName("ix_message_attachments_message_id");
@@ -1078,6 +1143,10 @@ namespace PrivateChat.Api.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("id");
 
+                    b.Property<bool>("ChildReadOnly")
+                        .HasColumnType("boolean")
+                        .HasColumnName("child_read_only");
+
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
@@ -1097,6 +1166,12 @@ namespace PrivateChat.Api.Migrations
 
                     b.HasKey("Id")
                         .HasName("pk_spaces");
+
+                    b.HasIndex("Type", "OwnerUserId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_spaces_type_owner_user_id");
+
+                    NpgsqlIndexBuilderExtensions.AreNullsDistinct(b.HasIndex("Type", "OwnerUserId"), false);
 
                     b.ToTable("spaces", (string)null);
                 });

@@ -25,3 +25,11 @@ cd web && npm install && npm run dev
 ```
 
 后端默认 http://localhost:8080（OpenAPI 在 /openapi/v1.json，Scalar 在 /scalar），前端 dev 服务器把 /api、/hubs 代理过去。本地无 Cloudflare Access 头时用 POST /api/auth/local/login 密码登录。
+
+## 测试
+
+```bash
+dotnet test tests/PrivateChat.Api.Tests      # 单元 + 集成测试；集成测试连开发用的 pc-postgres（或 PC_TEST_PG 指定的库），连不上会跳过
+cd web && npm test                            # 前端单元测试（vitest）
+cd web && npx playwright install chromium && npm run e2e   # 真实 Chromium 端到端（需先启动 compose 栈）
+```

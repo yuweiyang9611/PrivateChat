@@ -40,8 +40,16 @@ export interface OutboxEntry {
 /** 发件箱里最多保存多大的附件原文件（语音、照片都远小于这个值） */
 export const OUTBOX_FILE_LIMIT = 50 * 1024 * 1024
 
+/** 网盘目录的离线副本：上次在线时看到的内容 */
+export interface CachedListing {
+  key: string
+  listing: unknown
+  savedAt: number
+}
+
 export class PrivateChatDb extends Dexie {
   messages!: EntityTable<LocalMessage, 'id'>
+  driveListings!: EntityTable<CachedListing, 'key'>
   conversations!: EntityTable<ConversationDto, 'id'>
   outbox!: EntityTable<OutboxEntry, 'clientMessageId'>
 
@@ -54,6 +62,9 @@ export class PrivateChatDb extends Dexie {
     })
     this.version(2).stores({
       outbox: 'clientMessageId, conversationId, queuedAt',
+    })
+    this.version(3).stores({
+      driveListings: 'key, savedAt',
     })
   }
 }

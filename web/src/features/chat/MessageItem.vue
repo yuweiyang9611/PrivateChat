@@ -7,6 +7,8 @@ import AttachmentView from './AttachmentView.vue'
 import type { LocalMessage } from '@/db'
 import { useMessagesStore } from '@/stores/messages'
 import { useSessionStore } from '@/stores/session'
+import { useDriveStore } from '@/stores/drive'
+import { parseMeta } from '@/db'
 import { online } from '@/net/online'
 
 const props = defineProps<{ message: LocalMessage; mine: boolean }>()
@@ -28,6 +30,8 @@ const canRecall = computed(() => {
   return props.mine && Date.now() - new Date(props.message.createdAt).getTime() < RECALL_WINDOW_MS
 })
 const canCopy = computed(() => props.message.type === 'Text' && !!props.message.body)
+/** 图片 / 视频 / 语音 / 文件消息可以存到网盘（引用同一份内容，不复制） */
+const canSave = computed(() => sent.value && !!props.message.attachments[0]?.blobId)
 
 /** emoji → { count, mine } */
 const grouped = computed(() => {
@@ -66,6 +70,20 @@ async function copy(): Promise<void> {
     ElMessage.success(t('chat.copied'))
   } catch {
     ElMessage.warning(t('chat.copyFailed'))
+  }
+}
+
+async function saveToDrive(): Promise<void> {
+  open.value = false
+  const att = props.message.attachments[0]
+  if (!att?.blobId) return
+  const meta = parseMeta(att.meta)
+  const fallback = `${att.kind.toLowerCase()}-${new Date(props.message.createdAt).toISOString().slice(0, 10)}`
+  try {
+    await useDriveStore().saveToMyFiles(att.blobId, meta.name || fallback)
+    ElMessage.success(t('drive.savedToDrive'))
+  } catch (e) {
+    ElMessage.warning(online.value ? (e as Error).message : t('chat.offlineAction'))
   }
 }
 
@@ -125,8 +143,9 @@ async function recall(): Promise<void> {
               @click="react(e)"
             >{{ e }}</button>
           </div>
-          <div v-if="canCopy || canRecall" class="mt-2 flex gap-2 border-t pt-2" style="border-color: var(--pc-border)">
+          <div v-if="canCopy || canRecall || canSave" class="mt-2 flex gap-2 border-t pt-2" style="border-color: var(--pc-border)">
             <el-button v-if="canCopy" size="small" text @click="copy">{{ t('chat.copy') }}</el-button>
+            <el-button v-if="canSave" size="small" text data-testid="save-to-drive" @click="saveToDrive">{{ t('drive.saveToDrive') }}</el-button>
             <el-button v-if="canRecall" size="small" text type="danger" data-testid="recall" @click="recall">{{ t('chat.recall') }}</el-button>
           </div>
         </el-popover>

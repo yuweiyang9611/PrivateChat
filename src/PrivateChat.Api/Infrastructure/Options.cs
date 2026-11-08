@@ -14,6 +14,8 @@ public sealed class AppOptions
     /// <summary>ffmpeg / ffprobe 可执行文件；容器镜像里在 PATH 上。</summary>
     public string FfmpegPath { get; set; } = "ffmpeg";
     public string FfprobePath { get; set; } = "ffprobe";
+    /// <summary>家庭所在时区（IANA），用于解释没有时区信息的照片拍摄时间。</summary>
+    public string TimeZone { get; set; } = "Asia/Shanghai";
 }
 
 /// <summary>环境变量 CloudflareAccess__TeamDomain / CloudflareAccess__Audience。</summary>

@@ -1,14 +1,19 @@
 using Microsoft.EntityFrameworkCore;
+using PrivateChat.Api.Domain;
+using PrivateChat.Api.Features.Drive;
 using PrivateChat.Api.Infrastructure;
 
 namespace PrivateChat.Api.Features.Blobs;
 
-/// <summary>读权限：上传者本人，或对任一引用该 blob 的消息 / 网盘节点 / 动态有读权限（docs/DESIGN.md 3.3）。</summary>
-public sealed class BlobAccessService(AppDbContext db)
+/// <summary>
+/// 读权限（docs/DESIGN.md 4.4）：持有该内容的人（上传过 / 秒传命中，见 blob_claims），
+/// 或对任一引用该 blob 的消息 / 网盘节点 / 动态有读权限。
+/// </summary>
+public sealed class BlobAccessService(AppDbContext db, DriveAccess drive)
 {
     public async Task<bool> CanReadAsync(Guid blobId, Guid userId, CancellationToken ct)
     {
-        if (await db.Blobs.AnyAsync(b => b.Id == blobId && b.CreatedBy == userId, ct)) return true;
+        if (await db.BlobClaims.AnyAsync(c => c.BlobId == blobId && c.UserId == userId, ct)) return true;
 
         // 聊天附件：所在会话的成员
         var viaMessage = await db.MessageAttachments
@@ -24,12 +29,16 @@ public sealed class BlobAccessService(AppDbContext db)
         // 动态：家庭内全员可见（M4 再细化可见范围）
         if (await db.PostMedia.AnyAsync(p => p.BlobId == blobId, ct)) return true;
 
-        // 网盘：M2 接共享规则，这里先按节点创建者
-        if (await db.DriveNodes.AnyAsync(n => n.BlobId == blobId && n.CreatedBy == userId && n.DeletedAt == null, ct)) return true;
-
-        return false;
+        // 网盘：个人空间主人、家庭空间成员、被共享的人（读权限与角色无关）
+        return await drive.CanReadBlobViaDriveAsync(blobId, new DriveActor(userId, UserRole.Member), ct);
     }
 
-    /// <summary>发消息时引用 blob：必须是自己上传的，或自己本来就能读到的（转发）。</summary>
+    /// <summary>发消息 / 存网盘时引用 blob：必须持有或本来就能读到（转发）。</summary>
     public Task<bool> CanReferenceAsync(Guid blobId, Guid userId, CancellationToken ct) => CanReadAsync(blobId, userId, ct);
+
+    /// <summary>登记"此人持有这份内容"；已有就刷新时间（垃圾回收据此判断近期是否还有人要）。</summary>
+    public static Task ClaimAsync(AppDbContext db, Guid blobId, Guid userId, CancellationToken ct)
+        => db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO blob_claims (blob_id, user_id, created_at) VALUES ({blobId}, {userId}, now()) ON CONFLICT (blob_id, user_id) DO UPDATE SET created_at = EXCLUDED.created_at",
+            ct);
 }
