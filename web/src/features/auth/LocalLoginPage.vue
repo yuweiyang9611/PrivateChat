@@ -2,11 +2,10 @@
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useSessionStore } from '@/stores/session'
-import { useConversationsStore } from '@/stores/conversations'
+import { online } from '@/net/online'
 
 const { t } = useI18n()
 const session = useSessionStore()
-const conversations = useConversationsStore()
 const account = ref('')
 const password = ref('')
 const submitting = ref(false)
@@ -18,11 +17,8 @@ async function submit(): Promise<void> {
   message.value = null
   const err = await session.localLogin(account.value.trim(), password.value)
   submitting.value = false
-  if (err) {
-    message.value = err
-    return
-  }
-  await conversations.load()
+  // 登录成功后由 App.vue 监听用户变化去加载会话；这里只处理错误
+  if (err) message.value = err === 'offline' ? t('login.offline') : err
 }
 </script>
 
@@ -42,6 +38,7 @@ async function submit(): Promise<void> {
         <el-form-item :label="t('login.password')">
           <el-input v-model="password" type="password" show-password autocomplete="current-password" size="large" @keyup.enter="submit" />
         </el-form-item>
+        <el-alert v-if="!online" :title="t('login.offline')" type="warning" :closable="false" class="mb-3" />
         <el-alert v-if="message" :title="message" type="error" :closable="false" class="mb-3" />
         <el-button type="primary" size="large" class="w-full" :loading="submitting" @click="submit">
           {{ t('login.submit') }}

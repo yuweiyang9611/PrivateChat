@@ -1,21 +1,42 @@
 /// <reference lib="webworker" />
-// 自定义 Service Worker（vite-plugin-pwa injectManifest）：应用壳预缓存 + Web Push 通知。
+// 自定义 Service Worker（vite-plugin-pwa injectManifest，prompt 模式）：
+// 应用壳预缓存（离线可开）、缩略图运行时缓存、Web Push 通知。
 import { clientsClaim } from 'workbox-core'
 import { cleanupOutdatedCaches, createHandlerBoundToURL, precacheAndRoute } from 'workbox-precaching'
 import { NavigationRoute, registerRoute } from 'workbox-routing'
+import { CacheFirst } from 'workbox-strategies'
+import { ExpirationPlugin } from 'workbox-expiration'
+import { MEDIA_CACHE, isThumbRequest, mediaCacheKey, shouldCacheMedia } from './pwa/media-cache'
 
 declare let self: ServiceWorkerGlobalScope
 
-self.skipWaiting()
+// prompt 模式：新版本装好后等待，用户点"立即更新"时页面发 SKIP_WAITING 再接管
+self.addEventListener('message', (event) => {
+  if ((event.data as { type?: string } | null)?.type === 'SKIP_WAITING') void self.skipWaiting()
+})
 clientsClaim()
 
 precacheAndRoute(self.__WB_MANIFEST)
 cleanupOutdatedCaches()
 
-// SPA 回退：API、SignalR、分享链接、媒体一律走网络
+// SPA 回退：页面导航一律给缓存里的 index.html（离线可开）。
+// 以下路径必须走网络：API、SignalR、分享链接、OpenAPI 文档，以及 Cloudflare 的 /cdn-cgi/（Access 登录 / 退出）。
 registerRoute(
   new NavigationRoute(createHandlerBoundToURL('index.html'), {
-    denylist: [/^\/api\//, /^\/hubs\//, /^\/ws\//, /^\/s\//, /^\/openapi\//, /^\/healthz/, /^\/scalar/],
+    denylist: [/^\/api\//, /^\/hubs\//, /^\/ws\//, /^\/s\//, /^\/openapi\//, /^\/healthz/, /^\/scalar/, /^\/cdn-cgi\//],
+  }),
+)
+
+// 缩略图：内容寻址、生成后不变，缓存优先；离线时之前看过的图照样能显示
+registerRoute(
+  ({ url, request }) => request.method === 'GET' && isThumbRequest(url, self.location.origin),
+  new CacheFirst({
+    cacheName: MEDIA_CACHE,
+    plugins: [
+      { cacheKeyWillBeUsed: async ({ request }) => mediaCacheKey(request.url) },
+      { cacheWillUpdate: async ({ response }) => (shouldCacheMedia(response.status, response.headers.get('Cache-Control')) ? response : null) },
+      new ExpirationPlugin({ maxEntries: 1000, maxAgeSeconds: 60 * 24 * 3600, purgeOnQuotaError: true }),
+    ],
   }),
 )
 
@@ -38,8 +59,8 @@ self.addEventListener('push', (event) => {
     self.registration.showNotification(payload.title, {
       body: payload.body,
       tag: payload.tag,
-      icon: '/icon.svg',
-      badge: '/icon.svg',
+      // 安卓通知栏不认 SVG，用 PNG
+      icon: '/pwa-192x192.png',
       data: { url: payload.url },
       // 同会话新通知替换旧的并再次提示
       renotify: true,

@@ -48,6 +48,15 @@ public sealed class PushController(AppDbContext db, KeyStore keys, PushService p
         existing.Name = DeviceName(req.UserAgent ?? Request.Headers.UserAgent.ToString());
         existing.PushSubscription = stored;
         existing.LastSeenAt = DateTimeOffset.UtcNow;
+
+        // 推送订阅属于浏览器而不是人：家里共用的设备换人登录后，同一个 endpoint 只能归最新登录的人，
+        // 否则上一位的消息（带摘要）会继续推到这台设备上
+        var others = await db.Devices
+            .Where(d => d.UserId != userId && d.Kind == DeviceKind.Browser && d.PushSubscription != null)
+            .ToListAsync(ct);
+        foreach (var d in others.Where(d => PushService.EndpointOf(d.PushSubscription) == req.Endpoint))
+            d.PushSubscription = null;
+
         await db.SaveChangesAsync(ct);
         return new PushStatusResponse(true, devices.Count);
     }

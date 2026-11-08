@@ -70,6 +70,20 @@ public sealed class AuthController(AppDbContext db, DeviceTokenService deviceTok
         return NoContent();
     }
 
+    /// <summary>
+    /// 重新验证跳板。PWA 的 Service Worker 会从缓存直接返回页面，整页刷新到不了 Cloudflare 边缘，
+    /// Access 会话过期后就没机会跳登录页。前端改为整页导航到这里：/api 不经 Service Worker，
+    /// 请求先被 Access 拦下去登录，登录后回到这里，再 302 回原页面。只接受站内相对地址，防开放重定向。
+    /// </summary>
+    [HttpGet("reauth")]
+    [AllowAnonymous]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public IActionResult Reauth([FromQuery] string? returnUrl)
+    {
+        Response.Headers.CacheControl = "no-store";
+        return LocalRedirect(Url.IsLocalUrl(returnUrl) ? returnUrl! : "/");
+    }
+
     /// <summary>Agent 首次启动：申请 8 位设备码，然后轮询等待用户在网页确认。</summary>
     [HttpPost("device/code")]
     [AllowAnonymous]

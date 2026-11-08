@@ -39,8 +39,9 @@ export async function refreshPushState(): Promise<void> {
     const reg = await registration()
     const sub = await reg.pushManager.getSubscription()
     if (sub) {
-      await api.POST('/api/push/subscribe', { body: toRequest(sub) })
       pushState.value = 'subscribed'
+      // 重新登记失败（离线）不影响状态，下次启动再登记
+      await api.POST('/api/push/subscribe', { body: toRequest(sub) }).catch(() => undefined)
     } else {
       pushState.value = Notification.permission === 'granted' ? 'unsubscribed' : 'default'
     }
@@ -68,13 +69,25 @@ export async function enablePush(): Promise<boolean> {
   return !!res.data
 }
 
+/**
+ * 注销本机推送。先在浏览器侧退订（离线也能生效，旧 endpoint 随即作废，服务器下次推送收到 410 会自动清理），
+ * 再尽量通知服务器。不用 serviceWorker.ready：没注册 SW 时它永远不会返回，退出登录会卡住。
+ */
 export async function disablePush(): Promise<void> {
   if (!pushSupported()) return
-  const reg = await registration()
-  const sub = await reg.pushManager.getSubscription()
+  const reg = await navigator.serviceWorker.getRegistration()
+  const sub = await reg?.pushManager.getSubscription()
   if (sub) {
-    await api.DELETE('/api/push/subscribe', { body: { endpoint: sub.endpoint } })
-    await sub.unsubscribe()
+    const endpoint = sub.endpoint
+    try {
+      await sub.unsubscribe()
+    } finally {
+      try {
+        await api.DELETE('/api/push/subscribe', { body: { endpoint } })
+      } catch {
+        // 离线：服务器那边等推送失败时清理
+      }
+    }
   }
   pushState.value = 'unsubscribed'
 }

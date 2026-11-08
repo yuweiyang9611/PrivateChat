@@ -7,6 +7,7 @@ import AttachmentView from './AttachmentView.vue'
 import type { LocalMessage } from '@/db'
 import { useMessagesStore } from '@/stores/messages'
 import { useSessionStore } from '@/stores/session'
+import { online } from '@/net/online'
 
 const props = defineProps<{ message: LocalMessage; mine: boolean }>()
 const { t } = useI18n()
@@ -49,7 +50,13 @@ onLongPress(bubble, () => { if (sent.value) open.value = true }, { delay: 450, m
 
 async function react(emoji: string): Promise<void> {
   open.value = false
-  await messages.toggleReaction(props.message.conversationId, props.message.id, emoji)
+  const ok = await messages.toggleReaction(props.message.conversationId, props.message.id, emoji)
+  if (!ok) ElMessage.warning(t(online.value ? 'chat.reactFailed' : 'chat.offlineAction'))
+}
+
+async function retry(): Promise<void> {
+  const ok = await messages.retry(props.message.conversationId, props.message.clientMessageId)
+  if (!ok) ElMessage.warning(t('chat.fileLost'))
 }
 
 async function copy(): Promise<void> {
@@ -65,7 +72,7 @@ async function copy(): Promise<void> {
 async function recall(): Promise<void> {
   open.value = false
   const ok = await messages.recall(props.message.conversationId, props.message.id)
-  if (!ok) ElMessage.warning(t('chat.recallFailed'))
+  if (!ok) ElMessage.warning(t(online.value ? 'chat.recallFailed' : 'chat.offlineAction'))
 }
 </script>
 
@@ -97,10 +104,10 @@ async function recall(): Promise<void> {
               <AttachmentView v-else-if="message.attachments.length" :message="message" />
               <div v-else class="whitespace-pre-wrap break-words">{{ message.body }}</div>
               <div class="mt-1 text-right text-[11px] opacity-70" :class="message.attachments.length ? 'px-2 pb-1' : ''">
-                <span v-if="message.status === 'pending'">{{ t('chat.pending') }}</span>
+                <span v-if="message.status === 'pending'" data-testid="msg-status">{{ online ? t('chat.pending') : t('chat.queued') }}</span>
                 <template v-else-if="message.status === 'failed'">
-                  <button class="underline" @click.stop="messages.retry(message.conversationId, message.clientMessageId)">{{ t('chat.failed') }}</button>
-                  <button v-if="message.attachments.length" class="ml-2 underline" @click.stop="messages.cancel(message.conversationId, message.clientMessageId)">{{ t('chat.cancelUpload') }}</button>
+                  <button class="underline" data-testid="msg-retry" @click.stop="retry">{{ t('chat.failed') }}</button>
+                  <button class="ml-2 underline" data-testid="msg-discard" @click.stop="messages.cancel(message.conversationId, message.clientMessageId)">{{ t('chat.discard') }}</button>
                 </template>
                 <span v-else>{{ time(message.createdAt) }}</span>
               </div>

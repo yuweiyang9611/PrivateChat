@@ -6,6 +6,7 @@ import VoiceBubble from './VoiceBubble.vue'
 import { parseMeta, type LocalMessage } from '@/db'
 import { blobUrl, formatSize } from '@/upload'
 import { useMessagesStore } from '@/stores/messages'
+import { online } from '@/net/online'
 
 const props = defineProps<{ message: LocalMessage }>()
 const { t } = useI18n()
@@ -33,6 +34,13 @@ const originalUrl = computed(() => (pending.value ? props.message.localUrl ?? ''
 const audioUrl = computed(() => (pending.value ? props.message.localUrl ?? '' : blobUrl(att.value!.blobId, { v: 'audio-m4a', r: version.value })))
 const downloadUrl = computed(() => (pending.value ? '' : blobUrl(att.value!.blobId, { name: meta.value.name, download: true })))
 const percent = computed(() => Math.round((props.message.uploadProgress ?? 0) * 100))
+/** 遮罩文字：离线排队 / 上传中（带百分比）/ 已上传等待发出 */
+const overlayLabel = computed(() => {
+  if (!online.value) return t('chat.queued')
+  const p = props.message.uploadProgress
+  if (p !== undefined && p < 1 && !att.value?.blobId) return t('chat.uploading', { p: percent.value })
+  return t('chat.pending')
+})
 </script>
 
 <template>
@@ -86,7 +94,7 @@ const percent = computed(() => Math.round((props.message.uploadProgress ?? 0) * 
       style="background: rgba(0, 0, 0, 0.35); color: #fff"
     >
       <el-progress type="circle" :percentage="percent" :width="44" :stroke-width="4" color="#fff" :show-text="false" />
-      <span class="text-xs">{{ t('chat.uploading', { p: percent }) }}</span>
+      <span class="text-xs" data-testid="upload-status">{{ overlayLabel }}</span>
       <button class="text-xs underline" @click.prevent="messages.cancel(message.conversationId, message.clientMessageId)">{{ t('chat.cancelUpload') }}</button>
     </div>
     <el-icon v-if="att.kind === 'Video' && pending && message.status !== 'pending'" :size="36" class="absolute inset-0 m-auto" style="color: #fff"><VideoPlay /></el-icon>

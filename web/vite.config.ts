@@ -24,30 +24,42 @@ export default defineConfig({
       dts: 'src/components.d.ts',
     }),
     VitePWA({
-      // 自定义 SW（src/sw.ts）：预缓存之外还要处理 Web Push
+      // 自定义 SW（src/sw.ts）：预缓存、缩略图缓存、Web Push
       strategies: 'injectManifest',
       srcDir: 'src',
       filename: 'sw.ts',
-      registerType: 'autoUpdate',
+      // prompt：新版本等用户点"立即更新"再接管，不在录音 / 上传时突然刷新（见 src/pwa/update.ts）
+      registerType: 'prompt',
+      injectRegister: false,
+      // manifest 请求带上 Cookie：Cloudflare Access 后面不带凭据会被重定向，安装提示就出不来
+      useCredentials: true,
       devOptions: { enabled: true, type: 'module' },
-      includeAssets: ['icon.svg'],
+      // 图标由下面的 globPatterns 统一预缓存，这里不再重复加
+      includeManifestIcons: false,
       manifest: {
+        id: '/',
         name: 'PrivateChat',
         short_name: '家',
         description: '家庭私有通讯平台',
         lang: 'zh-CN',
+        dir: 'ltr',
         display: 'standalone',
+        scope: '/',
         start_url: '/',
         theme_color: '#e8873a',
         background_color: '#fdf8f2',
+        categories: ['social', 'communication'],
+        // 由 public/icon.svg 生成：npm run gen:icons（pwa-assets.config.ts）
         icons: [
-          { src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
-          { src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'maskable' },
+          { src: '/pwa-64x64.png', sizes: '64x64', type: 'image/png' },
+          { src: '/pwa-192x192.png', sizes: '192x192', type: 'image/png' },
+          { src: '/pwa-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+          { src: '/maskable-icon-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
       injectManifest: {
-        // 仅预缓存应用壳与静态资源；API、媒体、SignalR 的放行规则在 sw.ts 里
-        globPatterns: ['**/*.{js,css,html,svg,woff2}'],
+        // 只预缓存应用壳与静态资源（含所有路由的懒加载分片，离线时每个页面都能打开）
+        globPatterns: ['**/*.{js,css,html,svg,png,ico,woff2}'],
       },
     }),
   ],

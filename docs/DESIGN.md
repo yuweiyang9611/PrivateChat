@@ -497,8 +497,10 @@ web/src/
 - **语音**：MediaRecorder + 波形；移动端按住说话，桌面点按录制。
 - **通话**：`RealtimeSession` 封装一个 `RTCPeerConnection`，发布 / 订阅轨道都经 api 转发给 Cloudflare，Pinia store 维护参与者与轨道；来电全局弹窗；会中可最小化为悬浮窗。
 - **远程**：`RemoteViewer` 把 NAL 喂进 `VideoDecoder`，`requestAnimationFrame` 画到 canvas；键盘捕获时阻止浏览器快捷键；可选指针锁定。
-- **离线**：Service Worker 缓存应用壳；离线时发送排队。
-- **会话过期**：Cloudflare Access 的 Cookie 到期后，请求会被 302 到 Cloudflare 登录页。前端发现 fetch 被跨域重定向或 SignalR 重连连续失败，就整页刷新让用户重新验证，验证后自动恢复连接。
+- **离线**：Service Worker 预缓存应用壳（含全部路由分片），缩略图运行时缓存优先；上次确认的身份存本地，断网冷启动直接进应用，会话列表与消息读 IndexedDB。发出的消息先写 IndexedDB 发件箱再显示，连上后按入队顺序补发（服务器按 clientMessageId 幂等），≤ 50 MB 的附件原文件一并保存以便刷新后续传；连接断开时先探测 `/api/auth/me` 区分"离线 / 服务器不可达 / 登录态丢失"再决定重试还是重新验证。
+- **会话过期**：Cloudflare Access 的 Cookie 到期后，请求会被 302 到 Cloudflare 登录页。API 客户端不跟随重定向，看到 opaqueredirect 即判定过期，整页导航到 `/api/auth/reauth?returnUrl=…`：页面本身由 Service Worker 从缓存返回、整页刷新到不了 Cloudflare 边缘，只有 `/api` 路径绕过 Service Worker，Access 才有机会拦下去登录，登录后跳回原页面。
+- **更新**：Service Worker 用 prompt 模式，新版本下载后提示"立即更新"，不在录音、上传途中自动刷新。
+- **退出 / 换人**：退出登录时退订本机推送并清空 IndexedDB、缩略图缓存与续传指纹；检测到另一个账号登录同一浏览器时同样先清空。
 
 ### 5.4 信息架构
 
@@ -789,6 +791,7 @@ docker compose up -d     # 首次会构建 web 与 api 镜像
 
 ```
 Auth      GET  /api/auth/me（凭 Cf-Access-Jwt-Assertion 自动登录 / 建号） ; POST /api/auth/local/login（局域网备用）
+          GET  /api/auth/reauth?returnUrl=（Access 过期后的重新验证跳板，只接受站内地址）
           POST /api/auth/device/code · /device/poll · /device/confirm      设备码登录
 Family    GET/PUT /api/family ; GET /api/family/members ; PATCH /api/family/members/{id}
           POST /api/family/invites ; POST /api/family/join
