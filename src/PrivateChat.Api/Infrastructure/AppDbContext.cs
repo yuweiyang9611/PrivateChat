@@ -44,7 +44,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         // 枚举统一存字符串，便于直接查库；jsonb 列显式标注
         foreach (var et in b.Model.GetEntityTypes())
             foreach (var p in et.GetProperties())
-                if (p.ClrType.IsEnum) p.SetProviderClrType(typeof(string));
+                if ((Nullable.GetUnderlyingType(p.ClrType) ?? p.ClrType).IsEnum) p.SetProviderClrType(typeof(string));
 
         b.Entity<User>(e =>
         {
@@ -127,7 +127,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<CallSession>(e =>
         {
             e.HasIndex(x => x.ConversationId);
+            // 一个会话同一时间只有一通进行中的通话
+            e.HasIndex(x => x.ConversationId, "ActiveConversation").HasDatabaseName("ix_call_sessions_active_conversation").IsUnique().HasFilter("ended_at IS NULL AND conversation_id IS NOT NULL");
             e.HasIndex(x => x.RoomSlug).IsUnique();
+            e.HasIndex(x => x.StartedAt);
             e.HasMany(x => x.Participants).WithOne().HasForeignKey(x => x.CallId);
         });
         b.Entity<CallParticipant>(e =>

@@ -22,6 +22,8 @@ public static class ChatEvents
     public const string CallUpdated = "CallUpdated";
     public const string ParticipantJoined = "ParticipantJoined";
     public const string ParticipantLeft = "ParticipantLeft";
+    public const string ParticipantUpdated = "ParticipantUpdated";
+    public const string CallDeclined = "CallDeclined";
     public const string TrackPublished = "TrackPublished";
     public const string TrackUnpublished = "TrackUnpublished";
     public const string DriveChanged = "DriveChanged";
@@ -61,6 +63,12 @@ public sealed class PresenceTracker
     }
 
     public bool IsOnline(Guid userId) { lock (_lock) return _connections.ContainsKey(userId); }
+
+    /// <summary>该用户当前所有连接（新建会话后把在线成员的连接加进会话组）。</summary>
+    public List<string> ConnectionsOf(Guid userId)
+    {
+        lock (_lock) return _connections.TryGetValue(userId, out var set) ? [.. set] : [];
+    }
 }
 
 [Authorize]
@@ -122,6 +130,16 @@ public sealed class ChatHub(AppDbContext db, MessageService messages, PresenceTr
     }
 
     /// <summary>重连后补拉：每个会话 since seq 之后的消息，超过 500 条则提示整页刷新。</summary>
-    public Task<SyncResultDto> Sync(Dictionary<Guid, long> lastSeqs)
-        => messages.SyncAsync(Context.User!.UserId(), lastSeqs, Context.ConnectionAborted);
+    public async Task<SyncResultDto> Sync(Dictionary<Guid, long> lastSeqs)
+    {
+        try
+        {
+            return await messages.SyncAsync(Context.User!.UserId(), lastSeqs, Context.ConnectionAborted);
+        }
+        catch (OperationCanceledException) when (Context.ConnectionAborted.IsCancellationRequested)
+        {
+            // 客户端在补拉途中断开 / 刷新了页面：不是错误，下次连上会再补
+            return new SyncResultDto([], []);
+        }
+    }
 }

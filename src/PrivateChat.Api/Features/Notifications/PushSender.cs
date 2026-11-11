@@ -10,9 +10,11 @@ public enum PushSendResult { Sent, Gone, Failed }
 /// <summary>单条推送的发送核心：VAPID 签名 + aes128gcm 加密由 Lib.Net.Http.WebPush 完成。无数据库依赖，便于单测。</summary>
 public sealed class PushSender(HttpClient http, VapidAuthentication vapid, ILogger logger)
 {
+    public const int DefaultTtlSeconds = 24 * 3600;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public async Task<PushSendResult> SendAsync(StoredPushSubscription sub, PushPayload payload, CancellationToken ct)
+    /// <param name="ttlSeconds">推送服务最多替我们保留多久；来电只留几十秒，过期的响铃送到了也没用。</param>
+    public async Task<PushSendResult> SendAsync(StoredPushSubscription sub, PushPayload payload, CancellationToken ct, int ttlSeconds = DefaultTtlSeconds)
     {
         var client = new PushServiceClient(http) { DefaultAuthentication = vapid };
         var target = new PushSubscription { Endpoint = sub.Endpoint };
@@ -22,7 +24,7 @@ public sealed class PushSender(HttpClient http, VapidAuthentication vapid, ILogg
         {
             Topic = SafeTopic(payload.Tag),
             Urgency = PushMessageUrgency.High,
-            TimeToLive = 24 * 3600,
+            TimeToLive = ttlSeconds,
         };
         try
         {

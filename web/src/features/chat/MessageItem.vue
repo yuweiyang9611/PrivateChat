@@ -10,6 +10,7 @@ import { useSessionStore } from '@/stores/session'
 import { useDriveStore } from '@/stores/drive'
 import { parseMeta } from '@/db'
 import { online } from '@/net/online'
+import { callOutcome, outcomeText, parseCallPayload } from '@/features/calls/format'
 
 const props = defineProps<{ message: LocalMessage; mine: boolean }>()
 const { t } = useI18n()
@@ -43,6 +44,16 @@ const grouped = computed(() => {
     map.set(r.emoji, g)
   }
   return [...map.entries()].map(([emoji, g]) => ({ emoji, ...g }))
+})
+
+/** 通话记录：按"我"的视角显示（未接来电 / 对方未接听 …）；载荷解析不了就用服务端写的正文 */
+const callInfo = computed(() => {
+  if (props.message.type !== 'Call') return null
+  const p = parseCallPayload(props.message.payload)
+  if (!p) return { text: props.message.body ?? '', video: false, missed: false }
+  const outcome = callOutcome(p.reason, props.message.senderId, session.user?.id)
+  const o = outcomeText(outcome, p.durationSeconds)
+  return { text: `${t(p.callType === 'Audio' ? 'calls.audioCall' : 'calls.videoCall')} · ${t(o.key, o.params ?? {})}`, video: p.callType !== 'Audio', missed: outcome === 'missed-by-me' }
 })
 
 function time(iso: string): string {
@@ -97,7 +108,16 @@ async function recall(): Promise<void> {
 <template>
   <div class="group mb-2 flex" :class="mine ? 'justify-end' : 'justify-start'" :data-seq="message.seq">
     <div
-      v-if="message.type === 'System' || message.type === 'Call'"
+      v-if="callInfo"
+      class="mx-auto my-1 flex items-center gap-1.5 rounded-full px-3 py-1 text-xs"
+      :style="callInfo.missed ? 'background: #fde8e8; color: #c62a2f' : 'background: var(--pc-border); color: var(--pc-text-muted)'"
+      data-testid="call-message"
+    >
+      <span aria-hidden="true">{{ callInfo.video ? '🎥' : '📞' }}</span>
+      <span>{{ callInfo.text }} · {{ time(message.createdAt) }}</span>
+    </div>
+    <div
+      v-else-if="message.type === 'System'"
       class="mx-auto my-1 rounded-full px-3 py-1 text-xs"
       style="background: var(--pc-border); color: var(--pc-text-muted)"
     >

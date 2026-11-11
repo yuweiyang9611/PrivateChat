@@ -118,6 +118,9 @@ builder.Services.AddHostedService<TusCleanupService>();
 builder.Services.AddHttpClient(nameof(PushService));
 builder.Services.AddSingleton<PushService>();
 builder.Services.AddHostedService<PushWorker>();
+builder.Services.AddSingleton<CallLocks>();
+builder.Services.AddScoped<CallService>();
+builder.Services.AddHostedService<CallMaintenanceWorker>();
 
 var app = builder.Build();
 

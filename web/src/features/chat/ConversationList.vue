@@ -4,11 +4,13 @@ import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Search, Plus } from '@element-plus/icons-vue'
 import { useConversationsStore } from '@/stores/conversations'
+import { useFamilyStore } from '@/stores/family'
 import SetupPrompt from '@/components/SetupPrompt.vue'
 
 const { t } = useI18n()
 const route = useRoute()
 const conversations = useConversationsStore()
+const family = useFamilyStore()
 const keyword = ref('')
 
 function formatTime(iso?: string | null): string {
@@ -34,18 +36,18 @@ function formatTime(iso?: string | null): string {
     <el-empty v-if="conversations.loaded && !conversations.sorted.length" :description="t('chat.noConversations')" />
 
     <ul class="flex-1 overflow-y-auto">
-      <li v-for="c in conversations.sorted.filter((x) => !keyword || (x.title ?? '').includes(keyword))" :key="c.id">
+      <li v-for="c in conversations.sorted.filter((x) => !keyword || family.titleOf(x).includes(keyword))" :key="c.id">
         <router-link
           :to="`/messages/${c.id}`"
           class="flex items-center gap-3 px-3 py-2.5"
           :style="route.params.id === c.id ? 'background: var(--pc-primary-soft)' : ''"
         >
           <el-badge :value="c.lastSeq - c.lastReadSeq" :hidden="c.lastSeq <= c.lastReadSeq" :max="99">
-            <el-avatar :size="44" style="background: var(--pc-primary)">{{ (c.title ?? '?').slice(0, 1) }}</el-avatar>
+            <el-avatar :size="44" style="background: var(--pc-primary)">{{ (family.titleOf(c) || '?').slice(0, 1) }}</el-avatar>
           </el-badge>
           <div class="min-w-0 flex-1">
             <div class="flex items-baseline justify-between gap-2">
-              <span class="truncate font-medium">{{ c.title }}</span>
+              <span class="truncate font-medium">{{ family.titleOf(c) }}</span>
               <span class="shrink-0 text-xs" style="color: var(--pc-text-muted)">{{ formatTime(c.lastMessageAt) }}</span>
             </div>
             <div class="truncate text-sm" style="color: var(--pc-text-muted)">{{ c.lastMessagePreview ?? '' }}</div>

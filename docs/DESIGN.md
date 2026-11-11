@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| 版本 | v0.1（讨论稿） |
-| 日期 | 2026-11-05 |
-| 状态 | 设计阶段，仓库尚无代码 |
+| 版本 | v0.4 |
+| 日期 | 2026-11-11 |
+| 状态 | M0–M3 已实现，文档随代码更新；M4–M6 为计划 |
 | 技术栈 | .NET 10 · ASP.NET Core · SignalR · PostgreSQL 17 · Cloudflare Realtime · Vue 3 · TypeScript · Element Plus · Docker Compose |
 
 ---
@@ -163,11 +163,11 @@ flowchart LR
 
 **发起视频通话**
 
-1. A 点"视频" → `POST /api/calls` → 创建 `call_sessions`，SignalR `IncomingCall` + Web Push 通知其他成员，60 s 无人接听记为未接。
-2. 每个加入者 `POST /api/calls/{id}/join`：api 调 Cloudflare `sessions/new` 建一个会话（存入 `call_participants.cf_session_id`），并返回 24 h 有效的 TURN 凭据；浏览器用原生 `RTCPeerConnection` 建连，媒体直接到 Cloudflare 的任播节点，不经过家里。
-3. 发布：浏览器生成 offer → `POST /api/calls/{id}/tracks` → api 调 `tracks/new` 拿到 answer 回传，写 `call_tracks`，广播 `TrackPublished`。
-4. 订阅：其他端收到 `TrackPublished` → `POST /api/calls/{id}/tracks/pull` → Cloudflare 返回带新轨道的 offer → 浏览器回 answer → `POST /api/calls/{id}/renegotiate`。
-5. 离开或 SignalR 断线超过 30 s → api 关闭该会话的轨道、广播 `ParticipantLeft`；最后一人离开则结束通话，在会话里插入一条"通话"消息。
+1. A 点"视频" → `POST /api/calls` → 创建 `call_sessions`，SignalR `IncomingCall` + Web Push 让其他成员响铃，60 s 无人接听记为未接。
+2. 每个加入者先拿到麦克风 / 摄像头，再 `POST /api/calls/{id}/join`：api 登记参与者并返回 ICE 服务器（含 24 h 有效的 TURN 凭据）；第二个人加入的那一刻算接通。媒体直接到 Cloudflare 的任播节点，不经过家里。
+3. 发布：浏览器在"发布连接"上生成 offer → `POST /api/calls/{id}/publish` → api（第一次时先 `sessions/new`）调 `tracks/new` 拿到 answer 回传，写 `call_tracks`，广播 `TrackPublished`。
+4. 订阅：其他端收到 `TrackPublished` → `POST /api/calls/{id}/pull`（只给参与者 Id + 轨道名）→ api 换成对方的 Cloudflare 会话去 `tracks/new` → 返回带新轨道的 offer → 浏览器在"订阅连接"上回 answer → `POST /api/calls/{id}/renegotiate`。
+5. 挂断、关页面（sendBeacon）或 35 s 没有心跳 → api 强制关闭该参与者的轨道、广播 `ParticipantLeft`；单聊里一方离开即结束，群聊等最后一人离开，结束时在会话里插入一条"通话"消息。
 
 **远程控制爸爸的电脑**
 
@@ -276,9 +276,9 @@ PrivateChat/
 
 | 表 | 关键字段 |
 |---|---|
-| `call_sessions` | id, conversation_id, type（Audio / Video / Meeting）, started_by, started_at, ended_at, scheduled_at, egress_bytes_estimate |
-| `call_participants` | id, call_id, user_id, cf_session_id（Cloudflare 会话）, joined_at, left_at |
-| `call_tracks` | id, participant_id, track_name, kind（Audio / Video / Screen）, published_at, unpublished_at |
+| `call_sessions` | id, conversation_id, type（Audio / Video / Meeting）, room_slug（常驻会议室）, started_by, started_at, answered_at, ended_at, end_reason（Completed / Missed / Declined / Cancelled）, scheduled_at, egress_bytes_estimate。同一会话只允许一条未结束的记录（部分唯一索引） |
+| `call_participants` | id, call_id, user_id, cf_session_id（发布用的 Cloudflare 会话）, cf_pull_session_id（订阅用的）, mic_on, cam_on, joined_at, last_seen_at（心跳）, left_at |
+| `call_tracks` | id, participant_id, track_name, kind（Audio / Video / Screen）, mid（发布会话里的 mid，强制关闭用）, published_at, unpublished_at |
 | `remote_sessions` | id, controller_user_id, target_device_id, mode（View / Control）, consent（Prompt / Unattended）, started_at, ended_at, end_reason, bytes_relayed |
 
 **通知与任务**
@@ -294,7 +294,7 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 
 - 连接建立时服务端把连接加入 `user:{id}` 组和该用户所有 `conv:{id}` 组，并标记在线；客户端随后调用 `Sync` 补拉缺失消息。
 - 客户端 → 服务端：`SendMessage(dto)`、`Typing(conversationId)`、`MarkRead(conversationId, seq)`、`Sync(Dictionary<convId, lastSeq>)`。
-- 服务端 → 客户端：`MessageReceived`、`MessageUpdated`、`MessageDeleted`、`ReactionChanged`、`ReadReceipt`、`Typing`、`Presence`、`ConversationUpdated`、`IncomingCall`、`CallUpdated`、`ParticipantJoined`、`ParticipantLeft`、`TrackPublished`、`TrackUnpublished`、`DriveChanged`、`Notification`、`RemoteSessionChanged`。
+- 服务端 → 客户端：`MessageReceived`、`MessageUpdated`、`MessageDeleted`、`ReactionChanged`、`ReadReceipt`、`Typing`、`Presence`、`ConversationUpdated`、`IncomingCall`、`CallUpdated`、`CallDeclined`、`ParticipantJoined`、`ParticipantLeft`、`ParticipantUpdated`、`TrackPublished`、`TrackUnpublished`、`DriveChanged`、`Notification`、`RemoteSessionChanged`。
 
 可靠性约定：
 
@@ -337,22 +337,43 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 
 **模型**：Cloudflare Realtime SFU 没有"房间"概念，只有会话（session，对应一个 PeerConnection）和轨道（track）。房间、成员、谁该拉谁的轨道全部由 api 维护，这正是 `call_sessions` / `call_participants` / `call_tracks` 三张表的用途；状态变化通过 SignalR 广播。
 
-**接入方式**：浏览器永远不拿 App Secret，所有 Cloudflare REST 调用由 api（`CallsController` → `CloudflareRealtimeClient`）转发。
+**接入方式**：浏览器永远不拿 App Secret，也不知道任何 Cloudflare 会话 Id；所有 Cloudflare REST 调用由 api（`CallsController` → `CallService` → `CloudflareRealtimeClient`）转发。接口形状按官方 OpenAPI（`realtime-api-2024-05-21.yaml`）核对过（2026-11）：
 
-- 加入：`POST /api/calls/{id}/join` → api 调 `sessions/new` 为该参与者建一个 Cloudflare 会话，把 sessionId 存进 `call_participants`，同时用 TURN 密钥签发 24 h 有效的凭据（`turn/keys/{keyId}/credentials/generate`）一并返回。
-- 发布：前端 `addTransceiver` 后生成 offer → `POST /api/calls/{id}/tracks`（location = local，带 mid / trackName）→ api 调 `sessions/{sid}/tracks/new` → 回传 answer；api 写 `call_tracks` 并广播 `TrackPublished`。
-- 订阅：其他端收到 `TrackPublished` → `POST /api/calls/{id}/tracks/pull`（location = remote，带对方 sessionId + trackName）→ Cloudflare 返回新的 offer（requiresImmediateRenegotiation）→ 前端 `setRemoteDescription`、生成 answer → `POST /api/calls/{id}/renegotiate` → api 调 `sessions/{sid}/renegotiate`。
-- 取消发布 / 离开：`tracks/close`；离开或 SignalR 断线超时 30 s → api 标记 left、广播 `ParticipantLeft`，最后一人离开则结束通话、插入 `Call` 类型消息。
-- 每个参与者一个会话：发布自己的音视频（屏幕共享是第三条轨道），拉取其他所有人的轨道；6 人会议每人拉 5 路。
+| api 接口 | Cloudflare 调用 | 说明 |
+|---|---|---|
+| `POST /api/calls/{id}/join` | `POST turn/keys/{keyId}/credentials/generate-ice-servers` | 登记参与者；返回 ICE 服务器数组（去掉浏览器会拦的 53 端口地址）。没配 TURN 或签发失败时退回公共 STUN。此时**不建** SFU 会话：没用过的会话会过期 |
+| `POST /api/calls/{id}/publish` | `POST sessions/new`（首次）+ `POST sessions/{sid}/tracks/new`（location = local，带 offer、mid、trackName） | 轨道名由服务端生成；HTTP 200 里可能带单条轨道的错误，逐条检查，成功的才登记并广播 `TrackPublished`，answer 无论如何交回浏览器 |
+| `POST /api/calls/{id}/pull` | `POST sessions/new`（首次）+ `tracks/new`（location = remote，带发布者的 sessionId + trackName） | 客户端只给"参与者 Id + 轨道名"，服务端校验是同一通通话里还在发布的轨道后换成对方的会话；返回 offer + 每条轨道在订阅连接上的 mid；源还没出媒体的那条带错误码，客户端稍后重试 |
+| `POST /api/calls/{id}/renegotiate` | `PUT sessions/{sid}/renegotiate` | 订阅连接的 answer；Cloudflare 收下才算这次订阅完成 |
+| `POST /api/calls/{id}/unpublish` | `PUT sessions/{sid}/tracks/close`（带 offer，force = false） | 停止共享屏幕等；返回 answer，广播 `TrackUnpublished` |
+| `POST /api/calls/{id}/pull/close`、离开 / 结束 / 超时清理 | `PUT sessions/{sid}/tracks/close`（force = true） | 不需要协商；失败无妨，连接关闭 30 s 后 Cloudflare 自行回收 |
 
-**呼叫**：`POST /api/calls` 创建记录 → SignalR `IncomingCall` + Web Push（Chrome / 安卓带接听 / 拒绝按钮，iOS 仅点击打开）；60 s 无人接听标记 Missed。常驻会议室"客厅"是一条永不结束的 `call_sessions` 记录，随时可进。
+**每个参与者两条连接**：一条只发布（浏览器出 offer），一条只订阅（Cloudflare 出 offer），各自一条串行队列——官方 video-room 示例的做法。Cloudflare 要求同一会话上的变更严格串行（上一个 offer 没回 answer 就发新的变更会被 406 拒绝），而"有人加入""有人发布"这些事件随时并发到达；两个方向分开后互不打架。6 人会议每人发布 2–3 条、拉取 5 人的轨道。
 
-**质量**：开启 simulcast（按当前官方文档确认支持的层数），手机端默认 720p 上行；订阅端按窗口大小请求层。会中聊天复用会话消息。
+**呼叫与状态**：
 
-**没有的东西**：服务端录制（Realtime SFU 不提供，RealtimeKit 才有）、webhook（参与者状态靠 api 自己维护，以 SignalR 连接为准）。
+- `POST /api/calls` 在会话里发起（会话里已有进行中的通话则返回它，部分唯一索引兜底）→ 其他成员收到 SignalR `IncomingCall`，并向他们的**所有设备**发 Web Push（不看在线状态：在线只说明某一台设备开着页面，手机照样要响；页面正在前台的那台由 Service Worker 判断，不重复弹通知）。响铃推送 TTL 45 s；Chrome / 安卓带接听 / 拒绝按钮，iOS 点通知打开应用后在页面里接。静音的会话不推送、不响铃。
+- 第二个人加入的那一刻记 `answered_at`（接通）。接听者的其它设备收到一条 `call-answered` 推送，把还挂着的响铃通知收掉。
+- 结束原因：接通后挂断 `Completed`；60 s 无人接听 `Missed`；单聊里对方拒接 `Declined`（群聊里拒接只广播 `CallDeclined`，通话继续）；接通前发起人挂断 `Cancelled`。单聊里一方离开即结束，群聊等最后一人离开；发起人或管理员可以 `end` 整通通话。
+- 结束时在会话里插入一条 `Call` 类型消息（幂等键 = 通话 Id，载荷含类型、原因、时长、参加者），按用户组广播；参加了的人不算未读。`Missed` / `Cancelled` 时给没接的人补一条"未接来电"推送，与响铃推送同一个 tag / Topic，原地替换。
+- **在场以心跳为准**：客户端每 10 s `POST heartbeat`，35 s 没有心跳按离开处理（`CallMaintenanceWorker` 每 5 s 扫一次，同时负责响铃超时）；关页面时用 `sendBeacon` 立即离开。心跳返回 410 说明已被清理，客户端重新加入。没有用 SignalR 连接状态判断在场：手机切后台时 SignalR 常断而通话还在。
+- **同一个人只有一份在场**：再次 `join`（换设备接听、断线重进）会把旧的那份顶掉（`ParticipantLeft` reason = replaced），旧设备本地收场。
+- **重连**：ICE 失败、对端关闭传输、协商结果不明（Cloudflare 报错 / 超时）时，客户端重新 `join` 换一对新会话，本地采集的轨道接着用，重新发布、重新订阅；别人看到的是短暂离开又回来。
+- 常驻会议室"客厅"是一条 `room_slug = living-room`、永不结束的 `call_sessions` 记录，第一次访问时创建；全家可进，不响铃、不产生通话记录，进出事件广播给全家（通话页实时显示谁在里面）。管理员可以清场。
+- 同一通通话的状态变更（加入、离开、结束、清理）用进程内分段锁串行化（单实例部署）。孩子账号也可以打电话（因此允许孩子发起单聊，但不能建群）。
 
-**成本**：媒体出站每月前 1 TB 免费，之后 0.05 美元 / GB。6 人 720p 会议约 13 GB / 小时，1 TB 够每月 70 多小时；api 按通话时长与轨道数估算用量，管理页展示。
+**媒体细节**：
 
+- 静音 = `track.enabled = false`（仍在发静音帧，轨道不会被回收）；关摄像头 = 真的停掉摄像头（指示灯熄灭），把发布的轨道 `replaceTrack` 成每秒两帧的黑画面占位——不能换成 null，Cloudflare 30 s 收不到包会回收这条轨道。开关都不重新协商；别人看到的图标来自 `POST state` → `ParticipantUpdated`。
+- 屏幕共享是同一条发布连接上的第三条轨道，停止时协商式关闭。iOS Safari 没有 `getDisplayMedia`，按钮不显示。
+- 上行：摄像头 720p / 24 帧、最高 1.2 Mbps；屏幕 2.5 Mbps、`contentHint = detail`。**simulcast 暂未启用**：需要在真实 Cloudflare 上验证各浏览器的分层行为后再开（发布端 `sendEncodings` + 订阅端 `simulcast.preferredRid`），留到 M6。
+- 通话需要安全上下文：局域网 8080 明文直连时没有通话（界面有说明）。
+
+**没有的东西**：服务端录制（Realtime SFU 不提供，RealtimeKit 才有）、webhook（参与者状态靠 api 自己维护）。
+
+**成本**：媒体出站每月前 1 TB 免费，之后 0.05 美元 / GB。6 人 720p 会议约 13 GB / 小时，1 TB 够每月 70 多小时。api 在每条轨道下线时按"时长 × 码率 × 当时在场的其他人数"累加估算值（`egress_bytes_estimate`），`GET /api/calls/usage` 给管理员看当月合计（通话页底部），实际以 Cloudflare 控制台为准。
+
+**测试**：后端集成测试用一个按官方形状应答的假 Cloudflare（HttpMessageHandler）+ 真实 SignalR 连接；端到端测试用 `web/e2e/fake-sfu.cjs`——一个 headless Chromium 页面充当 SFU、真实转发媒体，接口与约束（串行、406）同官方。真实 Cloudflare 上的通话需要填好凭据后实测。
 ### 4.6 网盘与共享
 
 - 两类空间：个人空间（每人一个）与家庭共享空间（全员可写，Child 可配置为只读）。首次访问网盘时自动创建。
@@ -503,7 +524,7 @@ web/src/
 - **媒体**：缩略图懒加载，点开 PhotoSwipe；视频默认播 `play-720p`，长按下载原件。
 - **上传**：tus 队列，可暂停、断网自动续传，进度显示在消息气泡里。
 - **语音**：MediaRecorder + 波形；移动端按住说话，桌面点按录制。
-- **通话**：`RealtimeSession` 封装一个 `RTCPeerConnection`，发布 / 订阅轨道都经 api 转发给 Cloudflare，Pinia store 维护参与者与轨道；来电全局弹窗；会中可最小化为悬浮窗。
+- **通话**：`RealtimeSession` 封装一对 `RTCPeerConnection`（发布 / 订阅各一条，各自串行队列），信令都经 api 转发给 Cloudflare；`calls` store 维护进行中的通话、来电、当前通话的参与者与轨道，并负责采集、心跳、断线重连；来电全局弹窗（`CallHost` 挂在应用根上，任何页面都能接），通话界面可最小化为悬浮条；铃声用 Web Audio 现合成。从来电通知进入有两条路：页面开着时 Service Worker 用 `postMessage` 把动作转给页面，没开时带 `?call=…&action=answer` 打开。
 - **远程**：`RemoteViewer` 把 NAL 喂进 `VideoDecoder`，`requestAnimationFrame` 画到 canvas；键盘捕获时阻止浏览器快捷键；可选指针锁定。
 - **离线**：Service Worker 预缓存应用壳（含全部路由分片），缩略图运行时缓存优先；上次确认的身份存本地，断网冷启动直接进应用，会话列表与消息读 IndexedDB。发出的消息先写 IndexedDB 发件箱再显示，连上后按入队顺序补发（服务器按 clientMessageId 幂等），≤ 50 MB 的附件原文件一并保存以便刷新后续传；连接断开时先探测 `/api/auth/me` 区分"离线 / 服务器不可达 / 登录态丢失"再决定重试还是重新验证。
 - **会话过期**：Cloudflare Access 的 Cookie 到期后，请求会被 302 到 Cloudflare 登录页。API 客户端不跟随重定向，看到 opaqueredirect 即判定过期，整页导航到 `/api/auth/reauth?returnUrl=…`：页面本身由 Service Worker 从缓存返回、整页刷新到不了 Cloudflare 边缘，只有 `/api` 路径绕过 Service Worker，Access 才有机会拦下去登录，登录后跳回原页面。
@@ -757,13 +778,13 @@ docker compose up -d     # 首次会构建 web 与 api 镜像
 
 | 里程碑 | 业余投入 | 交付 |
 |---|---|---|
-| M0 骨架 | 1 周 | 仓库结构、compose、Cloudflare 隧道与 Access 接入、邮箱自动建号 / 邀请、空壳前端、CI 构建镜像 |
-| M1 聊天 | 3 周 | 文字 / 图片 / 语音 / 视频 / 文件消息、群、已读、撤回、表情回应、推送、PWA |
-| M2 网盘 | 2 周 | tus 上传、目录、共享、相册时间线、发送到聊天、回收站 |
-| M3 通话 | 3 周 | Cloudflare Realtime 会话 / 轨道编排、1:1 / 会议、屏幕共享、客厅、通话记录、来电推送 |
+| M0 骨架（已完成） | 1 周 | 仓库结构、compose、Cloudflare 隧道与 Access 接入、邮箱自动建号 / 邀请、空壳前端、CI 构建镜像 |
+| M1 聊天（已完成） | 3 周 | 文字 / 图片 / 语音 / 视频 / 文件消息、群、已读、撤回、表情回应、推送、PWA |
+| M2 网盘（已完成） | 2 周 | tus 上传、目录、共享、相册时间线、发送到聊天、回收站 |
+| M3 通话（已完成） | 3 周 | Cloudflare Realtime 会话 / 轨道编排、1:1 / 会议、屏幕共享、客厅、通话记录、来电推送；真实 Cloudflare 上尚未实测 |
 | M4 时光 | 2 周 | 动态 / 评论 / 点赞 / 那年今天 / 相册 |
 | M5 远程 | 3–4 周 | Agent v1（Windows）+ 中继 + 浏览器控制端 + 审计 |
-| M6 打磨 | 持续 | 长辈模式、搜索、WebDAV、备份脚本、Capacitor |
+| M6 打磨 | 持续 | 长辈模式、搜索、WebDAV、备份脚本、Capacitor、通话 simulcast / 网络自适应 |
 
 一个人业余做，M0–M5 约 4–5 个月。建议 M1 完成就让家人用起来，后面按反馈排序。
 
@@ -776,7 +797,7 @@ docker compose up -d     # 首次会构建 web 与 api 镜像
 | 风险 | 对策 |
 |---|---|
 | 家庭宽带无公网入站 | 全部流量走隧道和 Cloudflare Realtime，不需要任何入站端口 |
-| iOS 浏览器限制：后台来电不可靠、不能共享屏幕 | 来电靠推送 + 铃声页面；后期 Capacitor |
+| iOS 浏览器限制：后台来电不可靠（通知没有接听按钮、不能常驻）、不能共享屏幕、切到后台采集会停 | 来电靠推送，点通知进应用后在页面里接；后期 Capacitor（CallKit） |
 | iPhone HEIC / HEVC 兼容 | 服务端统一转码，原件保留 |
 | 远程控制 UAC / 锁屏 | v1 明确不支持，v2 用 SYSTEM 服务 |
 | 转码吃 CPU | 并发度 2、夜间低优先级、可选跳过 1080p 以下 |
@@ -815,10 +836,12 @@ Drive     GET /api/drive（空间与用量） ; PATCH /api/drive/spaces/{id}（�
           GET /api/drive/shared-with-me ; GET/POST /api/drive/nodes/{id}/shares ; DELETE /api/drive/shares/{id}
           POST /api/drive/nodes/{id}/send（发送到聊天） ; GET /api/drive/gallery?before=&beforeId=&limit=
 Share     GET /s/{token}[?folder=] ; POST /s/{token}（密码） ; GET /s/{token}/f/{nodeId}?v=&download=
-Calls     POST /api/calls ; POST /api/calls/{id}/join（建 Cloudflare 会话 + 返回 TURN 凭据）
-          POST /api/calls/{id}/tracks（发布，SDP offer → answer） ; POST /api/calls/{id}/tracks/pull（订阅）
-          POST /api/calls/{id}/renegotiate ; DELETE /api/calls/{id}/tracks/{name}
-          POST /api/calls/{id}/leave · /end ; GET /api/calls?conversationId= ; GET /api/rooms
+Calls     GET /api/calls/config（是否已配置、响铃 / 心跳秒数） ; GET /api/calls?conversationId=（记录）
+          GET /api/calls/active（进行中 / 响铃中） ; GET /api/calls/rooms（客厅） ; GET /api/calls/usage（管理员）
+          POST /api/calls（发起） ; GET /api/calls/{id} ; POST /api/calls/{id}/join（接听 / 加入，返回 ICE 服务器）
+          POST /api/calls/{id}/decline · /leave · /end · /heartbeat · /state（麦克风 / 摄像头开关）
+          POST /api/calls/{id}/publish（SDP offer → answer） ; POST /api/calls/{id}/unpublish
+          POST /api/calls/{id}/pull（订阅，返回 offer） ; POST /api/calls/{id}/renegotiate ; POST /api/calls/{id}/pull/close
 Moments   GET /api/posts?before= ; POST/DELETE /api/posts ; POST /api/posts/{id}/comments
           POST /api/posts/{id}/reactions ; GET /api/posts/on-this-day ; GET/POST /api/albums
 Remote    GET /api/devices ; PATCH /api/devices/{id}（策略 / 名称） ; DELETE /api/devices/{id}（吊销）
@@ -843,9 +866,11 @@ Admin     GET /api/admin/stats ; GET /api/admin/jobs ; GET /healthz ; GET /opena
 | S→C | Typing | conversationId, userId |
 | S→C | Presence | userId, online, lastSeenAt |
 | S→C | ConversationUpdated | ConversationDto |
-| S→C | IncomingCall / CallUpdated | CallDto |
-| S→C | ParticipantJoined / ParticipantLeft | callId, participant |
-| S→C | TrackPublished / TrackUnpublished | callId, participantId, cfSessionId, trackName, kind |
+| S→C | IncomingCall / CallUpdated | CallDto（participants 为在场的人；answeredAt 为空 = 响铃中；endedAt 非空 = 已结束，带 endReason） |
+| S→C | CallDeclined | callId, userId |
+| S→C | ParticipantJoined / ParticipantUpdated | callId, participant（id, userId, micOn, camOn, tracks[]） |
+| S→C | ParticipantLeft | callId, participantId, userId, reason（left / replaced / timeout / ended） |
+| S→C | TrackPublished / TrackUnpublished | callId, participantId, trackName, kind |
 | S→C | DriveChanged | spaceId, parentId |
 | S→C | Notification | NotificationDto |
 | S→C | RemoteSessionChanged | RemoteSessionDto |

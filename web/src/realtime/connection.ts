@@ -5,18 +5,19 @@ import { isOnline, onOnline } from '@/net/online'
 import { useMessagesStore } from '@/stores/messages'
 import { useConversationsStore } from '@/stores/conversations'
 import { useDriveStore } from '@/stores/drive'
+import { useCallsStore, type CallDeclinedEvent, type ParticipantEvent, type ParticipantLeftEvent, type TrackEvent } from '@/stores/calls'
+import type { CallDto } from '@/features/calls/api'
 
 export interface ReactionsEvent { messageId: string; conversationId: string; seq: number; reactions: { userId: string; emoji: string }[] }
 export interface MessageDeletedEvent { messageId: string; conversationId: string; seq: number }
 export interface ReadReceiptEvent { conversationId: string; userId: string; seq: number }
 export interface TypingEvent { conversationId: string; userId: string }
 export interface PresenceEvent { userId: string; online: boolean; lastSeenAt?: string | null }
-export interface IncomingCallEvent { callId: string; conversationId: string; type: 'Audio' | 'Video' | 'Meeting'; startedBy: string }
 
 export const connectionState = ref<HubConnectionState>(HubConnectionState.Disconnected)
 export const presence = ref<Record<string, PresenceEvent>>({})
 export const typing = ref<Record<string, string[]>>({})
-export const incomingCall = ref<IncomingCallEvent | null>(null)
+
 
 let connection: HubConnection | null = null
 /** 登录后为 true；退出登录 / 会话失效后为 false，此时不再自动重连 */
@@ -143,6 +144,8 @@ async function onConnected(): Promise<void> {
   void messages.flushPendingReads()
   // 服务器重启 / 隧道恢复后网盘的出错、离线状态也要恢复（没打开过网盘时什么也不做）
   useDriveStore().resync()
+  // 断线期间的来电、通话结束、有人进出都没收到：和服务器对一遍
+  void useCallsStore().refresh()
 }
 
 if (typeof window !== 'undefined') {
@@ -190,8 +193,14 @@ function registerHandlers(conn: HubConnection): void {
   conn.on('Presence', (e: PresenceEvent) => { presence.value = { ...presence.value, [e.userId]: e } })
   conn.on('ConversationUpdated', () => void useConversationsStore().load())
   conn.on('DriveChanged', (e: { spaceId: string; parentId?: string | null }) => useDriveStore().onChanged(e))
-  conn.on('IncomingCall', (e: IncomingCallEvent) => { incomingCall.value = e })
-  conn.on('CallUpdated', () => { /* M3：通话状态 */ })
+  conn.on('IncomingCall', (c: CallDto) => useCallsStore().onIncomingCall(c))
+  conn.on('CallUpdated', (c: CallDto) => useCallsStore().onCallUpdated(c))
+  conn.on('CallDeclined', (e: CallDeclinedEvent) => useCallsStore().onCallDeclined(e))
+  conn.on('ParticipantJoined', (e: ParticipantEvent) => useCallsStore().onParticipantJoined(e))
+  conn.on('ParticipantLeft', (e: ParticipantLeftEvent) => useCallsStore().onParticipantLeft(e))
+  conn.on('ParticipantUpdated', (e: ParticipantEvent) => useCallsStore().onParticipantUpdated(e))
+  conn.on('TrackPublished', (e: TrackEvent) => useCallsStore().onTrackPublished(e))
+  conn.on('TrackUnpublished', (e: TrackEvent) => useCallsStore().onTrackUnpublished(e))
   conn.on('Notification', () => { /* M1：站内通知 */ })
 }
 

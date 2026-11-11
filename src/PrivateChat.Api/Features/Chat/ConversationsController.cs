@@ -11,7 +11,7 @@ namespace PrivateChat.Api.Features.Chat;
 [ApiController]
 [Route("api/conversations")]
 [Authorize]
-public sealed class ConversationsController(AppDbContext db, IHubContext<ChatHub> hub) : ControllerBase
+public sealed class ConversationsController(AppDbContext db, IHubContext<ChatHub> hub, PresenceTracker presence) : ControllerBase
 {
     /// <summary>当前用户的会话列表，含未读数。</summary>
     [HttpGet]
@@ -56,12 +56,12 @@ public sealed class ConversationsController(AppDbContext db, IHubContext<ChatHub
     };
 
 
-    /// <summary>建群 / 发起单聊（单聊若已存在则直接返回）。</summary>
+    /// <summary>建群 / 发起单聊（单聊若已存在则直接返回）。孩子账号可以和家人单聊（打电话也靠它），但不能建群。</summary>
     [HttpPost]
-    [Authorize(Policy = AuthPolicies.Member)]
     public async Task<ActionResult<ConversationDto>> Create([FromBody] CreateConversationRequest req, CancellationToken ct)
     {
         var me = User.UserId();
+        if (req.Type != ConversationType.Direct && User.Role() == UserRole.Child) throw ApiException.Forbidden("孩子账号不能建群");
         var memberIds = req.MemberIds.Append(me).Distinct().ToList();
         if (req.Type == ConversationType.Family) throw ApiException.BadRequest("全家群由系统维护");
         if (req.Type == ConversationType.Direct && memberIds.Count != 2) throw ApiException.BadRequest("单聊必须恰好两个人");
@@ -88,9 +88,12 @@ public sealed class ConversationsController(AppDbContext db, IHubContext<ChatHub
         await db.SaveChangesAsync(ct);
 
         var dto = ToDto(conv, me);
+        // 在线成员的连接是在连上那一刻按当时的会话入组的：新会话要补进去，否则要等重连才收得到这里的消息
         foreach (var id in memberIds)
-            await hub.Clients.Group(ChatEvents.UserGroup(id)).SendAsync(ChatEvents.ConversationUpdated, dto, ct);
-        // 已连接的成员需要加入新会话组：客户端收到 ConversationUpdated 后重连或调用 Sync 即可；TODO: 服务端主动 AddToGroup
+            foreach (var connectionId in presence.ConnectionsOf(id))
+                await hub.Groups.AddToGroupAsync(connectionId, ChatEvents.ConversationGroup(conv.Id), ct);
+        foreach (var id in memberIds)
+            await hub.Clients.Group(ChatEvents.UserGroup(id)).SendAsync(ChatEvents.ConversationUpdated, ToDto(conv, id), ct);
         return dto;
     }
 

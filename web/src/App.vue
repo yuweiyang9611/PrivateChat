@@ -6,10 +6,13 @@ import DesktopLayout from '@/layouts/DesktopLayout.vue'
 import MobileLayout from '@/layouts/MobileLayout.vue'
 import LocalLoginPage from '@/features/auth/LocalLoginPage.vue'
 import UpdatePrompt from '@/components/UpdatePrompt.vue'
+import CallHost from '@/features/calls/CallHost.vue'
 import { useSessionStore } from '@/stores/session'
 import { useConversationsStore } from '@/stores/conversations'
 import { useMessagesStore } from '@/stores/messages'
 import { useUiStore } from '@/stores/ui'
+import { useFamilyStore } from '@/stores/family'
+import { useCallsStore } from '@/stores/calls'
 import { refreshPushState } from '@/push'
 
 // 设计稿 5.4：≥1024px 桌面三栏，否则手机底部 Tab
@@ -20,6 +23,8 @@ const layout = computed(() => (isDesktop.value ? DesktopLayout : MobileLayout))
 const session = useSessionStore()
 const conversations = useConversationsStore()
 const messages = useMessagesStore()
+const family = useFamilyStore()
+const calls = useCallsStore()
 useUiStore()
 
 // 有了用户（缓存身份冷启动、服务器确认、密码登录）就加载会话列表并恢复发件箱；都先读本地，离线也能用
@@ -30,6 +35,8 @@ watch(
     await conversations.load()
     await messages.restoreOutbox()
     void refreshPushState()
+    void family.load()
+    void calls.init()
   },
 )
 
@@ -43,6 +50,8 @@ onMounted(() => {
     <div v-if="session.loading" class="flex min-h-dvh items-center justify-center opacity-60">{{ $t('session.loading') }}</div>
     <LocalLoginPage v-else-if="!session.user" />
     <component :is="layout" v-else />
+    <!-- 来电弹窗与通话界面：在任何页面都能接、能挂 -->
+    <CallHost v-if="session.user" />
     <UpdatePrompt />
   </el-config-provider>
 </template>

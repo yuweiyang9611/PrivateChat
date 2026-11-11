@@ -8,7 +8,7 @@
 - 入口：Cloudflare Tunnel + Cloudflare Access（零入站端口、无需证书）
 - 部署：Docker Compose 一键
 
-当前状态：M0 骨架已搭好（后端可编译、单元测试通过、初始迁移已生成；前端可构建）。设计稿见 [docs/DESIGN.md](docs/DESIGN.md)，部署草案见 [deploy/](deploy/)。
+当前状态：M0 骨架、M1 聊天（含 PWA 离线与推送）、M2 网盘、M3 通话（1:1 音视频、客厅会议室、屏幕共享、来电推送、通话记录）已完成；M4 动态、M5 远程控制待做。设计稿见 [docs/DESIGN.md](docs/DESIGN.md)，部署见 [deploy/](deploy/)。
 
 ## 本地开发
 
@@ -33,3 +33,5 @@ dotnet test tests/PrivateChat.Api.Tests      # 单元 + 集成测试；集成测
 cd web && npm test                            # 前端单元测试（vitest）
 cd web && npx playwright install chromium && npm run e2e   # 真实 Chromium 端到端（需先启动 compose 栈）
 ```
+
+通话的端到端测试（`web/e2e/calls.cjs`）不需要 Cloudflare 凭据：它会启动一个本机的假 SFU（`web/e2e/fake-sfu.cjs`，一个 headless Chromium 页面真实转发媒体），临时把 api 容器指过去，结束后按 `deploy/.env` 还原。真实 Cloudflare 上的通话要在 `.env` 里填好 Realtime 的 App ID / Secret 与 TURN 密钥后实测。

@@ -1174,6 +1174,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/calls/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["CallConfigDto"];
+                        "application/json": components["schemas"]["CallConfigDto"];
+                        "text/json": components["schemas"]["CallConfigDto"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/calls": {
         parameters: {
             query?: never;
@@ -1185,6 +1222,7 @@ export interface paths {
             parameters: {
                 query?: {
                     conversationId?: string;
+                    limit?: number;
                 };
                 header?: never;
                 path?: never;
@@ -1215,9 +1253,9 @@ export interface paths {
             };
             requestBody: {
                 content: {
-                    "application/json": components["schemas"]["CreateCallRequest"];
-                    "text/json": components["schemas"]["CreateCallRequest"];
-                    "application/*+json": components["schemas"]["CreateCallRequest"];
+                    "application/json": components["schemas"]["StartCallRequest"];
+                    "text/json": components["schemas"]["StartCallRequest"];
+                    "application/*+json": components["schemas"]["StartCallRequest"];
                 };
             };
             responses: {
@@ -1234,6 +1272,156 @@ export interface paths {
                 };
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/calls/active": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["CallDto"][];
+                        "application/json": components["schemas"]["CallDto"][];
+                        "text/json": components["schemas"]["CallDto"][];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/calls/rooms": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["CallDto"][];
+                        "application/json": components["schemas"]["CallDto"][];
+                        "text/json": components["schemas"]["CallDto"][];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/calls/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["CallUsageDto"];
+                        "application/json": components["schemas"]["CallUsageDto"];
+                        "text/json": components["schemas"]["CallUsageDto"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/calls/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["CallDto"];
+                        "application/json": components["schemas"]["CallDto"];
+                        "text/json": components["schemas"]["CallDto"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1279,7 +1467,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/calls/{id}/tracks": {
+    "/api/calls/{id}/decline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/calls/{id}/publish": {
         parameters: {
             query?: never;
             header?: never;
@@ -1299,9 +1522,9 @@ export interface paths {
             };
             requestBody: {
                 content: {
-                    "application/json": components["schemas"]["PublishTracksRequest"];
-                    "text/json": components["schemas"]["PublishTracksRequest"];
-                    "application/*+json": components["schemas"]["PublishTracksRequest"];
+                    "application/json": components["schemas"]["PublishRequest"];
+                    "text/json": components["schemas"]["PublishRequest"];
+                    "application/*+json": components["schemas"]["PublishRequest"];
                 };
             };
             responses: {
@@ -1311,9 +1534,9 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "text/plain": components["schemas"]["SessionDescription"];
-                        "application/json": components["schemas"]["SessionDescription"];
-                        "text/json": components["schemas"]["SessionDescription"];
+                        "text/plain": components["schemas"]["PublishResponse"];
+                        "application/json": components["schemas"]["PublishResponse"];
+                        "text/json": components["schemas"]["PublishResponse"];
                     };
                 };
             };
@@ -1324,7 +1547,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/calls/{id}/tracks/pull": {
+    "/api/calls/{id}/unpublish": {
         parameters: {
             query?: never;
             header?: never;
@@ -1344,9 +1567,9 @@ export interface paths {
             };
             requestBody: {
                 content: {
-                    "application/json": components["schemas"]["PullTracksRequest"];
-                    "text/json": components["schemas"]["PullTracksRequest"];
-                    "application/*+json": components["schemas"]["PullTracksRequest"];
+                    "application/json": components["schemas"]["UnpublishRequest"];
+                    "text/json": components["schemas"]["UnpublishRequest"];
+                    "application/*+json": components["schemas"]["UnpublishRequest"];
                 };
             };
             responses: {
@@ -1356,9 +1579,54 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "text/plain": components["schemas"]["TracksResponse"];
-                        "application/json": components["schemas"]["TracksResponse"];
-                        "text/json": components["schemas"]["TracksResponse"];
+                        "text/plain": components["schemas"]["UnpublishResponse"];
+                        "application/json": components["schemas"]["UnpublishResponse"];
+                        "text/json": components["schemas"]["UnpublishResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/calls/{id}/pull": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PullRequest"];
+                    "text/json": components["schemas"]["PullRequest"];
+                    "application/*+json": components["schemas"]["PullRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["PullResponse"];
+                        "application/json": components["schemas"]["PullResponse"];
+                        "text/json": components["schemas"]["PullResponse"];
                     };
                 };
             };
@@ -1394,6 +1662,123 @@ export interface paths {
                     "application/*+json": components["schemas"]["RenegotiateApiRequest"];
                 };
             };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/calls/{id}/pull/close": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ClosePulledRequest"];
+                    "text/json": components["schemas"]["ClosePulledRequest"];
+                    "application/*+json": components["schemas"]["ClosePulledRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/calls/{id}/state": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ParticipantStateRequest"];
+                    "text/json": components["schemas"]["ParticipantStateRequest"];
+                    "application/*+json": components["schemas"]["ParticipantStateRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/calls/{id}/heartbeat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
             responses: {
                 /** @description OK */
                 200: {
@@ -1889,6 +2274,13 @@ export interface components {
         };
         /** @enum {unknown} */
         AttachmentKind: "Image" | "Video" | "Audio" | "File";
+        CallConfigDto: {
+            enabled: boolean;
+            /** Format: int32 */
+            ringSeconds: number;
+            /** Format: int32 */
+            heartbeatSeconds: number;
+        };
         CallDto: {
             /** Format: uuid */
             id: string;
@@ -1901,11 +2293,30 @@ export interface components {
             /** Format: date-time */
             startedAt: string;
             /** Format: date-time */
+            answeredAt: null | string;
+            /** Format: date-time */
             endedAt: null | string;
+            endReason: null | components["schemas"]["CallEndReason"];
             participants: components["schemas"]["ParticipantDto"][];
+            joinedUserIds: string[];
         };
         /** @enum {unknown} */
+        CallEndReason: "Completed" | "Missed" | "Declined" | "Cancelled" | null;
+        /** @enum {unknown} */
         CallType: "Audio" | "Video" | "Meeting";
+        CallUsageDto: {
+            /** Format: date-time */
+            since: string;
+            /** Format: int32 */
+            calls: number;
+            /** Format: int64 */
+            seconds: number;
+            /** Format: int64 */
+            egressBytesEstimate: number;
+        };
+        ClosePulledRequest: {
+            mids: string[];
+        };
         ConversationDto: {
             /** Format: uuid */
             id: string;
@@ -1928,12 +2339,6 @@ export interface components {
         };
         /** @enum {unknown} */
         ConversationType: "Direct" | "Group" | "Family";
-        CreateCallRequest: {
-            /** Format: uuid */
-            conversationId: null | string;
-            type: components["schemas"]["CallType"];
-            roomSlug?: null | string;
-        };
         CreateConversationRequest: {
             type: components["schemas"]["ConversationType"];
             title: null | string;
@@ -2036,10 +2441,10 @@ export interface components {
             /** Format: uuid */
             nextBeforeId: null | string;
         };
-        IceServers: {
+        IceServer: {
             urls: string[];
-            username: string;
-            credential: string;
+            username?: null | string;
+            credential?: null | string;
         };
         InviteDto: {
             /** Format: uuid */
@@ -2054,8 +2459,7 @@ export interface components {
         JoinResponse: {
             /** Format: uuid */
             participantId: string;
-            cfSessionId: string;
-            iceServers: components["schemas"]["IceServers"];
+            iceServers: components["schemas"]["IceServer"][];
             call: components["schemas"]["CallDto"];
         };
         ListingDto: {
@@ -2155,8 +2559,15 @@ export interface components {
             id: string;
             /** Format: uuid */
             userId: string;
-            cfSessionId: null | string;
+            micOn: boolean;
+            camOn: boolean;
+            /** Format: date-time */
+            joinedAt: string;
             tracks: components["schemas"]["TrackDto"][];
+        };
+        ParticipantStateRequest: {
+            micOn: boolean;
+            camOn: boolean;
         };
         PatchMemberRequest: {
             displayName: null | string;
@@ -2192,21 +2603,43 @@ export interface components {
             detail?: null | string;
             instance?: null | string;
         };
-        PublishTrackInput: {
+        PublishedTrackDto: {
             mid: string;
             trackName: string;
             kind: components["schemas"]["TrackKind"];
         };
-        PublishTracksRequest: {
+        PublishRequest: {
             offer: components["schemas"]["SessionDescription"];
             tracks: components["schemas"]["PublishTrackInput"][];
         };
-        PullTrackInput: {
-            cfSessionId: string;
-            trackName: string;
+        PublishResponse: {
+            answer: components["schemas"]["SessionDescription"];
+            tracks: components["schemas"]["PublishedTrackDto"][];
         };
-        PullTracksRequest: {
+        PublishTrackInput: {
+            mid: string;
+            kind: components["schemas"]["TrackKind"];
+        };
+        PulledTrackDto: {
+            /** Format: uuid */
+            participantId: string;
+            trackName: string;
+            kind: components["schemas"]["TrackKind"];
+            mid: null | string;
+            errorCode: null | string;
+        };
+        PullRequest: {
             tracks: components["schemas"]["PullTrackInput"][];
+        };
+        PullResponse: {
+            requiresImmediateRenegotiation: boolean;
+            offer: null | components["schemas"]["SessionDescription"];
+            tracks: components["schemas"]["PulledTrackDto"][];
+        };
+        PullTrackInput: {
+            /** Format: uuid */
+            participantId: string;
+            trackName: string;
         };
         PushKeys: {
             p256dh: string;
@@ -2311,26 +2744,17 @@ export interface components {
         };
         /** @enum {unknown} */
         SpaceType: "Personal" | "Family";
+        StartCallRequest: {
+            /** Format: uuid */
+            conversationId: string;
+            type: components["schemas"]["CallType"];
+        };
         TrackDto: {
             trackName: string;
             kind: components["schemas"]["TrackKind"];
         };
         /** @enum {unknown} */
         TrackKind: "Audio" | "Video" | "Screen";
-        TrackResult: {
-            trackName: null | string;
-            mid: null | string;
-            sessionId: null | string;
-            errorCode: null | string;
-            errorDescription: null | string;
-        };
-        TracksResponse: {
-            requiresImmediateRenegotiation: boolean;
-            sessionDescription: null | components["schemas"]["SessionDescription"];
-            tracks: null | components["schemas"]["TrackResult"][];
-            errorCode: null | string;
-            errorDescription: null | string;
-        };
         TrashItemDto: {
             node: components["schemas"]["NodeDto"];
             /** Format: date-time */
@@ -2342,6 +2766,13 @@ export interface components {
             totalBytes: number;
             /** Format: int32 */
             itemCount: number;
+        };
+        UnpublishRequest: {
+            trackNames: string[];
+            offer?: null | components["schemas"]["SessionDescription"];
+        };
+        UnpublishResponse: {
+            answer: null | components["schemas"]["SessionDescription"];
         };
         UserDto: {
             /** Format: uuid */

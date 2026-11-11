@@ -181,6 +181,14 @@ namespace PrivateChat.Api.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("call_id");
 
+                    b.Property<bool>("CamOn")
+                        .HasColumnType("boolean")
+                        .HasColumnName("cam_on");
+
+                    b.Property<string>("CfPullSessionId")
+                        .HasColumnType("text")
+                        .HasColumnName("cf_pull_session_id");
+
                     b.Property<string>("CfSessionId")
                         .HasColumnType("text")
                         .HasColumnName("cf_session_id");
@@ -189,9 +197,17 @@ namespace PrivateChat.Api.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("joined_at");
 
+                    b.Property<DateTimeOffset>("LastSeenAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_seen_at");
+
                     b.Property<DateTimeOffset?>("LeftAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("left_at");
+
+                    b.Property<bool>("MicOn")
+                        .HasColumnType("boolean")
+                        .HasColumnName("mic_on");
 
                     b.Property<Guid>("UserId")
                         .HasColumnType("uuid")
@@ -213,6 +229,10 @@ namespace PrivateChat.Api.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("id");
 
+                    b.Property<DateTimeOffset?>("AnsweredAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("answered_at");
+
                     b.Property<Guid?>("ConversationId")
                         .HasColumnType("uuid")
                         .HasColumnName("conversation_id");
@@ -220,6 +240,10 @@ namespace PrivateChat.Api.Migrations
                     b.Property<long>("EgressBytesEstimate")
                         .HasColumnType("bigint")
                         .HasColumnName("egress_bytes_estimate");
+
+                    b.Property<string>("EndReason")
+                        .HasColumnType("text")
+                        .HasColumnName("end_reason");
 
                     b.Property<DateTimeOffset?>("EndedAt")
                         .HasColumnType("timestamp with time zone")
@@ -256,6 +280,14 @@ namespace PrivateChat.Api.Migrations
                         .IsUnique()
                         .HasDatabaseName("ix_call_sessions_room_slug");
 
+                    b.HasIndex("StartedAt")
+                        .HasDatabaseName("ix_call_sessions_started_at");
+
+                    b.HasIndex(new[] { "ConversationId" }, "ActiveConversation")
+                        .IsUnique()
+                        .HasDatabaseName("ix_call_sessions_active_conversation")
+                        .HasFilter("ended_at IS NULL AND conversation_id IS NOT NULL");
+
                     b.ToTable("call_sessions", (string)null);
                 });
 
@@ -270,6 +302,11 @@ namespace PrivateChat.Api.Migrations
                         .IsRequired()
                         .HasColumnType("text")
                         .HasColumnName("kind");
+
+                    b.Property<string>("Mid")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("mid");
 
                     b.Property<Guid>("ParticipantId")
                         .HasColumnType("uuid")

@@ -20,6 +20,15 @@ public sealed class GlobalExceptionFilter(ILogger<GlobalExceptionFilter> logger,
 {
     public void OnException(ExceptionContext context)
     {
+        // 浏览器在请求途中跳走 / 关页面：取消不是错误，也没人等响应（499 是 nginx 对这种情况的约定）
+        if (context.Exception is OperationCanceledException && context.HttpContext.RequestAborted.IsCancellationRequested)
+        {
+            logger.LogDebug("请求被客户端取消 {Path}", context.HttpContext.Request.Path);
+            context.Result = new StatusCodeResult(499);
+            context.ExceptionHandled = true;
+            return;
+        }
+
         ProblemDetails problem;
         if (context.Exception is ApiException api)
         {

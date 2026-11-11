@@ -46,7 +46,11 @@ services:
       CloudflareRealtime__AppSecret: ${CF_REALTIME_APP_SECRET}
       CloudflareRealtime__TurnKeyId: ${CF_TURN_KEY_ID}           # Realtime → TURN 密钥
       CloudflareRealtime__TurnApiToken: ${CF_TURN_KEY_API_TOKEN}
+      # 仅测试用：端到端测试把它指向本机的假 SFU（web/e2e/fake-sfu.cjs）；正常部署不用设置
+      CloudflareRealtime__BaseUrl: ${CF_REALTIME_BASE_URL:-https://rtc.live.cloudflare.com/v1}
       WebPush__Subject: mailto:${ADMIN_EMAIL}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux 上也能从容器访问宿主机（同样只为上面的测试）
     volumes:
       - data:/data
     depends_on:

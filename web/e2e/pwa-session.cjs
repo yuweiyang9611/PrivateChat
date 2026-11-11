@@ -120,8 +120,10 @@ async function dbNames(page) {
   // ---------- 5. 换账号：上一位的本地数据被清掉 ----------
   await login(a, 'admin@example.com')
   await a.waitForSelector('ul li a', { timeout: 15000 })
-  const adminConv = await a.evaluate(() => document.querySelector('ul li a')?.getAttribute('href'))
-  await a.click('ul li a')
+  // 挑一个爸爸不在里面的会话（全家群只有管理员）：通话测试会建一个两人的单聊，那个爸爸本来就该看到
+  const adminOnlyId = sql("select c.id from conversations c where exists (select 1 from conversation_members m join users u on u.id = m.user_id where m.conversation_id = c.id and u.email = 'admin@example.com') and not exists (select 1 from conversation_members m where m.conversation_id = c.id and m.user_id = '01a1b1b0-0000-7000-8000-0000000000b0') limit 1")
+  const adminConv = `/messages/${adminOnlyId}`
+  await a.goto(BASE + adminConv)
   await a.waitForSelector('footer textarea')
   await a.waitForTimeout(800)
   // 模拟 30 天 Cookie 过期 / 被清，然后由爸爸登录同一个浏览器
@@ -144,9 +146,9 @@ async function dbNames(page) {
       }
       o.onerror = () => res(['error'])
     })
-    return { user: JSON.parse(localStorage.getItem('pc.session.user') || 'null')?.username, convs, cached, sawAdminConv: convs.includes(href) }
+    return { user: JSON.parse(localStorage.getItem('pc.session.user') || 'null')?.username, convs, cached, sawAdminConv: convs.includes(href) || cached.includes(href.split('/').pop()) }
   }, adminConv)
-  check('换账号：以新账号进入，旧账号的会话不出现在列表和本地库里', switched && afterSwitch.user === 'bob' && !afterSwitch.sawAdminConv && afterSwitch.cached.length === 0, afterSwitch)
+  check('换账号：以新账号进入，旧账号的会话不出现在列表和本地库里', switched && afterSwitch.user === 'bob' && !afterSwitch.sawAdminConv, afterSwitch)
   await ctx.close()
   await browser.close()
 

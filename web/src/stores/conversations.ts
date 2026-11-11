@@ -3,6 +3,7 @@ import { computed, ref, toRaw } from 'vue'
 import { api, type ConversationDto } from '@/api/client'
 import { db } from '@/db'
 import type { ReadReceiptEvent } from '@/realtime/connection'
+import { useSessionStore } from './session'
 
 export const useConversationsStore = defineStore('conversations', () => {
   const items = ref<ConversationDto[]>([])
@@ -61,7 +62,8 @@ export const useConversationsStore = defineStore('conversations', () => {
   }
 
   function applyReadReceipt(e: ReadReceiptEvent): void {
-    // 自己的已读回执更新本地 lastReadSeq；他人的留给后续做已读头像
+    // 自己的已读回执（别的设备上读了、通话记录自动已读）更新本地 lastReadSeq；他人的留给后续做已读头像
+    if (e.userId !== useSessionStore().user?.id) return
     const c = byId(e.conversationId)
     if (c && e.seq > c.lastReadSeq) {
       c.lastReadSeq = e.seq

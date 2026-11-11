@@ -10,8 +10,19 @@ using PrivateChat.Api.Infrastructure.Keys;
 
 namespace PrivateChat.Api.Features.Notifications;
 
-/// <summary>Service Worker 收到的 JSON。tag 相同的通知会互相替换（同一会话只留一条）。</summary>
-public sealed record PushPayload(string Title, string Body, string Url, string Tag, int Count = 1);
+/// <summary>
+/// Service Worker 收到的 JSON。tag 相同的通知会互相替换（同一会话只留一条）。
+/// Kind：message 新消息；call 来电（带接听 / 拒绝按钮、持续显示）；call-missed 未接来电；call-answered 已在别的设备接听（把响铃通知收掉）。
+/// </summary>
+public sealed record PushPayload(string Title, string Body, string Url, string Tag, int Count = 1, string Kind = PushKinds.Message, Guid? CallId = null);
+
+public static class PushKinds
+{
+    public const string Message = "message";
+    public const string Call = "call";
+    public const string CallMissed = "call-missed";
+    public const string CallAnswered = "call-answered";
+}
 
 /// <summary>
 /// Web Push 发送（docs/DESIGN.md 3.5）：
@@ -105,8 +116,31 @@ public sealed class PushService(IHttpClientFactory httpFactory, IServiceScopeFac
         return new PushPayload(title, body, $"/messages/{last.ConversationId}", $"conv:{last.ConversationId}", messages.Count);
     }
 
+    /// <summary>
+    /// 来电一类不能等的通知：立刻发给这些人的所有设备，不看在线状态（在线只说明某一台设备开着页面，手机照样要响），不阻塞调用方。
+    /// 页面正开着的那台设备由 Service Worker 判断，不重复弹通知。
+    /// </summary>
+    public void SendToUsersInBackground(IReadOnlyCollection<Guid> userIds, PushPayload payload, int ttlSeconds)
+    {
+        if (userIds.Count == 0) return;
+        _ = Task.Run(async () =>
+        {
+            foreach (var userId in userIds)
+            {
+                try
+                {
+                    await SendToUserAsync(userId, payload, CancellationToken.None, ttlSeconds);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "推送失败 {UserId}", userId);
+                }
+            }
+        });
+    }
+
     /// <summary>向该用户所有浏览器订阅发送；返回成功数。</summary>
-    public async Task<int> SendToUserAsync(Guid userId, PushPayload payload, CancellationToken ct)
+    public async Task<int> SendToUserAsync(Guid userId, PushPayload payload, CancellationToken ct, int ttlSeconds = PushSender.DefaultTtlSeconds)
     {
         using var scope = scopes.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -122,7 +156,7 @@ public sealed class PushService(IHttpClientFactory httpFactory, IServiceScopeFac
             catch (JsonException) { sub = null; }
             if (sub is null) { d.PushSubscription = null; continue; }
 
-            switch (await sender.SendAsync(sub, payload, ct))
+            switch (await sender.SendAsync(sub, payload, ct, ttlSeconds))
             {
                 case PushSendResult.Sent:
                     sent++;

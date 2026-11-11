@@ -66,6 +66,34 @@ public sealed class MessageService(AppDbContext db, PrivateChat.Api.Features.Blo
         return (message, true);
     }
 
+    /// <summary>
+    /// 服务端生成的消息（通话记录、系统提示）：不校验成员身份与内容，按 (sender, clientMessageId) 幂等。
+    /// 调用方负责广播；不触发新消息推送。
+    /// </summary>
+    public async Task<(Message Message, bool Created)> AddServerMessageAsync(Guid conversationId, Guid senderId, Guid clientMessageId, MessageType type, string? body, string? payload, CancellationToken ct)
+    {
+        var existing = await db.Messages.Include(m => m.Attachments).Include(m => m.Reactions)
+            .FirstOrDefaultAsync(m => m.SenderId == senderId && m.ClientMessageId == clientMessageId, ct);
+        if (existing is not null) return (existing, false);
+
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var seq = await NextSeqAsync(conversationId, ct);
+        var message = new Message
+        {
+            ConversationId = conversationId,
+            Seq = seq,
+            SenderId = senderId,
+            ClientMessageId = clientMessageId,
+            Type = type,
+            Body = body,
+            Payload = payload,
+        };
+        db.Messages.Add(message);
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return (message, true);
+    }
+
     /// <summary>类型与载荷一致；引用的 blob 必须存在且发送者有权引用（自己上传或本来就能读到）。</summary>
     private async Task ValidateAsync(Guid senderId, SendMessageRequest req, CancellationToken ct)
     {
