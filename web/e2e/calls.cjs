@@ -2,16 +2,43 @@
 // 覆盖：拨打家人 / 来电弹窗 / 接听后双向音视频 / 静音与关摄像头 / 共享屏幕 / 最小化 / 挂断与通话记录 /
 // 拒接 / 未接 / 刷新后来电仍在 / 关页面即离开 / 客厅（常驻会议室）/ 媒体链路中断后自动重连。
 // 前提：compose 栈已启动且镜像是当前代码（deploy/ 下 docker compose up -d --build），浏览器已安装（npx playwright install chromium）。
-// 用法：cd web && node e2e/calls.cjs
-// 脚本会临时用测试凭据重建 api 容器（把 Cloudflare Realtime 的地址指向假 SFU），结束时按 deploy/.env 原样重建回去。
+// 用法：cd web && node e2e/calls.cjs；真实 Cloudflare：E2E_REAL_CF=1 node e2e/calls.cjs。
+// 默认临时用测试凭据重建 api，结束时按 deploy/.env 还原；真实模式使用运行中 api 的配置，不重建容器。
+// 两种模式都只对本地 compose 测试库运行，会创建测试账号与通话记录；真实模式会产生 Cloudflare 用量。
 const path = require('path')
 const { chromium } = require('playwright')
-const { execSync } = require('child_process')
-const { startFakeSfu } = require('./fake-sfu.cjs')
+const { execSync, execFileSync } = require('child_process')
 
+const REAL_CF = process.env.E2E_REAL_CF === '1'
 const BASE = process.env.E2E_BASE || 'http://localhost:8080'
 const SFU_PORT = Number(process.env.E2E_SFU_PORT || 8788)
-const COMPOSE = `docker compose -f "${path.resolve(__dirname, '../../deploy/docker-compose.yml')}"`
+const COMPOSE_FILE = path.resolve(__dirname, '../../deploy/docker-compose.yml')
+const COMPOSE = `docker compose -f "${COMPOSE_FILE}"`
+
+// 检查实际运行的 api 容器，而不是只看 .env（改了 .env 却没重建容器很常见）。
+// 不打印环境变量的值；错误只给变量名，避免密钥出现在测试日志里。
+function checkRealConfiguration() {
+  let env
+  try {
+    const id = execFileSync('docker', ['compose', '-f', COMPOSE_FILE, 'ps', '-q', 'api'], { encoding: 'utf8', timeout: 15000 }).trim()
+    if (!id) throw new Error('api not running')
+    const entries = JSON.parse(execFileSync('docker', ['inspect', '--format', '{{json .Config.Env}}', id], { encoding: 'utf8', timeout: 15000 }))
+    env = Object.fromEntries(entries.map((s) => { const i = s.indexOf('='); return [s.slice(0, i), s.slice(i + 1)] }))
+  } catch {
+    throw new Error('无法检查 api 容器配置，请先启动本地 compose 栈。')
+  }
+  const keys = {
+    AppId: 'CF_REALTIME_APP_ID', AppSecret: 'CF_REALTIME_APP_SECRET',
+    TurnKeyId: 'CF_TURN_KEY_ID', TurnApiToken: 'CF_TURN_KEY_API_TOKEN',
+  }
+  const missing = Object.entries(keys).filter(([key]) => !env[`CloudflareRealtime__${key}`]?.trim()).map(([, name]) => name)
+  if (missing.length) throw new Error(`真实模式缺少配置：${missing.join('、')}。填好 deploy/.env 后运行 docker compose -f deploy/docker-compose.yml up -d api。`)
+  const base = env.CloudflareRealtime__BaseUrl || 'https://rtc.live.cloudflare.com/v1'
+  if (base.replace(/\/$/, '') !== 'https://rtc.live.cloudflare.com/v1')
+    throw new Error('真实模式要求 Cloudflare 官方地址；请移除 CF_REALTIME_BASE_URL 测试覆盖并重建 api。')
+  if (Object.keys(keys).some((key) => env[`CloudflareRealtime__${key}`].startsWith('e2e-')))
+    throw new Error('api 仍在使用 e2e 测试凭据，请填入真实凭据并重建 api。')
+}
 const FAKE_ENV = {
   CF_REALTIME_BASE_URL: `http://host.docker.internal:${SFU_PORT}/v1`,
   CF_REALTIME_APP_ID: 'e2e-app',
@@ -22,6 +49,11 @@ const FAKE_ENV = {
 const BOB_ID = '01a1b1b0-0000-7000-8000-0000000000b0'
 
 const results = []
+const skips = []
+function skip(name, reason) {
+  skips.push(name)
+  console.log(`SKIP  ${name} — ${reason}`)
+}
 function check(name, ok, detail) {
   results.push({ name, ok: !!ok })
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail !== undefined ? '  — ' + JSON.stringify(detail) : ''}`)
@@ -100,16 +132,30 @@ async function audioPeak(page) {
 const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasText: text }).first().waitFor({ timeout }).then(() => true).catch(() => false)
 
 ;(async () => {
-  // ---------- 准备：第二个账号、清掉上次没跑完留下的通话、假 SFU、api 指向假 SFU ----------
-  sql(`insert into users (id, email, username, display_name, password_hash, role, elder_mode, created_at) select '${BOB_ID}', 'bob@example.com', 'bob', '爸爸', password_hash, 'Member', false, now() from users where email='admin@example.com' on conflict (id) do nothing`)
-  const ADMIN_ID = sql(`select id from users where email = 'admin@example.com'`)
-  const adminName = sql(`select display_name from users where email = 'admin@example.com'`)
-  const sfu = await startFakeSfu({ port: SFU_PORT })
-  let browser
+  let sfu, browser
+  let restoreApi = false
   try {
-    await recreateApi(FAKE_ENV)
-    sql(`update call_participants set left_at = now() where left_at is null`)
-    sql(`update call_sessions set ended_at = now(), end_reason = 'Completed' where ended_at is null and room_slug is null`)
+    if (!['', '0', '1'].includes(process.env.E2E_REAL_CF || '')) throw new Error('E2E_REAL_CF 只接受 0 或 1；拒绝把拼错的真实模式当成假 SFU 模式。')
+    const target = new URL(BASE)
+    if (target.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(target.hostname) || target.username || target.password || target.pathname !== '/' || target.search || target.hash)
+      throw new Error('此脚本只用于本地 compose 测试库，E2E_BASE 必须是 http://localhost:端口（或回环 IP），不要指向线上家庭应用。')
+    console.log(REAL_CF ? 'MODE 真实 Cloudflare：不启动假 SFU、不重建 api；使用合成音视频，会产生 Cloudflare 用量。' : 'MODE 本地假 SFU')
+    if (REAL_CF) checkRealConfiguration()
+
+    // 不再全库 UPDATE 强制结束所有通话，避免打断用户正在进行的电话。
+    const active = Number(sql('select (select count(*) from call_sessions where ended_at is null and room_slug is null) + (select count(*) from call_participants where left_at is null)'))
+    if (!Number.isFinite(active) || active !== 0) throw new Error('有进行中的通话或在场参与者，请先挂断；上次异常退出时等待心跳 / 响铃超时后再运行。')
+    const ADMIN_ID = sql(`select id from users where email = 'admin@example.com'`)
+    if (!ADMIN_ID) throw new Error('仅支持本地测试账号 admin@example.com / admin123，请勿对生产库运行。')
+    const adminName = sql(`select display_name from users where email = 'admin@example.com'`)
+    sql(`insert into users (id, email, username, display_name, password_hash, role, elder_mode, created_at) select '${BOB_ID}', 'bob@example.com', 'bob', '爸爸', password_hash, 'Member', false, now() from users where email='admin@example.com' on conflict (id) do nothing`)
+
+    if (!REAL_CF) {
+      const { startFakeSfu } = require('./fake-sfu.cjs')
+      sfu = await startFakeSfu({ port: SFU_PORT })
+      restoreApi = true // 即使重建中途失败，也要在 finally 里尝试还原
+      await recreateApi(FAKE_ENV)
+    }
 
     browser = await chromium.launch({
       args: [
@@ -149,7 +195,7 @@ const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasT
     await a.goto(BASE + '/calls')
     await a.waitForSelector('[data-testid=living-room]', { timeout: 15000 })
     const config = await a.evaluate(() => fetch('/api/calls/config', { credentials: 'include' }).then((r) => r.json()))
-    check('通话功能已启用（api 连到了假 SFU 的凭据）', config.enabled === true, config)
+    check('通话功能已启用', config.enabled === true, config)
     const memberRow = a.locator(`[data-testid=family-member][data-user-id="${BOB_ID}"]`)
     await memberRow.waitFor({ timeout: 10000 })
     check('通话页列出家人，可以直接拨打', (await memberRow.innerText()).includes('爸爸'))
@@ -188,11 +234,12 @@ const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasT
     await b.click('[data-testid=call-cam]')
     check('对方关摄像头后，这边显示头像而不是黑画面', await a.waitForSelector(`${tile(BOB_ID)}[data-video=off]`, { timeout: 8000 }).then(() => true).catch(() => false))
     check('关摄像头的人自己的预览也收起', await waitGone(b, '[data-testid=call-tile][data-kind=self]', 5000))
-    const beforeToggle = sfu.requests.length
+    const beforeToggle = sfu?.requests.length
     await b.click('[data-testid=call-cam]')
     await a.waitForSelector(`${tile(BOB_ID)}[data-video=on]`, { timeout: 8000 }).catch(() => undefined)
     check('重新打开摄像头后画面恢复', !!(await videoFlowing(a, tile(BOB_ID))))
-    check('开关摄像头只是换源，没有向 SFU 重新协商', sfu.requests.length === beforeToggle, sfu.requests.slice(beforeToggle))
+    if (REAL_CF) skip('开关摄像头只是换源，没有向 SFU 重新协商', '需要假 SFU 的请求日志；真实模式仍检查画面恢复')
+    else check('开关摄像头只是换源，没有向 SFU 重新协商', sfu.requests.length === beforeToggle, sfu.requests.slice(beforeToggle))
 
     // ---------- 3. 共享屏幕 ----------
     await a.click('[data-testid=call-screen]')
@@ -306,19 +353,29 @@ const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasT
     check('两人在客厅里互相看到画面、听到声音', !!(await videoFlowing(a, tile(BOB_ID))) && !!(await videoFlowing(b, tile(ADMIN_ID))) && (await audioPeak(b)) > 0.02)
 
     // ---------- 11. 媒体链路中断 → 自动重连 ----------
-    const adminSession = sql(`select p.cf_session_id from call_participants p join call_sessions c on c.id = p.call_id where c.room_slug is not null and p.left_at is null and p.user_id = '${ADMIN_ID}'`)
-    const dropped = await sfu.drop(adminSession)
-    // ICE 要过几秒才发现对端没了（consent 超时），再加 5 秒宽限才重连；重连本身很快，看"重新加入"的日志而不是抓那一瞬间的状态
-    const reconnectLogged = await new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(false), 40000)
-      a.on('console', function onMsg(m) { if (m.text().includes('重新加入')) { clearTimeout(timer); a.off('console', onMsg); resolve(true) } })
-    })
-    check('服务端这条连接断掉后，客户端发现并开始重连', dropped && reconnectLogged)
-    check('重连后回到通话中', await waitPhase(a, 'active', 30000) && (await a.locator('[data-testid=call-overlay][data-media=connected]').waitFor({ timeout: 20000 }).then(() => true).catch(() => false)))
-    const newSession = sql(`select p.cf_session_id from call_participants p join call_sessions c on c.id = p.call_id where c.room_slug is not null and p.left_at is null and p.user_id = '${ADMIN_ID}'`)
-    check('重连换了新的 Cloudflare 会话', !!newSession && newSession !== adminSession, { before: adminSession.slice(0, 12), after: newSession.slice(0, 12) })
-    check('重连后对方重新看到画面、听到声音', !!(await videoFlowing(b, tile(ADMIN_ID), 30000)) && (await audioPeak(b)) > 0.02)
-    check('重连的一方也重新看到对方', !!(await videoFlowing(a, tile(BOB_ID), 30000)))
+    if (REAL_CF) {
+      for (const name of [
+        '服务端这条连接断掉后，客户端发现并开始重连',
+        '重连后回到通话中',
+        '重连换了新的 Cloudflare 会话',
+        '重连后对方重新看到画面、听到声音',
+        '重连的一方也重新看到对方',
+      ]) skip(name, '需要假 SFU 主动断开媒体连接；真实网络切换须另行实测')
+    } else {
+      const adminSession = sql(`select p.cf_session_id from call_participants p join call_sessions c on c.id = p.call_id where c.room_slug is not null and p.left_at is null and p.user_id = '${ADMIN_ID}'`)
+      const dropped = await sfu.drop(adminSession)
+      // ICE 要过几秒才发现对端没了（consent 超时），再加 5 秒宽限才重连；重连本身很快，看"重新加入"的日志而不是抓那一瞬间的状态
+      const reconnectLogged = await new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(false), 40000)
+        a.on('console', function onMsg(m) { if (m.text().includes('重新加入')) { clearTimeout(timer); a.off('console', onMsg); resolve(true) } })
+      })
+      check('服务端这条连接断掉后，客户端发现并开始重连', dropped && reconnectLogged)
+      check('重连后回到通话中', await waitPhase(a, 'active', 30000) && (await a.locator('[data-testid=call-overlay][data-media=connected]').waitFor({ timeout: 20000 }).then(() => true).catch(() => false)))
+      const newSession = sql(`select p.cf_session_id from call_participants p join call_sessions c on c.id = p.call_id where c.room_slug is not null and p.left_at is null and p.user_id = '${ADMIN_ID}'`)
+      check('重连换了新的 Cloudflare 会话', !!newSession && newSession !== adminSession, { before: adminSession.slice(0, 12), after: newSession.slice(0, 12) })
+      check('重连后对方重新看到画面、听到声音', !!(await videoFlowing(b, tile(ADMIN_ID), 30000)) && (await audioPeak(b)) > 0.02)
+      check('重连的一方也重新看到对方', !!(await videoFlowing(a, tile(BOB_ID), 30000)))
+    }
 
     // ---------- 12. 离开客厅：房间还在 ----------
     await b.click('[data-testid=call-hangup]')
@@ -331,10 +388,13 @@ const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasT
     check('客厅不产生通话记录消息', sql(`select count(*) from messages m join call_sessions c on c.id = m.client_message_id where c.room_slug is not null`) === '0')
 
     // ---------- 13. 信令没有违反"同一会话串行"的约束 ----------
-    const protocolErrors = sfu.errors.filter((e) => e.status === 406 || e.status === 400 || e.status === 401 || e.status >= 500)
-    check('整个过程中假 SFU 没有收到乱序 / 非法的请求', protocolErrors.length === 0, protocolErrors.slice(0, 3))
-    const ops = sfu.requests.reduce((m, r) => { const k = r.path.replace(/sessions\/[^/]+/, 'sessions/*').replace(/^\/v1\/apps\/[^/]+/, ''); m[k] = (m[k] || 0) + 1; return m }, {})
-    console.log('  SFU 请求统计：', JSON.stringify(ops))
+    if (REAL_CF) skip('整个过程中假 SFU 没有收到乱序 / 非法的请求', '真实 Cloudflare 不提供假 SFU 的请求记录')
+    else {
+      const protocolErrors = sfu.errors.filter((e) => e.status === 406 || e.status === 400 || e.status === 401 || e.status >= 500)
+      check('整个过程中假 SFU 没有收到乱序 / 非法的请求', protocolErrors.length === 0, protocolErrors.slice(0, 3))
+      const ops = sfu.requests.reduce((m, r) => { const k = r.path.replace(/sessions\/[^/]+/, 'sessions/*').replace(/^\/v1\/apps\/[^/]+/, ''); m[k] = (m[k] || 0) + 1; return m }, {})
+      console.log('  SFU 请求统计：', JSON.stringify(ops))
+    }
     const apiLines = execSync(`${COMPOSE} logs --since 10m --no-log-prefix api`).toString().split('\n')
     const apiErrors = []
     apiLines.forEach((l, i) => { if (/\[\d\d:\d\d:\d\d ERR\]/.test(l)) apiErrors.push([l, ...apiLines.slice(i + 1, i + 12).filter((x) => /Exception|^\s+at /.test(x))].join(' | ').slice(0, 600)) })
@@ -343,12 +403,12 @@ const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasT
     check('脚本执行中断', false, String(e && e.stack ? e.stack : e).slice(0, 600))
   } finally {
     if (browser) await browser.close().catch(() => undefined)
-    await sfu.close().catch(() => undefined)
-    // 按 deploy/.env 原样重建 api（去掉测试凭据）
-    await recreateApi({}).catch((e) => console.log('  还原 api 失败：', String(e)))
+    if (sfu) await sfu.close().catch((e) => check('关闭假 SFU', false, String(e)))
+    // 只有假模式改过容器配置才还原；真实模式不能重建 api 或改掉用户的凭据。
+    if (restoreApi) await recreateApi({}).catch(() => check('还原 api 配置', false, '还原失败，请运行 docker compose -f deploy/docker-compose.yml up -d api'))
   }
 
   const failed = results.filter((r) => !r.ok)
-  console.log(`\n${results.length - failed.length}/${results.length} 通过`)
+  console.log(`\n${results.length - failed.length}/${results.length} 通过，${failed.length} 失败，${skips.length} 跳过（${REAL_CF ? '真实 Cloudflare' : '本地假 SFU'}）`)
   process.exit(failed.length ? 1 : 0)
 })()

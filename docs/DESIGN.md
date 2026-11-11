@@ -374,6 +374,9 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 **成本**：媒体出站每月前 1 TB 免费，之后 0.05 美元 / GB。6 人 720p 会议约 13 GB / 小时，1 TB 够每月 70 多小时。api 在每条轨道下线时按"时长 × 码率 × 当时在场的其他人数"累加估算值（`egress_bytes_estimate`），`GET /api/calls/usage` 给管理员看当月合计（通话页底部），实际以 Cloudflare 控制台为准。
 
 **测试**：后端集成测试用一个按官方形状应答的假 Cloudflare（HttpMessageHandler）+ 真实 SignalR 连接；端到端测试用 `web/e2e/fake-sfu.cjs`——一个 headless Chromium 页面充当 SFU、真实转发媒体，接口与约束（串行、406）同官方。真实 Cloudflare 上的通话需要填好凭据后实测。
+
+`web/e2e/calls.cjs` 支持 `E2E_REAL_CF=1`：使用本地 compose api 已加载的真实 SFU / TURN 配置，不启动假 SFU、不重建 api；保留双向音视频、共享屏幕、来电和客厅等流程，只将七项依赖假 SFU 观测 / 强制断线的断言明确计为跳过。两种模式均限本地测试库，有活动通话时退出；真实模式缺配置时在产生测试数据前退出。CLI 配置检查用 `npm run test:e2e-cli` 验证并纳入 CI；运行步骤见 README。真实 Cloudflare 和手机真机仍须实测。
+
 ### 4.6 网盘与共享
 
 - 两类空间：个人空间（每人一个）与家庭共享空间（全员可写，Child 可配置为只读）。首次访问网盘时自动创建。
