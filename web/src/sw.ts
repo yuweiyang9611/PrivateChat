@@ -20,9 +20,9 @@ precacheAndRoute(self.__WB_MANIFEST)
 cleanupOutdatedCaches()
 
 // SPA 回退：页面导航一律给缓存里的 index.html（离线可开）。
-// 以下路径必须走网络：API、SignalR、分享链接、OpenAPI 文档，以及 Cloudflare 的 /cdn-cgi/（Access 登录 / 退出）。
+// 以下路径必须走网络：API、SignalR、分享链接、OpenAPI 文档、Cloudflare 的 /cdn-cgi/（Access 登录 / 退出），以及 /downloads/（远程协助程序安装包）。
 // 它们也不是应用页面（新标签页里打开的 PDF、外链分享页）：通知点开时不能把它们当成应用窗口。
-const NON_APP_PATHS = [/^\/api\//, /^\/hubs\//, /^\/ws\//, /^\/s\//, /^\/openapi\//, /^\/healthz/, /^\/scalar/, /^\/cdn-cgi\//]
+const NON_APP_PATHS = [/^\/api\//, /^\/hubs\//, /^\/ws\//, /^\/s\//, /^\/openapi\//, /^\/healthz/, /^\/scalar/, /^\/cdn-cgi\//, /^\/downloads\//]
 registerRoute(new NavigationRoute(createHandlerBoundToURL('index.html'), { denylist: NON_APP_PATHS }))
 
 // 缩略图：内容寻址、生成后不变，缓存优先；离线时之前看过的图照样能显示

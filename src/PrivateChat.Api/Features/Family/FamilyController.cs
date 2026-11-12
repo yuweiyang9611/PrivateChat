@@ -15,7 +15,7 @@ public sealed record PatchMemberRequest(string? DisplayName, UserRole? Role, boo
 [ApiController]
 [Route("api/family")]
 [Authorize]
-public sealed class FamilyController(AppDbContext db) : ControllerBase
+public sealed class FamilyController(AppDbContext db, PrivateChat.Api.Features.Remote.RemoteService remote) : ControllerBase
 {
     [HttpGet("members")]
     public async Task<ActionResult<List<MemberDto>>> Members(CancellationToken ct)
@@ -68,6 +68,8 @@ public sealed class FamilyController(AppDbContext db) : ControllerBase
             u.DisabledAt = disabled ? DateTimeOffset.UtcNow : null;
         }
         await db.SaveChangesAsync(ct);
+        // 被降为孩子、被停用：正在进行的远程控制立即结束
+        if (req.Role is not null || req.Disabled == true) await remote.EndDisallowedAsync(controllerId: u.Id);
         return new MemberDto(u.Id, u.Email, u.Username, u.DisplayName, u.Role, u.ElderMode, u.AvatarBlobId, u.CreatedAt, u.DisabledAt != null);
     }
 }

@@ -6,7 +6,10 @@ using PrivateChat.Api.Infrastructure;
 
 namespace PrivateChat.Api.Features.Auth;
 
-/// <summary>Agent 等非浏览器客户端：Authorization: Bearer &lt;设备令牌&gt;。</summary>
+/// <summary>
+/// Agent 等非浏览器客户端：Authorization: Bearer &lt;设备令牌&gt;。
+/// 设备令牌只能用于远程控制相关的接口：被控电脑上的令牌万一泄露，也拿不到主人的聊天、网盘。
+/// </summary>
 public sealed class DeviceTokenAuthenticationHandler(
     IOptionsMonitor<AuthenticationSchemeOptions> options,
     ILoggerFactory logger,
@@ -15,10 +18,13 @@ public sealed class DeviceTokenAuthenticationHandler(
     AppDbContext db)
     : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
 {
+    private static readonly PathString[] AllowedPaths = ["/hubs/agent", "/ws/remote", "/api/remote/sessions"];
+
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
     {
         var auth = Request.Headers.Authorization.ToString();
         if (!auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)) return AuthenticateResult.NoResult();
+        if (!AllowedPaths.Any(p => Request.Path.StartsWithSegments(p))) return AuthenticateResult.Fail("设备令牌只能用于远程控制");
         var token = auth["Bearer ".Length..].Trim();
         if (!tokens.TryValidate(token, out var payload)) return AuthenticateResult.Fail("设备令牌无效");
 

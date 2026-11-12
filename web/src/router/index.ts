@@ -81,6 +81,7 @@ const routes: RouteRecordRaw[] = [
     ],
   },
   { path: '/devices', component: () => import('@/features/remote/DevicesPage.vue'), meta: { section: 'devices', titleKey: 'nav.devices' } },
+  { path: '/remote/:id', component: () => import('@/features/remote/RemoteView.vue'), props: true, meta: { section: 'devices', titleKey: 'nav.devices' } },
   { path: '/settings', component: () => import('@/features/settings/SettingsPage.vue'), meta: { section: 'settings', titleKey: 'nav.settings' } },
   { path: '/family', component: () => import('@/features/family/FamilyPage.vue'), meta: { section: 'family', titleKey: 'nav.family' } },
   { path: '/:pathMatch(.*)*', redirect: '/messages' },

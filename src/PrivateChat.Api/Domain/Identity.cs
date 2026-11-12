@@ -55,8 +55,14 @@ public class Device
     public DateTimeOffset? LastSeenAt { get; set; }
     public bool RemoteCapable { get; set; }
     public string? UnattendedPinHash { get; set; }
-    /// <summary>允许远程控制本设备的用户 Id 列表（JSON）。</summary>
+    /// <summary>无人值守 PIN 连续输错的次数；到 5 次锁 15 分钟并清零。</summary>
+    public int PinFailures { get; set; }
+    public DateTimeOffset? PinLockedUntil { get; set; }
+    /// <summary>允许远程控制本设备的用户 Id 列表（JSON）。设备主人总是可以，不用列。</summary>
     public string AllowedControllers { get; set; } = "[]";
+    /// <summary>Agent 上报：版本、系统（显示器信息只在内存里，见 AgentRegistry）。</summary>
+    public string? AgentVersion { get; set; }
+    public string? Os { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? RevokedAt { get; set; }
 }

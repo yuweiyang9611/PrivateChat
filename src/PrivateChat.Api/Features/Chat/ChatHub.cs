@@ -31,6 +31,7 @@ public static class ChatEvents
     public const string AlbumChanged = "AlbumChanged";
     public const string Notification = "Notification";
     public const string RemoteSessionChanged = "RemoteSessionChanged";
+    public const string DeviceChanged = "DeviceChanged";
 
     public static string UserGroup(Guid userId) => $"user:{userId}";
     public static string ConversationGroup(Guid conversationId) => $"conv:{conversationId}";

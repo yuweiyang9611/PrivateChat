@@ -13,7 +13,7 @@
 
 1. **后端做成模块化单体**：一个 ASP.NET Core 10 进程承载 REST、SignalR、WebSocket 中继和后台媒体任务；前端静态文件由 nginx 托管。家庭规模不需要微服务，但代码按功能"垂直切片"组织，将来拆得开。
 2. **音视频通话/会议用 Cloudflare Realtime SFU + TURN**：媒体 100% 走 Cloudflare，家里不跑媒体服务器、不开任何 UDP 端口；.NET 负责房间编排（调用会话 / 轨道 API）和通话记录。
-3. **远程控制必须有原生 Agent**：浏览器只能共享屏幕，无法注入键鼠。用 .NET 写 Windows 被控端 Agent（被控电脑都是 Windows）；传输先走服务器 WebSocket 中继（443 一个端口通吃、不怕 NAT），浏览器用 WebCodecs 解码。v1 Agent 用 ffmpeg 子进程采集编码，几天就能跑起来。
+3. **远程控制必须有原生 Agent**：浏览器只能共享屏幕，无法注入键鼠。用 .NET 写 Windows 被控端 Agent（被控电脑都是 Windows）；传输先走服务器 WebSocket 中继（443 一个端口通吃、不怕 NAT），浏览器用 WebCodecs 解码。v1 Agent 进程内用 GDI 截屏、Windows 自带的 Media Foundation H.264 编码器编码，单个 exe，不带外部程序。
 4. **存储用本地磁盘卷 + 内容寻址 Blob 表**：聊天附件、网盘文件、动态图片三处引用同一份数据，按 SHA-256 去重；通过 `IBlobStore` 抽象，日后可换 S3。
 5. **前端一套 Vue 3 + TS 代码**覆盖桌面浏览器和手机 PWA（可安装、可推送），后期如需后台来电再用 Capacitor 套壳。
 6. **入口走 Cloudflare Zero Trust**：服务器不开任何入站端口，cloudflared 建出站隧道，TLS 在 Cloudflare 边缘终结，Cloudflare Access 做身份门禁，应用直接信任 Access 签发的身份、不再维护密码。nginx 托管前端静态文件并反代 API。必需容器 4 个（cloudflared、web、api、postgres），`docker compose up -d` 一键。
@@ -101,7 +101,8 @@
 - 浏览器只能 `getDisplayMedia` 共享屏幕，**无法注入键鼠**，所以被控端必须装原生程序。
 - WebRTC P2P 需要 STUN / TURN；国内手机网络多为对称 NAT / CGNAT，大概率还是要走 TURN 中继。既然都要中继，不如直接用自家服务器做 WebSocket 中继：**443 一个端口通吃**，穿墙无忧，实现最简单。
 - 视频流：Agent 产出 H.264 Annex-B 裸流 → WebSocket → 浏览器 `VideoDecoder`（WebCodecs）→ canvas。局域网延迟 <100 ms，公网 150–300 ms，足够"帮爸妈点鼠标、装软件"。
-- 分三步走：v1 Agent 用 ffmpeg 子进程（`ddagrab` 采集 + libx264 zerolatency），零 native 互操作；v2 进程内采集 + 硬件编码，解决 UAC / 锁屏；v3 可选 WebRTC P2P 再降延迟。
+- 分三步走：v1 进程内 GDI 截屏 + Media Foundation 软件 H.264 编码（Windows 自带，关键帧可按需，单文件 exe），以当前用户运行；v2 桌面复制 + 硬件编码、SYSTEM 服务解决 UAC / 锁屏；v3 可选 WebRTC P2P 再降延迟。
+  （原计划 v1 用 ffmpeg 子进程；实测 Media Foundation 编码 1080p 每帧 2–3 ms，省掉随包分发 100 MB 的 ffmpeg 和 GPL 的 libx264，就直接做了进程内。）
 - RustDesk 自托管作为过渡与兜底（compose 里一个可选 profile），网页里记录成员的 RustDesk ID 一键唤起。
 - 入口换成 Cloudflare Tunnel 后这个选择更顺：隧道只代理 HTTP / WebSocket，中继方案原样可用；WebRTC P2P 反而要另开端口。
 
@@ -171,11 +172,11 @@ flowchart LR
 
 **远程控制爸爸的电脑**
 
-1. 爸爸电脑上的 Agent 带 Cloudflare Access 服务令牌穿过门禁，再用设备令牌连接 SignalR，上报在线、分辨率、显示器数。
+1. 爸爸电脑上的 Agent 带 Cloudflare Access 服务令牌穿过门禁，再用设备令牌连接 `/hubs/agent`（与网页的 `/hubs/chat` 分开：Agent 连着不算爸爸"在线"），上报版本、系统、显示器。
 2. 我在"设备"页点"远程控制" → `POST /api/remote/sessions`；服务端校验角色与设备策略，经 SignalR 通知 Agent。
 3. Agent 弹窗"XX 请求远程控制（30 s）"，爸爸点同意；或者我输入该设备的无人值守 PIN。
-4. 双方各自连接 `/ws/remote/{sessionId}/agent` 与 `/controller`，服务端做字节级透传；Agent 推 H.264 帧，我这边把鼠标 / 键盘事件发回去。
-5. 被控端屏幕顶部有红色常驻条"正在被 XX 远程控制 [断开]"；任一方断开即结束，服务端写审计记录。
+4. 双方各自连接 `/ws/remote/{sessionId}/agent` 与 `/controller`，服务端按消息原样转发（只看模式下丢掉控制端发来的输入帧）；Agent 推 H.264 帧，我这边每解出一帧回一个确认、把鼠标 / 键盘事件发回去。
+5. 被控端屏幕顶部有红色常驻条"正在被 XX 远程控制 [断开]"；任一方点结束、或断开超过 30 秒即结束，服务端写审计记录（谁、何时、多久、流量、结束原因）。
 
 ---
 
@@ -230,7 +231,7 @@ PrivateChat/
 | `users` | id, email（Access 身份映射键）, username, display_name, avatar_blob_id, password_hash（仅局域网备用登录）, role（Admin / Member / Child）, elder_mode, created_at, disabled_at |
 | `families` | id, name。v1 单家庭，表保留给未来 |
 | `invites` | email（允许自动建号的家人邮箱）, code（局域网模式用）, created_by, role, expires_at, used_by |
-| `devices` | id, user_id, kind（Browser / Agent）, name, platform, push_subscription jsonb, token_hash, last_seen_at, remote_capable, unattended_pin_hash, allowed_controllers jsonb |
+| `devices` | id, user_id, kind（Browser / Agent）, name, platform, push_subscription jsonb, token_hash, last_seen_at, remote_capable, unattended_pin_hash, pin_failures, pin_locked_until, allowed_controllers jsonb, agent_version, os, revoked_at |
 | `refresh_tokens` | id, user_id, device_id, hash, expires_at, revoked_at |
 
 **聊天**
@@ -279,7 +280,7 @@ PrivateChat/
 | `call_sessions` | id, conversation_id, type（Audio / Video / Meeting）, room_slug（常驻会议室）, started_by, started_at, answered_at, ended_at, end_reason（Completed / Missed / Declined / Cancelled）, scheduled_at, egress_bytes_estimate。同一会话只允许一条未结束的记录（部分唯一索引） |
 | `call_participants` | id, call_id, user_id, cf_session_id（发布用的 Cloudflare 会话）, cf_pull_session_id（订阅用的）, mic_on, cam_on, joined_at, last_seen_at（心跳）, left_at |
 | `call_tracks` | id, participant_id, track_name, kind（Audio / Video / Screen）, mid（发布会话里的 mid，强制关闭用）, published_at, unpublished_at |
-| `remote_sessions` | id, controller_user_id, target_device_id, mode（View / Control）, consent（Prompt / Unattended）, started_at, ended_at, end_reason, bytes_relayed |
+| `remote_sessions` | id, controller_user_id, target_device_id, mode（View / Control）, consent（Prompt / Unattended）, state（Pending / Active / Ended）, started_at, expires_at（等同意的截止）, accepted_at, ended_at, end_reason（declined / timeout / controller / agent / stopped / revoked / disconnected / replaced）, bytes_relayed。一台设备只允许一条未结束的记录（部分唯一索引） |
 
 **通知与任务**
 
@@ -418,44 +419,56 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 
 **组成**
 
-- Agent（被控端）：.NET 10（`net10.0-windows`），Windows 10 / 11 托盘应用 + 后台 Worker，随用户登录自启。被控电脑全部是 Windows，不做 Linux / macOS。
-- 控制端：浏览器页面（Vue），无需安装。
-- 服务端 `Remote` 模块：设备注册、会话协商（SignalR）、数据面中继（原生 WebSocket `/ws/remote/{sessionId}/{role}`）。
+- Agent（被控端）：.NET 10 WinForms 托盘程序（`net10.0-windows`），Windows 10 / 11，随用户登录自启（`HKCU\…\Run`，不需要管理员权限）。被控电脑全部是 Windows，不做 Linux / macOS。
+- 控制端：浏览器页面（Vue，`/remote/:id`），无需安装；手机上也能用（触摸当鼠标，中文用"输入文字"框）。
+- 服务端 `Remote` 模块：设备与策略、会话状态机、Agent 的 SignalR 通道 `/hubs/agent`、数据面中继（原生 WebSocket `/ws/remote/{sessionId}/{agent|controller}`）。
 
 **设备注册（设备码登录）**
 
-1. Agent 首次启动显示 8 位设备码，轮询 `/api/auth/device/poll`。
-2. 用户在网页"设备"页输入设备码确认，Agent 获得长期设备令牌（Windows 用 DPAPI 加密保存）。
-3. Agent 每个请求都带 Cloudflare Access 服务令牌头（`CF-Access-Client-Id` / `CF-Access-Client-Secret`，安装时与设备码一起填入），过了门禁再用设备令牌连接 SignalR，上报在线状态、分辨率、显示器数。
+1. 在网页"设备 → 添加电脑"里下载 Agent（web 镜像构建时交叉编译的单文件 exe，`/downloads/PrivateChat.Agent.exe`），复制"配置串"（`PCA1.` + base64url JSON：服务器地址，以及 .env 里配了的话 Access 服务令牌）。
+2. Agent 第一次运行要配置串，然后带上计算机名申请 8 位设备码（`POST /api/auth/device/code`，10 分钟有效，过期自动换新），每 2 秒轮询 `/poll`。匿名接口防刷：同一来源最多同时 5 个码，全局 200 个，满了挤掉最早的未确认码（被挤掉的 Agent 轮询拿到 404 自动换新码）。
+3. 网页输入设备码，先查到电脑名核对（`/lookup`），再确认（`/confirm`）；管理员可以替家人添加（设备归家人）。默认远程名单是除主人外的所有管理员。
+4. Agent 拿到长期设备令牌，与 Access 服务令牌密钥一起用 DPAPI（当前用户）加密保存在 `%LOCALAPPDATA%\PrivateChat\Agent`。
+5. 设备令牌只能用于远程相关的接口（`/hubs/agent`、`/ws/remote`、`/api/remote/sessions`）：被控电脑上的令牌万一泄露，也拿不到主人的聊天和网盘。请求同时带 Access 头和 Bearer 时优先认设备令牌（Access 服务令牌的 JWT 没有邮箱）。
 
 **会话建立**
 
-1. 控制端 `POST /api/remote/sessions {targetDeviceId, mode}`。服务端校验：请求者是 Admin / Member，且在目标设备的 `allowed_controllers` 白名单里。
-2. 服务端经 SignalR 通知 Agent → Agent 弹窗"XX 请求远程控制（30 s）"；无人值守模式则要求控制端输入设备 PIN。
-3. 同意后双方各自连接 `/ws/remote/{sessionId}/agent` 与 `/controller`，服务端做字节级透传，不解析、不落盘。
-4. 被控端顶部常驻红色条"正在被 XX 远程控制 [断开]"，本地按 Ctrl+Alt+Shift+Q 立即断开。
+1. 控制端 `POST /api/remote/sessions {targetDeviceId, mode, pin?}`。服务端校验：请求者是 Admin / Member（孩子不行），是设备主人或在白名单里，设备在线；锁住设备行后检查没有别人的未结束会话（同一个人再点一次就顶掉自己之前那次）。
+2. 没带 PIN：会话 Pending（30 秒），经 `/hubs/agent` 通知 Agent 弹窗"XX 想远程控制这台电脑"（默认焦点在"拒绝"上，回车不会误同意）；Agent 回 `/consent`。带了 PIN（设备主人设置的无人值守 PIN，6–12 位数字，PBKDF2 哈希）：在设备行锁里校验，直接 Active；连错 5 次锁 15 分钟。
+3. Active 后双方各自连接 `/ws/remote/{sessionId}/agent` 与 `/controller`；控制的人和设备主人都收到 SignalR `RemoteSessionChanged`（主人的网页会弹提醒）。
+4. 被控端顶部常驻红色条"正在被 XX 远程控制 [断开]"，本地按 Ctrl+Alt+Shift+Q 立即断开；托盘图标变红。
+5. 状态迁移都是带条件的 UPDATE（WHERE 还在等同意 / 还没结束），同意、超时、挂断同时发生也只有一个生效。维护任务每 5 秒：等同意超时的结束（timeout），进行中但任一端断开超过 30 秒的结束（disconnected）。服务重启后两端各自重连，会话照常继续。
+6. 主人或管理员可以在网页上替电脑挂断（stopped）、移除电脑（吊销令牌，先通知 Agent 再作废，在设备行锁里改，Agent 回到设备码登记）。
+7. 权限一变就生效：把人移出名单、改 / 清 PIN（凭旧 PIN 进来的无人值守会话）、成员被降为孩子或停用，正在进行的会话立即结束（stopped）；中继每次接受连接都按当时的权限再查一遍。
+8. Agent 每次连上 `/hubs/agent` 都补发这台设备未结束的会话（等同意的再弹窗，进行中的直接连数据面），请求恰好发到旧连接上也不会丢；倒计时用服务器给的相对秒数，被控电脑的时钟不准也不影响。
 
-**数据面协议**（定义在 `PrivateChat.Contracts`，二进制帧：1 字节类型 + 载荷，详见附录 C）
+**数据面**（帧格式定义在 `PrivateChat.Contracts`，浏览器那份在 `web/src/features/remote/protocol.ts`，详见附录 C）
 
-- Agent → 控制端：`VideoConfig`、`VideoFrame`、`Cursor`、`Clipboard`、`Monitors`、`Stats`。
-- 控制端 → Agent：`MouseMove`（归一化 0..1 坐标）、`MouseButton`、`Wheel`、`Key`（物理键码 + 修饰键）、`Clipboard`、`SelectMonitor`、`SetQuality`、`RequestKeyFrame`。
-- 控制端用 `VideoDecoder`（H.264）解码到 canvas；`keydown / keyup` 用 `e.code` 映射到 Windows 扫描码；指针事件按远端分辨率缩放。
+- WebSocket 二进制消息，一条一帧：1 字节类型 + 载荷。中继按消息转发、不解码不落盘，只看第一个字节：只看模式下丢掉控制端的输入帧（Agent 也再丢一遍）。对端连上 / 断开时中继给另一端发一条文本消息 `{"type":"peer","connected":…}`，Agent 据此开始 / 暂停采集。服务端 15 秒发一次 ping、30 秒收不到 pong 就断开（手机掉线、笔记本合盖没有 FIN，不设超时的话会话会一直挂着）。
+- 流控：每个视频帧带 Agent 的毫秒时间戳，控制端解码出来后回 `FrameAck`；未确认的超过 4 帧 Agent 就先不采，网络慢时自动降帧，延迟不累积（确认往返时间显示在控制端工具栏上）。中继"收一条发一条"，对端发不动时不再收，TCP 背压一路传回。
+- 控制端用 `VideoDecoder`（H.264，Annex B，codec 字符串取自关键帧里的 SPS，`optimizeForLatency`）解码到 canvas（object-fit: contain）；解码出错就丢掉解码器、请求关键帧。键盘按物理键位（`e.code` → 扫描码集合 1，0xE0xx 为扩展键；SendInput 按扫描码注入时 NumLock 是不带扩展的 0x45，Pause 发不了）发送，与两边的输入法、布局无关；中文等文字用"输入文字"框发 `Text` 帧（Agent 用 `KEYEVENTF_UNICODE`）。Mac 的 ⌘ 当 Ctrl 发。
+- 剪贴板：只在控制模式下同步，单次最多 1 MB（浏览器发送前截断在字符边界上）。控制端 Ctrl+V 时先把本机剪贴板的文字发过去再发按键，Agent 写好剪贴板之后才处理后面的键鼠（不然会粘出旧内容）；被控端会话开始后新复制的文字发回控制端（会话前剪贴板里已有的不发，可能是密码）。
+- 失焦、切到后台时控制端发 `ReleaseAll`；Agent 记住按下没松开的键和鼠标键，控制端断开、会话结束时全部松开。鼠标键按 `PointerEvent.buttons` 位图同步（同时按两个键也不会卡住一个）；点在画面外的黑边上不发点击；Mac 上按住 ⌘ 时的键浏览器不发 keyup，按下后立刻补松开。
+- 同一个人在别的窗口 / 设备上打开同一次远程会顶掉这边的连接（4000）：这边显示"已在别处打开"，可以点"在这里继续"抢回来，离开页面时不结束会话。
+- 解码器报错后等关键帧期间丢掉的帧也回确认，Agent 收到请求关键帧时清空在途窗口，画面恢复只要一个往返。
 
-**Agent v1 实现路径（最快可用）**
+**Agent v1 实现**
 
-- 采集 + 编码：子进程 `ffmpeg -f ddagrab -framerate 20 -i desktop -c:v libx264 -preset ultrafast -tune zerolatency -g 40 -bf 0 -pix_fmt yuv420p -f h264 pipe:1`，随 Agent 打包 ffmpeg.exe；读 stdout 按 NAL 单元切帧发送。
-- 画质档位：局域网 1080p / 8 Mbps、公网 720p / 2 Mbps，切换时重启 ffmpeg；每个会话单独起一个 ffmpeg 进程，首帧天然是关键帧。
-- 注入：`SendInput` P/Invoke（鼠标绝对坐标按 65535 归一化，键盘用扫描码）。
-- 安装与自启：`dotnet publish -r win-x64 --self-contained` 单文件发布 + Inno Setup 安装包，内含 ffmpeg.exe；通过任务计划程序随用户登录启动。v1 以当前用户会话运行而非 Windows 服务，这样 `ddagrab`（需要 Windows 8 以上 + DirectX 11）和 `SendInput` 都直接可用。
-- v1 明确接受的限制：无法操作 UAC 提示和锁屏（需要 SYSTEM 服务 + 桌面切换）、多显示器只取一块、无音频。
-- v2：进程内采集（Windows.Graphics.Capture / DXGI Desktop Duplication）+ Media Foundation 硬件编码，延迟和 CPU 更好，关键帧可按需；SYSTEM 服务 + 用户会话助手进程解决 UAC / 锁屏。
+- 采集：GDI `BitBlt` / `StretchBlt`（HALFTONE 缩放）屏幕 DC 到 32 位 DIB，再把鼠标指针画进去；进程是 Per-Monitor V2 DPI 感知，全部物理像素。静止画面逐字节比较后不编码，变化停止后再补 8 帧让码率控制把画质补上来。
+- 编码：Media Foundation 软件 H.264 编码器（CLSID_CMSH264EncoderMFT，同步 MFT），NV12 输入（BT.709），Main profile、低延迟、无 B 帧、CBR、GOP 很长，关键帧在控制端连上、请求、切换显示器 / 画质时按需（`CODECAPI_AVEncVideoForceKeyFrame`），关键帧前总带 SPS / PPS。本机实测 1080p 每帧编码 2–3 ms，GDI 截屏（含缩放）约 30 ms。
+- 画质档位：流畅 = 最大 1280×800、20 fps、1.5 Mbps；清晰 = 最大 1920×1200、15 fps、4 Mbps。可选显示器（`SelectMonitor`），每块按虚拟桌面坐标换算输入。
+- 注入：`SendInput`（鼠标绝对坐标按虚拟桌面 0..65535 归一化，键盘用扫描码 + 扩展键标志，滚轮 120 一格）。
+- 锁屏 / UAC 提示在安全桌面上：每秒检查输入桌面，不是普通桌面就发 `Status(SecureDesktop)`，控制端显示原因，不推黑屏。
+- 自动化测试：`--headless --source pattern --dry-input FILE --consent accept`（测试画面、键鼠写日志，accept 需要 `PRIVATECHAT_AGENT_TEST=1`）；`--selftest` 编 60 帧写出 Annex B 供 ffprobe 检查。
+- v1 明确接受的限制：无法操作 UAC 提示和锁屏、发不了 Ctrl+Alt+Del（需要 SYSTEM 服务 + 桌面切换）、注入不到管理员权限的窗口（UIPI）、无音频、Windows N 版要装媒体功能包。
+- v2：桌面复制（DXGI Desktop Duplication）+ 硬件编码（异步 MFT），SYSTEM 服务 + 用户会话助手进程解决 UAC / 锁屏 / Ctrl+Alt+Del。
 - v3（可选）：WebRTC P2P（SIPSorcery）+ Cloudflare TURN，公网延迟再降 50–100 ms。
 
 **安全**
 
-- 仅 Admin / Member 可控，Child 不可；设备所有者维护白名单；每次会话审计（谁、何时、多久、流量）。
-- 设备令牌可在网页一键吊销；无人值守 PIN 错 5 次锁 15 分钟。
-- 中继只转发已协商会话的字节；TLS 全程。
+- 仅 Admin / Member 可控，Child 不可；设备主人（或管理员）维护白名单与 PIN；每次会话审计（谁、何时、多久、流量、结束原因），网页"设备"页可查。
+- 默认每次都要电脑前的人点同意；无人值守 PIN 要主人主动设置。
+- 设备令牌可在网页一键吊销，且只能用于远程接口；中继只接受已同意会话的控制人与目标设备。Agent 本地配置里的设备令牌和 Access 密钥只存 DPAPI 加密后的值（明文属性不序列化）。
 
 **RustDesk 兜底**：`docker compose --profile rustdesk up -d` 启动 hbbs / hbbr；网页"设备"页可记录成员的 RustDesk ID，一键复制或深链 `rustdesk://`。
 
@@ -799,7 +812,7 @@ docker compose up -d     # 首次会构建 web 与 api 镜像
 | M2 网盘（已完成） | 2 周 | tus 上传、目录、共享、相册时间线、发送到聊天、回收站 |
 | M3 通话（已完成） | 3 周 | Cloudflare Realtime 会话 / 轨道编排、1:1 / 会议、屏幕共享、客厅、通话记录、来电推送；真实 Cloudflare 上尚未实测 |
 | M4 时光（已完成） | 2 周 | 动态 / 评论 / 点赞 / 那年今天 / 相册 |
-| M5 远程 | 3–4 周 | Agent v1（Windows）+ 中继 + 浏览器控制端 + 审计 |
+| M5 远程（已完成） | 3–4 周 | Agent v1（Windows 托盘，GDI + Media Foundation H.264，SendInput）+ 设备码 + 同意 / 无人值守 PIN + 中继（按帧确认流控）+ 浏览器控制端（WebCodecs）+ 审计；经 Cloudflare 隧道、实体机上尚未实测 |
 | M6 打磨 | 持续 | 长辈模式、搜索、WebDAV、备份脚本、Capacitor、通话 simulcast / 网络自适应 |
 
 一个人业余做，M0–M5 约 4–5 个月。建议 M1 完成就让家人用起来，后面按反馈排序。
@@ -815,7 +828,7 @@ docker compose up -d     # 首次会构建 web 与 api 镜像
 | 家庭宽带无公网入站 | 全部流量走隧道和 Cloudflare Realtime，不需要任何入站端口 |
 | iOS 浏览器限制：后台来电不可靠（通知没有接听按钮、不能常驻）、不能共享屏幕、切到后台采集会停 | 来电靠推送，点通知进应用后在页面里接；后期 Capacitor（CallKit） |
 | iPhone HEIC / HEVC 兼容 | 服务端统一转码，原件保留 |
-| 远程控制 UAC / 锁屏 | v1 明确不支持，v2 用 SYSTEM 服务 |
+| 远程控制 UAC / 锁屏 / Ctrl+Alt+Del | v1 明确不支持（Agent 发 Status，控制端显示原因），v2 用 SYSTEM 服务 |
 | 转码吃 CPU | 并发度 2、夜间低优先级、可选跳过 1080p 以下 |
 | 单点故障 | 每日备份；家庭场景可接受停机 |
 | 家人在中国大陆访问 Cloudflare 节点延迟高、不稳定 | 实测为准；通话质量同样取决于到 Cloudflare 的链路 |
@@ -867,9 +880,10 @@ Moments   GET /api/posts?before=&beforeId=&authorId=&limit= ; GET /api/posts/{id
 Albums    GET /api/albums（手动相册 + 按月相册） ; POST /api/albums ; PATCH/DELETE /api/albums/{id}
           GET /api/albums/{id}/items?before=&beforeId= ; POST /api/albums/{id}/items ; DELETE /api/albums/{id}/items/{blobId}
           GET /api/drive/gallery?since=（按月相册：限定时间下界）
-Remote    GET /api/devices ; PATCH /api/devices/{id}（策略 / 名称） ; DELETE /api/devices/{id}（吊销）
-          POST /api/remote/sessions ; POST /api/remote/sessions/{id}/consent · /end
-          GET /api/remote/sessions（审计） ; WS /ws/remote/{sessionId}/{agent|controller}
+Remote    GET /api/devices ; PATCH /api/devices/{id}（名称 / 白名单 / PIN） ; DELETE /api/devices/{id}（吊销） ; GET /api/devices/agent-setup
+          POST /api/auth/device/code（匿名） ; GET /api/auth/device/poll（匿名） ; GET /api/auth/device/lookup ; POST /api/auth/device/confirm
+          POST /api/remote/sessions ; GET /api/remote/sessions/{id} ; POST /api/remote/sessions/{id}/consent（Agent） · /end
+          GET /api/remote/sessions（审计） ; WS /ws/remote/{sessionId}/{agent|controller} ; SignalR /hubs/agent（设备令牌）
 Notify    GET /api/notifications ; POST /api/notifications/read ; POST/DELETE /api/push/subscribe
 Search    GET /api/search?q=&type=
 Admin     GET /api/admin/stats ; GET /api/admin/jobs ; GET /healthz ; GET /openapi/v1.json
@@ -898,25 +912,41 @@ Admin     GET /api/admin/stats ; GET /api/admin/jobs ; GET /healthz ; GET /opena
 | S→C | PostChanged | postId, authorId, change（created / updated / deleted） |
 | S→C | AlbumChanged | albumId, deleted |
 | S→C | Notification | NotificationDto |
-| S→C | RemoteSessionChanged | RemoteSessionDto |
+| S→C | RemoteSessionChanged | RemoteSessionDto（发给控制的人和设备主人） |
+| S→C | DeviceChanged | deviceId（上下线、改名、改策略、吊销；客户端重新拉列表） |
+
+Agent 的通道 `/hubs/agent`（只认设备令牌）：
+
+| 方向 | 名称 | 载荷 |
+|---|---|---|
+| S→A | SessionRequested | sessionId, controllerName, mode, consent, expiresAt, active（无人值守时为 true，直接连数据面） |
+| S→A | SessionEnded | sessionId, reason |
+| S→A | Revoked | 无（删本地令牌、回到设备码登记） |
+| A→S | Report | version, os, screens[]（连上后、显示器变化时） |
 
 ## 附录 C · 远程控制数据面帧格式
 
-二进制帧，第 1 字节为类型，其余为载荷；数值小端。
+二进制帧，第 1 字节为类型，其余为载荷；数值小端。中继另发文本消息 `{"type":"peer","connected":bool}`；会话结束时两端以关闭码 4001 关闭，同一角色被新连接顶掉时为 4000。
 
 | 类型 | 方向 | 载荷 |
 |---|---|---|
-| 0x01 VideoConfig | A→C | codec(u8), width(u16), height(u16), fps(u8) |
-| 0x02 VideoFrame | A→C | timestampMs(u32), isKey(u8), nal bytes |
-| 0x03 Cursor | A→C | x(f32), y(f32), shapeId(u8) |
-| 0x04 Monitors | A→C | count(u8), [index, width, height, isPrimary]… |
-| 0x05 Clipboard | 双向 | utf8 text |
-| 0x06 Stats | A→C | fps(u8), kbps(u16), cpu(u8) |
-| 0x10 MouseMove | C→A | x(f32 0..1), y(f32 0..1) |
-| 0x11 MouseButton | C→A | button(u8), down(u8) |
-| 0x12 Wheel | C→A | dx(i16), dy(i16) |
-| 0x13 Key | C→A | scanCode(u16), down(u8), modifiers(u8) |
+| 0x01 VideoConfig | A→C | codec(u8：1 = H.264), width(u16), height(u16), fps(u8), monitor(u8) |
+| 0x02 VideoFrame | A→C | timestampMs(u32), isKey(u8), Annex B 字节（关键帧带 SPS / PPS） |
+| 0x03 Cursor | A→C | 预留（v1 指针直接画进画面） |
+| 0x04 Monitors | A→C | count(u8), [index(u8), width(u16), height(u16), isPrimary(u8)]… |
+| 0x05 Clipboard | 双向 | UTF-8 文本（≤ 1 MB） |
+| 0x06 Stats | A→C | fps(u8), kbps(u16), cpu(u8), rttMs(u16)，每秒一次 |
+| 0x07 Status | A→C | code(u8：0 正常 / 1 安全桌面 / 2 截屏失败 / 3 不支持), UTF-8 说明 |
+| 0x10 MouseMove | C→A | x(f32 0..1), y(f32 0..1)（相对当前显示器） |
+| 0x11 MouseButton | C→A | button(u8：0 左 / 1 中 / 2 右 / 3 后退 / 4 前进), down(u8) |
+| 0x12 Wheel | C→A | dx(i16), dy(i16)（120 = 一格，向上 / 向右为正） |
+| 0x13 Key | C→A | scanCode(u16，0xE0xx 为扩展键), down(u8), modifiers(u8) |
 | 0x14 SelectMonitor | C→A | index(u8) |
 | 0x15 SetQuality | C→A | preset(u8：0 流畅 / 1 清晰) |
 | 0x16 RequestKeyFrame | C→A | 无 |
-| 0x17 SpecialKey | C→A | id(u8：Ctrl+Alt+Del 等) |
+| 0x17 SpecialKey | C→A | id(u8：1 Ctrl+Alt+Del（v1 不支持）/ 2 Win / 3 PrintScreen / 4 任务管理器 / 5 Alt+Tab) |
+| 0x18 Text | C→A | UTF-8 文字（输入法打好的字，Agent 用 Unicode 键输入） |
+| 0x19 FrameAck | C→A | timestampMs(u32)，解码出该帧后回 |
+| 0x1A ReleaseAll | C→A | 无（松开所有按着的键和鼠标键） |
+
+只看模式下中继和 Agent 都丢弃控制端的 0x10–0x13、0x17、0x18、0x05、0x1A。

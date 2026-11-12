@@ -224,6 +224,7 @@ public sealed class HubListener : IAsyncDisposable
     [
         "IncomingCall", "CallUpdated", "CallDeclined", "ParticipantJoined", "ParticipantLeft", "ParticipantUpdated",
         "TrackPublished", "TrackUnpublished", "MessageReceived", "ReadReceipt", "ConversationUpdated", "PostChanged", "AlbumChanged",
+        "RemoteSessionChanged", "DeviceChanged",
     ];
 
     private readonly List<(string Name, JsonElement Payload)> _received = [];

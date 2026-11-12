@@ -4,6 +4,334 @@
  */
 
 export interface paths {
+    "/api/devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["DeviceDto"][];
+                        "application/json": components["schemas"]["DeviceDto"][];
+                        "text/json": components["schemas"]["DeviceDto"][];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateDeviceRequest"];
+                    "text/json": components["schemas"]["UpdateDeviceRequest"];
+                    "application/*+json": components["schemas"]["UpdateDeviceRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["DeviceDto"];
+                        "application/json": components["schemas"]["DeviceDto"];
+                        "text/json": components["schemas"]["DeviceDto"];
+                    };
+                };
+            };
+        };
+        trace?: never;
+    };
+    "/api/devices/agent-setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["AgentSetupDto"];
+                        "application/json": components["schemas"]["AgentSetupDto"];
+                        "text/json": components["schemas"]["AgentSetupDto"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/remote/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    before?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["RemoteSessionPageDto"];
+                        "application/json": components["schemas"]["RemoteSessionPageDto"];
+                        "text/json": components["schemas"]["RemoteSessionPageDto"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateRemoteSessionRequest"];
+                    "text/json": components["schemas"]["CreateRemoteSessionRequest"];
+                    "application/*+json": components["schemas"]["CreateRemoteSessionRequest"];
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["RemoteSessionDto"];
+                        "application/json": components["schemas"]["RemoteSessionDto"];
+                        "text/json": components["schemas"]["RemoteSessionDto"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/remote/sessions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["RemoteSessionDto"];
+                        "application/json": components["schemas"]["RemoteSessionDto"];
+                        "text/json": components["schemas"]["RemoteSessionDto"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/remote/sessions/{id}/consent": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["RemoteConsentRequest"];
+                    "text/json": components["schemas"]["RemoteConsentRequest"];
+                    "application/*+json": components["schemas"]["RemoteConsentRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["RemoteSessionDto"];
+                        "application/json": components["schemas"]["RemoteSessionDto"];
+                        "text/json": components["schemas"]["RemoteSessionDto"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/remote/sessions/{id}/end": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["RemoteSessionDto"];
+                        "application/json": components["schemas"]["RemoteSessionDto"];
+                        "text/json": components["schemas"]["RemoteSessionDto"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/push/vapid-public-key": {
         parameters: {
             query?: never;
@@ -2766,7 +3094,13 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody?: {
+                content: {
+                    "application/json": null | components["schemas"]["DeviceCodeRequest"];
+                    "text/json": null | components["schemas"]["DeviceCodeRequest"];
+                    "application/*+json": null | components["schemas"]["DeviceCodeRequest"];
+                };
+            };
             responses: {
                 /** @description OK */
                 200: {
@@ -2827,6 +3161,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/device/lookup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    code?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["DeviceLookupResponse"];
+                        "application/json": components["schemas"]["DeviceLookupResponse"];
+                        "text/json": components["schemas"]["DeviceLookupResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/auth/device/confirm": {
         parameters: {
             query?: never;
@@ -2856,7 +3229,11 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "text/plain": components["schemas"]["DeviceConfirmResponse"];
+                        "application/json": components["schemas"]["DeviceConfirmResponse"];
+                        "text/json": components["schemas"]["DeviceConfirmResponse"];
+                    };
                 };
             };
         };
@@ -2877,6 +3254,12 @@ export interface components {
             /** Format: int32 */
             added: number;
             album: components["schemas"]["AlbumDto"];
+        };
+        AgentSetupDto: {
+            serverUrl: string;
+            downloadUrl: null | string;
+            setupCode: string;
+            accessTokenConfigured: boolean;
         };
         AlbumDto: {
             /** Format: uuid */
@@ -3064,6 +3447,12 @@ export interface components {
             visibility?: components["schemas"]["PostVisibility"];
             blobIds?: null | string[];
         };
+        CreateRemoteSessionRequest: {
+            /** Format: uuid */
+            targetDeviceId: string;
+            mode: components["schemas"]["RemoteSessionMode"];
+            pin: null | string;
+        };
         CreateShareRequest: {
             /** Format: uuid */
             granteeUserId: null | string;
@@ -3074,6 +3463,10 @@ export interface components {
             /** Format: int32 */
             expiresInDays?: null | number;
         };
+        DeviceCodeRequest: {
+            name: null | string;
+            platform: null | string;
+        };
         DeviceCodeResponse: {
             code: string;
             pollToken: string;
@@ -3082,7 +3475,39 @@ export interface components {
         };
         DeviceConfirmRequest: {
             code: string;
-            deviceName: string;
+            deviceName: null | string;
+            /** Format: uuid */
+            ownerId: null | string;
+        };
+        DeviceConfirmResponse: {
+            /** Format: uuid */
+            deviceId: string;
+        };
+        DeviceDto: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            platform: string;
+            /** Format: uuid */
+            ownerId: string;
+            online: boolean;
+            /** Format: date-time */
+            lastSeenAt: null | string;
+            /** Format: date-time */
+            createdAt: string;
+            agentVersion: null | string;
+            os: null | string;
+            screens: components["schemas"]["ScreenDto"][];
+            canControl: boolean;
+            canManage: boolean;
+            allowedControllers: null | string[];
+            hasPin: boolean;
+            /** Format: date-time */
+            pinLockedUntil: null | string;
+            session: null | components["schemas"]["RemoteSessionDto"];
+        };
+        DeviceLookupResponse: {
+            name: string;
             platform: string;
         };
         DevicePollResponse: {
@@ -3441,8 +3866,54 @@ export interface components {
         ReactRequest: {
             emoji: string;
         };
+        RemoteConsentRequest: {
+            accept: boolean;
+        };
+        /** @enum {unknown} */
+        RemoteConsentType: "Prompt" | "Unattended";
+        RemoteSessionDto: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            controllerUserId: string;
+            /** Format: uuid */
+            targetDeviceId: string;
+            deviceName: string;
+            /** Format: uuid */
+            deviceOwnerId: string;
+            mode: components["schemas"]["RemoteSessionMode"];
+            consent: components["schemas"]["RemoteConsentType"];
+            state: components["schemas"]["RemoteSessionState"];
+            /** Format: date-time */
+            startedAt: string;
+            /** Format: date-time */
+            expiresAt: string;
+            /** Format: date-time */
+            acceptedAt: null | string;
+            /** Format: date-time */
+            endedAt: null | string;
+            endReason: null | string;
+            /** Format: int64 */
+            bytesRelayed: number;
+        };
+        /** @enum {unknown} */
+        RemoteSessionMode: "View" | "Control";
+        RemoteSessionPageDto: {
+            items: components["schemas"]["RemoteSessionDto"][];
+            /** Format: date-time */
+            nextBefore: null | string;
+        };
+        /** @enum {unknown} */
+        RemoteSessionState: "Pending" | "Active" | "Ended";
         RenegotiateApiRequest: {
             answer: components["schemas"]["SessionDescription"];
+        };
+        ScreenDto: {
+            /** Format: int32 */
+            width: number;
+            /** Format: int32 */
+            height: number;
+            primary: boolean;
         };
         SendMessageRequest: {
             /** Format: uuid */
@@ -3542,6 +4013,12 @@ export interface components {
         };
         UnpublishResponse: {
             answer: null | components["schemas"]["SessionDescription"];
+        };
+        UpdateDeviceRequest: {
+            name: null | string;
+            allowedControllers: null | string[];
+            pin: null | string;
+            clearPin: null | boolean;
         };
         UserDto: {
             /** Format: uuid */

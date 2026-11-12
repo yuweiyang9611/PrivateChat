@@ -513,6 +513,10 @@ namespace PrivateChat.Api.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("id");
 
+                    b.Property<string>("AgentVersion")
+                        .HasColumnType("text")
+                        .HasColumnName("agent_version");
+
                     b.Property<string>("AllowedControllers")
                         .IsRequired()
                         .HasColumnType("jsonb")
@@ -535,6 +539,18 @@ namespace PrivateChat.Api.Migrations
                         .IsRequired()
                         .HasColumnType("text")
                         .HasColumnName("name");
+
+                    b.Property<string>("Os")
+                        .HasColumnType("text")
+                        .HasColumnName("os");
+
+                    b.Property<int>("PinFailures")
+                        .HasColumnType("integer")
+                        .HasColumnName("pin_failures");
+
+                    b.Property<DateTimeOffset?>("PinLockedUntil")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("pin_locked_until");
 
                     b.Property<string>("Platform")
                         .IsRequired()
@@ -1153,6 +1169,10 @@ namespace PrivateChat.Api.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("id");
 
+                    b.Property<DateTimeOffset?>("AcceptedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("accepted_at");
+
                     b.Property<long>("BytesRelayed")
                         .HasColumnType("bigint")
                         .HasColumnName("bytes_relayed");
@@ -1174,6 +1194,10 @@ namespace PrivateChat.Api.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("ended_at");
 
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_at");
+
                     b.Property<string>("Mode")
                         .IsRequired()
                         .HasColumnType("text")
@@ -1183,6 +1207,11 @@ namespace PrivateChat.Api.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("started_at");
 
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("state");
+
                     b.Property<Guid>("TargetDeviceId")
                         .HasColumnType("uuid")
                         .HasColumnName("target_device_id");
@@ -1190,8 +1219,20 @@ namespace PrivateChat.Api.Migrations
                     b.HasKey("Id")
                         .HasName("pk_remote_sessions");
 
+                    b.HasIndex("StartedAt")
+                        .HasDatabaseName("ix_remote_sessions_started_at");
+
+                    b.HasIndex("State")
+                        .HasDatabaseName("ix_remote_sessions_state")
+                        .HasFilter("ended_at IS NULL");
+
                     b.HasIndex("TargetDeviceId")
                         .HasDatabaseName("ix_remote_sessions_target_device_id");
+
+                    b.HasIndex(new[] { "TargetDeviceId" }, "open_per_device")
+                        .IsUnique()
+                        .HasDatabaseName("ix_remote_sessions_open_per_device")
+                        .HasFilter("ended_at IS NULL");
 
                     b.ToTable("remote_sessions", (string)null);
                 });

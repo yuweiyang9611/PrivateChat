@@ -9,8 +9,13 @@ public class RemoteSession
     public Guid TargetDeviceId { get; set; }
     public RemoteSessionMode Mode { get; set; }
     public RemoteConsentType Consent { get; set; }
+    public RemoteSessionState State { get; set; }
     public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
+    /// <summary>等待同意的截止时间（Pending 时有意义）。</summary>
+    public DateTimeOffset ExpiresAt { get; set; }
+    public DateTimeOffset? AcceptedAt { get; set; }
     public DateTimeOffset? EndedAt { get; set; }
+    /// <summary>declined / timeout / controller / agent / stopped / revoked / disconnected / replaced。</summary>
     public string? EndReason { get; set; }
     public long BytesRelayed { get; set; }
 }

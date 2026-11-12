@@ -150,7 +150,14 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             e.HasMany(x => x.Tracks).WithOne().HasForeignKey(x => x.ParticipantId);
         });
 
-        b.Entity<RemoteSession>(e => e.HasIndex(x => x.TargetDeviceId));
+        b.Entity<RemoteSession>(e =>
+        {
+            e.HasIndex(x => x.TargetDeviceId);
+            // 一台设备同一时间只有一个未结束的会话（等待同意或进行中）
+            e.HasIndex(x => x.TargetDeviceId, "open_per_device").IsUnique().HasFilter("ended_at IS NULL").HasDatabaseName("ix_remote_sessions_open_per_device");
+            e.HasIndex(x => x.StartedAt);
+            e.HasIndex(x => x.State).HasFilter("ended_at IS NULL");
+        });
         b.Entity<Notification>(e =>
         {
             e.HasIndex(x => new { x.UserId, x.ReadAt });

@@ -11,6 +11,9 @@ $appId  = Read-Host "Realtime SFU App ID"
 $appSec = Read-Host "Realtime SFU App Secret"
 $turnId = Read-Host "Realtime TURN Key ID"
 $turnTk = Read-Host "Realtime TURN API Token"
+Write-Host "远程协助：电脑上的程序过 Access 门禁要用服务令牌（Zero Trust → Access → Service Auth，并在应用上加一条 Service Auth 策略）。没有可以先留空。"
+$agentId  = Read-Host "Access 服务令牌 Client ID（可留空）"
+$agentSec = Read-Host "Access 服务令牌 Client Secret（可留空）"
 $buf = [byte[]]::new(24)
 [System.Security.Cryptography.RandomNumberGenerator]::Fill($buf)
 $pg = -join ($buf | ForEach-Object { $_.ToString('x2') })
@@ -24,6 +27,8 @@ CF_REALTIME_APP_ID=$appId
 CF_REALTIME_APP_SECRET=$appSec
 CF_TURN_KEY_ID=$turnId
 CF_TURN_KEY_API_TOKEN=$turnTk
+REMOTE_AGENT_ACCESS_CLIENT_ID=$agentId
+REMOTE_AGENT_ACCESS_CLIENT_SECRET=$agentSec
 POSTGRES_PASSWORD=$pg
 "@ | Set-Content -Path .env -Encoding utf8NoBOM
 Write-Host "已生成 .env，下一步：docker compose up -d"

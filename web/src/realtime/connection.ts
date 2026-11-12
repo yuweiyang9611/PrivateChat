@@ -6,6 +6,7 @@ import { useMessagesStore } from '@/stores/messages'
 import { useConversationsStore } from '@/stores/conversations'
 import { useDriveStore } from '@/stores/drive'
 import { useMomentsStore, type AlbumChangedEvent, type PostChangedEvent } from '@/stores/moments'
+import { useRemoteStore, type RemoteSessionDto } from '@/stores/remote'
 import { useCallsStore, type CallDeclinedEvent, type ParticipantEvent, type ParticipantLeftEvent, type TrackEvent } from '@/stores/calls'
 import type { CallDto } from '@/features/calls/api'
 
@@ -147,6 +148,7 @@ async function onConnected(): Promise<void> {
   useDriveStore().resync()
   // 断线期间错过的动态和相册改动（没打开过时光页时什么也不做）
   useMomentsStore().resync()
+  useRemoteStore().resync()
   // 断线期间的来电、通话结束、有人进出都没收到：和服务器对一遍
   void useCallsStore().refresh()
 }
@@ -199,6 +201,8 @@ function registerHandlers(conn: HubConnection): void {
   // 时光：有人发了 / 评论了 / 点赞了 / 删了动态，相册被改了
   conn.on('PostChanged', (e: PostChangedEvent) => useMomentsStore().onPostChanged(e))
   conn.on('AlbumChanged', (e: AlbumChangedEvent) => useMomentsStore().onAlbumChanged(e))
+  conn.on('RemoteSessionChanged', (e: RemoteSessionDto) => useRemoteStore().onSessionChanged(e))
+  conn.on('DeviceChanged', () => useRemoteStore().onDeviceChanged())
   conn.on('IncomingCall', (c: CallDto) => useCallsStore().onIncomingCall(c))
   conn.on('CallUpdated', (c: CallDto) => useCallsStore().onCallUpdated(c))
   conn.on('CallDeclined', (e: CallDeclinedEvent) => useCallsStore().onCallDeclined(e))

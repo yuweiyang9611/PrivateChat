@@ -1,4 +1,4 @@
-# PrivateChat 前端镜像（草案）：node 构建 → nginx 托管
+# PrivateChat 前端镜像：node 构建 → nginx 托管；顺带编译远程协助程序（Windows 单文件 exe）放到 /downloads/
 FROM node:24-alpine AS build
 WORKDIR /src
 COPY web/package*.json ./
@@ -6,6 +6,15 @@ RUN npm ci
 COPY web/ .
 RUN npm run build
 
+# 远程协助 Agent：.NET 能在 Linux 上交叉编译 WinForms 程序（EnableWindowsTargeting），自带运行时、单文件
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS agent
+WORKDIR /src
+COPY Directory.Build.props Directory.Packages.props ./
+COPY src/PrivateChat.Contracts/ src/PrivateChat.Contracts/
+COPY src/PrivateChat.Agent/ src/PrivateChat.Agent/
+RUN dotnet publish src/PrivateChat.Agent/PrivateChat.Agent.csproj -c Release -r win-x64 -o /agent
+
 FROM nginx:1.27-alpine
 COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /src/dist /usr/share/nginx/html
+COPY --from=agent /agent/PrivateChat.Agent.exe /usr/share/nginx/html/downloads/PrivateChat.Agent.exe

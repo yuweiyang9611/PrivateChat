@@ -15,6 +15,9 @@ read -rp "Realtime SFU App ID: " CF_REALTIME_APP_ID
 read -rp "Realtime SFU App Secret: " CF_REALTIME_APP_SECRET
 read -rp "Realtime TURN Key ID: " CF_TURN_KEY_ID
 read -rp "Realtime TURN API Token: " CF_TURN_KEY_API_TOKEN
+echo "远程协助：电脑上的程序过 Access 门禁要用服务令牌（Zero Trust → Access → Service Auth，并在应用上加一条 Service Auth 策略）。没有可以先留空。"
+read -rp "Access 服务令牌 Client ID（可留空）: " REMOTE_AGENT_ACCESS_CLIENT_ID
+read -rp "Access 服务令牌 Client Secret（可留空）: " REMOTE_AGENT_ACCESS_CLIENT_SECRET
 cat > .env <<EOF
 DOMAIN=${DOMAIN}
 ADMIN_EMAIL=${ADMIN_EMAIL}
@@ -25,6 +28,8 @@ CF_REALTIME_APP_ID=${CF_REALTIME_APP_ID}
 CF_REALTIME_APP_SECRET=${CF_REALTIME_APP_SECRET}
 CF_TURN_KEY_ID=${CF_TURN_KEY_ID}
 CF_TURN_KEY_API_TOKEN=${CF_TURN_KEY_API_TOKEN}
+REMOTE_AGENT_ACCESS_CLIENT_ID=${REMOTE_AGENT_ACCESS_CLIENT_ID}
+REMOTE_AGENT_ACCESS_CLIENT_SECRET=${REMOTE_AGENT_ACCESS_CLIENT_SECRET}
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
 EOF
 chmod 600 .env

@@ -12,6 +12,7 @@ using PrivateChat.Api.Features.Moments;
 using PrivateChat.Api.Features.Calls;
 using PrivateChat.Api.Features.Chat;
 using PrivateChat.Api.Features.Notifications;
+using PrivateChat.Api.Features.Remote;
 using PrivateChat.Api.Infrastructure;
 using PrivateChat.Api.Infrastructure.Blobs;
 using PrivateChat.Api.Infrastructure.Keys;
@@ -30,6 +31,7 @@ builder.Services.Configure<AppOptions>(builder.Configuration.GetSection(AppOptio
 builder.Services.Configure<CloudflareAccessOptions>(builder.Configuration.GetSection(CloudflareAccessOptions.Section));
 builder.Services.Configure<CloudflareRealtimeOptions>(builder.Configuration.GetSection(CloudflareRealtimeOptions.Section));
 builder.Services.Configure<WebPushOptions>(builder.Configuration.GetSection(WebPushOptions.Section));
+builder.Services.Configure<RemoteOptions>(builder.Configuration.GetSection(RemoteOptions.Section));
 
 // nginx 转发；tus 分片 8 MB，放宽到 64 MB
 builder.Services.Configure<KestrelServerOptions>(o => o.Limits.MaxRequestBodySize = 64 * 1024 * 1024);
@@ -63,8 +65,9 @@ builder.Services.AddScoped<UserProvisioningService>();
 builder.Services.AddAuthentication(AuthSchemes.Smart)
     .AddPolicyScheme(AuthSchemes.Smart, "Smart", o => o.ForwardDefaultSelector = ctx =>
     {
-        if (ctx.Request.Headers.ContainsKey(AuthSchemes.AccessHeader)) return AuthSchemes.CloudflareAccess;
+        // Agent 带 Access 服务令牌过门禁，请求上也有 Access 头（但没有邮箱）：有 Bearer 设备令牌时优先认它
         if (ctx.Request.Headers.Authorization.ToString().StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)) return AuthSchemes.DeviceToken;
+        if (ctx.Request.Headers.ContainsKey(AuthSchemes.AccessHeader)) return AuthSchemes.CloudflareAccess;
         return AuthSchemes.Local;
     })
     .AddScheme<AuthenticationSchemeOptions, CloudflareAccessAuthenticationHandler>(AuthSchemes.CloudflareAccess, null)
@@ -127,10 +130,18 @@ builder.Services.AddHostedService<PushWorker>();
 builder.Services.AddSingleton<CallLocks>();
 builder.Services.AddScoped<CallService>();
 builder.Services.AddHostedService<CallMaintenanceWorker>();
+builder.Services.AddSingleton<AgentRegistry>();
+builder.Services.AddSingleton<RemoteRelay>();
+builder.Services.AddSingleton<RemoteNotifier>();
+builder.Services.AddScoped<RemoteService>();
+builder.Services.AddHostedService<RemoteMaintenanceWorker>();
 
 var app = builder.Build();
 
 app.UseForwardedHeaders();
+// 远程控制数据面（/ws/remote）：15 秒一次 ping（Cloudflare 约 100 秒空闲就断）；30 秒收不到 pong 就当对端已经没了
+// （手机掉线、笔记本合盖时不会有 FIN，不设超时的话连接会一直挂着，会话永远是"进行中"）
+app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(15), KeepAliveTimeout = TimeSpan.FromSeconds(30) });
 app.UseSerilogRequestLogging();
 app.UseAuthentication();
 app.UseAuthorization();
@@ -138,6 +149,7 @@ app.UseAuthorization();
 app.MapControllers();
 app.MapUploads();
 app.MapHub<ChatHub>("/hubs/chat");
+app.MapHub<AgentHub>("/hubs/agent");
 app.MapOpenApi("/openapi/{documentName}.json");
 app.MapScalarApiReference("/scalar", o => o.WithOpenApiRoutePattern("/openapi/{documentName}.json"));
 app.MapHealthChecks("/healthz");
