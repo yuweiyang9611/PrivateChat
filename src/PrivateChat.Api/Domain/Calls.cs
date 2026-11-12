@@ -44,6 +44,10 @@ public class CallParticipant
     public string? CfSessionId { get; set; }
     /// <summary>订阅用的 Cloudflare Realtime 会话 Id；第一次订阅时才创建。</summary>
     public string? CfPullSessionId { get; set; }
+    /// <summary>订阅会话里正在接收的 mid：离开 / 被顶掉 / 超时时据此让 Cloudflare 停止转发（光从状态里删掉并不会停）。</summary>
+    public List<string> PulledMids { get; set; } = [];
+    /// <summary>这一份是重连时为顶替哪个旧身份而建的（join?replacing=）。重连响应丢了再重试时，据此认出"这是我自己刚才那次"，不当成别的设备。</summary>
+    public Guid? ReplacesId { get; set; }
     public bool MicOn { get; set; } = true;
     public bool CamOn { get; set; }
     public DateTimeOffset JoinedAt { get; set; } = DateTimeOffset.UtcNow;

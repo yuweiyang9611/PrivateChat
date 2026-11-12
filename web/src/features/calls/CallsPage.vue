@@ -29,7 +29,7 @@ const roomPeople = computed(() => (room.value?.participants ?? []).map((p) => fa
 /** 我还没进去的进行中通话 */
 const joinable = computed(() => calls.ongoing.filter((c) => c.id !== calls.current?.callId))
 const relatives = computed(() => family.members.filter((m) => m.id !== me.value && !m.disabled))
-const disabled = computed(() => !supported || !calls.enabled || calls.entering)
+const disabled = computed(() => !supported || !calls.enabled || calls.busy)
 
 async function loadHistory(): Promise<void> {
   try {

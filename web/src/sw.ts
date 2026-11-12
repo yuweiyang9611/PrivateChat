@@ -21,11 +21,9 @@ cleanupOutdatedCaches()
 
 // SPA 回退：页面导航一律给缓存里的 index.html（离线可开）。
 // 以下路径必须走网络：API、SignalR、分享链接、OpenAPI 文档，以及 Cloudflare 的 /cdn-cgi/（Access 登录 / 退出）。
-registerRoute(
-  new NavigationRoute(createHandlerBoundToURL('index.html'), {
-    denylist: [/^\/api\//, /^\/hubs\//, /^\/ws\//, /^\/s\//, /^\/openapi\//, /^\/healthz/, /^\/scalar/, /^\/cdn-cgi\//],
-  }),
-)
+// 它们也不是应用页面（新标签页里打开的 PDF、外链分享页）：通知点开时不能把它们当成应用窗口。
+const NON_APP_PATHS = [/^\/api\//, /^\/hubs\//, /^\/ws\//, /^\/s\//, /^\/openapi\//, /^\/healthz/, /^\/scalar/, /^\/cdn-cgi\//]
+registerRoute(new NavigationRoute(createHandlerBoundToURL('index.html'), { denylist: NON_APP_PATHS }))
 
 // 缩略图：内容寻址、生成后不变，缓存优先；离线时之前看过的图照样能显示
 registerRoute(
@@ -56,8 +54,33 @@ interface NotificationData { url?: string; kind?: string; callId?: string | null
 // 安卓通知栏不认 SVG，用 PNG
 const ICON = '/pwa-192x192.png'
 
+/** 运行着应用的窗口（同源的 PDF 标签页、外链分享页没有应用的消息监听，不算） */
 async function windows(): Promise<WindowClient[]> {
-  return (await self.clients.matchAll({ type: 'window', includeUncontrolled: true })) as WindowClient[]
+  const all = (await self.clients.matchAll({ type: 'window', includeUncontrolled: true })) as WindowClient[]
+  return all.filter((c) => !NON_APP_PATHS.some((r) => r.test(new URL(c.url).pathname)))
+}
+
+/**
+ * 推送必须对应一条用户看得见的通知：iOS 上推送事件里没显示过通知会被记一次"静默推送"，几次之后整个订阅被收回
+ * （之后消息、来电都收不到）；Chrome 则在推送事件结束时数一数还显示着的通知，一条都没有（且没有可见的页面）
+ * 就自己弹"网站已在后台更新"。所以：
+ * - 页面在前台（可见，Chrome 豁免）时：显示一下马上关掉（满足 iOS）；
+ * - 否则：显示一条安静的说明（同一个 tag，顺带替换掉还挂着的响铃），推送事件结束后过几秒再关掉。
+ */
+async function showQuietly(payload: PushPayload, data: NotificationData, focused: boolean): Promise<void> {
+  await self.registration.showNotification(payload.title, { body: payload.body, tag: payload.tag, icon: ICON, data, silent: true, renotify: false } as NotificationOptions)
+  if (focused) {
+    for (const n of await self.registration.getNotifications({ tag: payload.tag })) n.close()
+  } else {
+    closeLater(payload.tag)
+  }
+}
+
+/** 不放进 waitUntil：推送事件结束时这条还显示着；Service Worker 被回收得更早的话，它就留在通知栏里，也无妨 */
+function closeLater(tag: string, ms = 5000): void {
+  setTimeout(() => {
+    void self.registration.getNotifications({ tag }).then((list) => list.forEach((n) => n.close()))
+  }, ms)
 }
 
 async function handlePush(payload: PushPayload): Promise<void> {
@@ -77,10 +100,13 @@ async function handlePush(payload: PushPayload): Promise<void> {
 
   // 来电一类：页面正开在前台时，页面自己弹来电窗、响铃，这里不再重复弹系统通知
   const focused = (await windows()).some((c) => c.focused)
-  const ringing = await self.registration.getNotifications({ tag: payload.tag })
 
   if (kind === 'call') {
-    if (focused) return
+    // 页面在前台：页面自己弹来电窗、响铃
+    if (focused) {
+      await showQuietly(payload, data, true)
+      return
+    }
     await self.registration.showNotification(payload.title, {
       body: payload.body,
       tag: payload.tag,
@@ -99,22 +125,14 @@ async function handlePush(payload: PushPayload): Promise<void> {
   }
 
   if (kind === 'call-answered') {
-    // 在别的设备上接了：把这台设备上还挂着的响铃通知收掉。没有挂着的就什么也不做
-    if (!ringing.length) return
-    if (focused) {
-      for (const n of ringing) n.close()
-      return
-    }
-    // 推送必须对应一条可见通知：先原地替换成一句说明，稍后自动关掉
-    await self.registration.showNotification(payload.title, { body: payload.body, tag: payload.tag, icon: ICON, data, renotify: false, silent: true } as NotificationOptions)
-    await new Promise((resolve) => setTimeout(resolve, 2500))
-    for (const n of await self.registration.getNotifications({ tag: payload.tag })) n.close()
+    // 在别的设备上接了 / 通话已结束 / 已拒接：把这台设备上还挂着的响铃通知原地换成一句说明，稍后自动关掉
+    await showQuietly(payload, data, focused)
     return
   }
 
-  // call-missed：把响铃通知原地换成"未接来电"（同一个 tag），不再响
+  // call-missed：把响铃通知原地换成"未接来电"（同一个 tag），不再响；页面在前台时页面里已经看得到
   if (focused) {
-    for (const n of ringing) n.close()
+    await showQuietly(payload, data, true)
     return
   }
   await self.registration.showNotification(payload.title, { body: payload.body, tag: payload.tag, icon: ICON, data, renotify: false } as NotificationOptions)
@@ -130,15 +148,18 @@ self.addEventListener('push', (event) => {
   event.waitUntil(handlePush(payload))
 })
 
-/** 打开（或切到）应用并导航到 url */
+/**
+ * 打开（或切到）应用并跳到 url。应用已经开着时交给页面用路由跳转，而不是整页重新加载：
+ * 通话中点开一条消息 / 未接来电通知，正在进行的通话不会因为页面重载而断掉。
+ */
 async function openUrl(url: string): Promise<void> {
   const target = new URL(url, self.location.origin).href
-  for (const c of await windows()) {
-    if ('focus' in c) {
-      await c.focus()
-      if ('navigate' in c && c.url !== target) await c.navigate(target)
-      return
-    }
+  const open = await windows()
+  const client = open.find((c) => c.focused) ?? open[0]
+  if (client) {
+    await client.focus().catch(() => undefined)
+    client.postMessage({ type: 'open-url', url: target })
+    return
   }
   await self.clients.openWindow(target)
 }

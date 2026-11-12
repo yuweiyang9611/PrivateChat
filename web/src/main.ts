@@ -18,3 +18,12 @@ app.use(createPinia())
 app.use(router)
 app.use(i18n)
 app.mount('#app')
+
+// 点系统通知（新消息、未接来电、动态）时应用已经开着：Service Worker 发来要去的地址，
+// 用路由跳转而不是整页重新加载，正在进行的通话不会断
+navigator.serviceWorker?.addEventListener('message', (e: MessageEvent) => {
+  const data = e.data as { type?: string; url?: string } | null
+  if (data?.type !== 'open-url' || !data.url) return
+  const u = new URL(data.url, window.location.origin)
+  if (u.origin === window.location.origin) void router.push(u.pathname + u.search + u.hash)
+})

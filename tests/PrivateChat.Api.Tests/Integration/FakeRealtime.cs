@@ -44,6 +44,12 @@ public sealed class FakeRealtime : HttpMessageHandler
     /// <summary>让下一个 tracks/new 以 200 返回，但每条轨道都带错误。</summary>
     public string? NextTrackError { get; set; }
 
+    /// <summary>
+    /// 设上之后，强制关闭（tracks/close force）一直挂着，直到 SetResult 放行（请求取消 / 超时会打断它）：
+    /// 模拟真实 Cloudflare 关闭"刚断开的连接上的轨道"时要等好几秒。请求在挂起之前已记进 Calls。
+    /// </summary>
+    public TaskCompletionSource? ForcedCloseGate { get; set; }
+
     public IReadOnlyCollection<string> ClosedMids(string sessionId) => _sessions.TryGetValue(sessionId, out var s) ? s.ClosedMids : [];
     public bool AwaitingAnswer(string sessionId) => _sessions.TryGetValue(sessionId, out var s) && s.AwaitingAnswer;
 
@@ -54,6 +60,9 @@ public sealed class FakeRealtime : HttpMessageHandler
         var body = string.IsNullOrWhiteSpace(text) ? null : JsonNode.Parse(text);
         var auth = request.Headers.Authorization?.ToString();
         Calls.Enqueue(new Call(request.Method.Method, path, auth, body));
+
+        if (ForcedCloseGate is { } gate && path.EndsWith("/tracks/close") && body?["force"]?.GetValue<bool>() == true)
+            await gate.Task.WaitAsync(ct);
 
         if (_failures.TryPeek(out var f) && path.Contains(f.PathPart) && _failures.TryDequeue(out f))
             return Respond(f.Status, f.Json);

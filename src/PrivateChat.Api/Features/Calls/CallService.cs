@@ -46,6 +46,7 @@ public sealed class CallService(
     MessageService messages,
     PushService push,
     CallLocks locks,
+    CallCleanupQueue cleanupQueue,
     ILogger<CallService> logger)
 {
     public const string LivingRoom = "living-room";
@@ -55,6 +56,8 @@ public sealed class CallService(
     public static readonly TimeSpan StaleAfter = TimeSpan.FromSeconds(35);
     public const int HeartbeatSeconds = 10;
     private const int MaxSdpLength = 200_000;
+    /// <summary>410 的 detail：同一个人在别的设备上还在这通通话里。客户端应就地收场，不要重新加入把那台设备顶掉。</summary>
+    public const string ReplacedDetail = "replaced";
 
     private static readonly JsonSerializerOptions PayloadJson = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
 
@@ -174,7 +177,8 @@ public sealed class CallService(
     /// 加入通话。同一个人在别的设备 / 标签页上已经在通话里的，那一边被顶掉（网络断了重进也走这里）。
     /// 第二个人进来的那一刻算接通。
     /// </summary>
-    public async Task<JoinResponse> JoinAsync(Guid me, Guid callId, CancellationToken ct)
+    /// <remarks>replacing：客户端重连时带上自己原来的参与者 Id。那一行已经不在、而这个人在别的设备上还在通话里时，说明是被那台设备顶掉了，返回 410 replaced，不再反过来把它顶掉。</remarks>
+    public async Task<JoinResponse> JoinAsync(Guid me, Guid callId, CancellationToken ct, Guid? replacing = null)
     {
         if (!realtime.IsConfigured) throw NotConfigured();
         var iceServers = await realtime.GenerateIceServersAsync(ct);
@@ -183,15 +187,22 @@ public sealed class CallService(
         var call = await Query().FirstOrDefaultAsync(c => c.Id == callId, ct) ?? throw ApiException.NotFound("通话");
         if (call.EndedAt is not null) throw Gone("通话已结束");
         await EnsureAccessAsync(call, me, ct);
+        if (replacing is { } rid)
+        {
+            var old = call.Participants.FirstOrDefault(p => p.Id == rid && p.UserId == me);
+            // 旧身份已经被清理掉了（客厅里离开超过一小时）：睡了很久的设备不要悄悄回到通话里
+            if (old is null) throw Gone("已不在通话中");
+            if (ElsewhereSince(call.Participants, me, old)) throw ReplacedElsewhere();
+        }
 
         var now = DateTimeOffset.UtcNow;
-        var cleanup = new List<Cleanup>();
+        var cleanup = new List<CallCleanup>();
         var firstTime = call.Participants.All(p => p.UserId != me);
         var replaced = call.Participants.Where(p => p.UserId == me && p.LeftAt == null).ToList();
         foreach (var old in replaced) MarkLeft(call, old, now, cleanup);
 
         // 主键是客户端生成的：必须显式 Add，只挂到导航属性上会被 EF 当成已存在的行去 UPDATE
-        var participant = new CallParticipant { CallId = call.Id, UserId = me, JoinedAt = now, LastSeenAt = now };
+        var participant = new CallParticipant { CallId = call.Id, UserId = me, JoinedAt = now, LastSeenAt = now, ReplacesId = replacing };
         db.CallParticipants.Add(participant);
         if (!call.Participants.Contains(participant)) call.Participants.Add(participant);
         var answeredNow = call.RoomSlug is null && call.AnsweredAt is null && ActiveUsers(call) >= 2;
@@ -204,11 +215,12 @@ public sealed class CallService(
         await audience.SendAsync(ChatEvents.ParticipantJoined, new ParticipantEventDto(call.Id, ParticipantDto.From(participant)), ct);
         if (answeredNow) await audience.SendAsync(ChatEvents.CallUpdated, CallDto.From(call), ct);
 
-        // 这个人的其它设备还挂着响铃通知：收掉
-        if (firstTime && call.RoomSlug is null && call.StartedBy != me && call.ConversationId is { } cid)
+        // 这个人的其它设备还挂着响铃通知（会一直挂着，直到被替换）：收掉。只在真的响过铃时（会话没静音）
+        if (firstTime && call.RoomSlug is null && call.StartedBy != me && call.ConversationId is { } cid
+            && await db.ConversationMembers.AnyAsync(m => m.ConversationId == cid && m.UserId == me && (m.MutedUntil == null || m.MutedUntil < now), ct))
             push.SendToUsersInBackground([me], CallPush.Answered(call, cid), CallPush.RingTtlSeconds);
 
-        await CleanupAsync(cleanup);
+        Cleanup(cleanup);
         return new JoinResponse(participant.Id, iceServers, CallDto.From(call));
     }
 
@@ -228,20 +240,28 @@ public sealed class CallService(
             return;
         }
         await (await AudienceAsync(call, ct)).SendAsync(ChatEvents.CallDeclined, new CallDeclinedDto(call.Id, me), ct);
+        // 群聊里拒接：自己其它设备上还在响的通知收掉
+        if (call.ConversationId is { } cid)
+            push.SendToUsersInBackground([me], CallPush.Closed(call, cid, "已拒绝"), CallPush.RingTtlSeconds);
     }
 
-    public async Task LeaveAsync(Guid me, Guid callId, CancellationToken ct)
+    /// <summary>离开。带 participantId 时只离开这台设备（别的设备上的同一个人不受影响）；不带时离开这个人的所有设备（旧客户端）。</summary>
+    public async Task LeaveAsync(Guid me, Guid callId, CancellationToken ct, Guid? participantId = null)
     {
         using var _ = await locks.AcquireAsync(callId, ct);
         var call = await Query().FirstOrDefaultAsync(c => c.Id == callId, ct) ?? throw ApiException.NotFound("通话");
         if (call.EndedAt is not null) return;
-        var mine = call.Participants.Where(p => p.UserId == me && p.LeftAt == null).ToList();
+        var mine = call.Participants.Where(p => p.UserId == me && p.LeftAt == null && (participantId == null || p.Id == participantId)).ToList();
         if (mine.Count == 0) return;
         await LeaveCoreAsync(call, mine, "left", DateTimeOffset.UtcNow, ct);
     }
 
     /// <summary>结束整通通话：发起人或管理员。会议室不会结束，管理员可以清场。</summary>
-    public async Task EndAsync(Guid me, UserRole role, Guid callId, CancellationToken ct)
+    /// <remarks>
+    /// ifUnanswered：发起人自己没能进去（没有麦克风、加入失败）时客户端用它取消刚建的通话。
+    /// 判断在通话锁里做：已经有人接通了（群聊里别人接了正在聊）、或我在别的设备上进去了，就不结束。
+    /// </remarks>
+    public async Task EndAsync(Guid me, UserRole role, Guid callId, CancellationToken ct, bool ifUnanswered = false)
     {
         using var _ = await locks.AcquireAsync(callId, ct);
         var call = await Query().FirstOrDefaultAsync(c => c.Id == callId, ct) ?? throw ApiException.NotFound("通话");
@@ -256,20 +276,21 @@ public sealed class CallService(
             return;
         }
         if (call.StartedBy != me && role != UserRole.Admin) throw ApiException.Forbidden("只有发起人或管理员可以结束通话");
+        if (ifUnanswered && (call.AnsweredAt is not null || call.Participants.Any(p => p.LeftAt == null && p.UserId == me))) return;
         await EndCoreAsync(call, call.AnsweredAt is null ? CallEndReason.Cancelled : CallEndReason.Completed, now, ct);
     }
 
     // ---------------------------------------------------------------- 媒体：发布 / 取消发布 / 订阅
 
     /// <summary>发布本端轨道：浏览器的 offer → Cloudflare tracks/new → answer。轨道名由服务端生成。</summary>
-    public async Task<PublishResponse> PublishAsync(Guid me, Guid callId, PublishRequest req, CancellationToken ct)
+    public async Task<PublishResponse> PublishAsync(Guid me, Guid callId, PublishRequest req, CancellationToken ct, Guid? participantId = null)
     {
         ValidateSdp(req.Offer, "offer");
         if (req.Tracks is not { Count: >= 1 and <= 3 }) throw ApiException.BadRequest("一次发布 1–3 条轨道");
         if (req.Tracks.Any(t => string.IsNullOrWhiteSpace(t.Mid) || t.Mid.Length > 16)) throw ApiException.BadRequest("mid 无效");
         if (req.Tracks.Select(t => t.Kind).Distinct().Count() != req.Tracks.Count) throw ApiException.BadRequest("同一种轨道只能发布一条");
 
-        var p = await MyParticipantAsync(me, callId, ct);
+        var p = await MyParticipantAsync(me, callId, participantId, ct);
         if (p.Tracks.Any(t => t.UnpublishedAt == null && req.Tracks.Any(r => r.Kind == t.Kind)))
             throw ApiException.Conflict("这种轨道已经在发布，先取消发布");
         var sessionId = await EnsureSessionAsync(p, pull: false, ct);
@@ -290,7 +311,7 @@ public sealed class CallService(
         if (call is null || call.EndedAt is not null || current is null || current.LeftAt is not null)
         {
             // 协商期间已经离开 / 通话结束：别留下没人管的轨道
-            await CleanupAsync([new Cleanup(sessionId, ok.Select(t => t.Input.Mid).ToList())]);
+            Cleanup([new CallCleanup(sessionId, ok.Select(t => t.Input.Mid).ToList())]);
             throw Gone("已不在通话中");
         }
         var now = DateTimeOffset.UtcNow;
@@ -314,10 +335,10 @@ public sealed class CallService(
     }
 
     /// <summary>取消发布（停止共享屏幕等）。带 offer 走协商式关闭，返回 answer；不带则强制关闭。</summary>
-    public async Task<UnpublishResponse> UnpublishAsync(Guid me, Guid callId, UnpublishRequest req, CancellationToken ct)
+    public async Task<UnpublishResponse> UnpublishAsync(Guid me, Guid callId, UnpublishRequest req, CancellationToken ct, Guid? participantId = null)
     {
         if (req.Offer is not null) ValidateSdp(req.Offer, "offer");
-        var p = await MyParticipantAsync(me, callId, ct);
+        var p = await MyParticipantAsync(me, callId, participantId, ct);
         var names = (req.TrackNames ?? []).ToHashSet();
         var targets = p.Tracks.Where(t => t.UnpublishedAt == null && names.Contains(t.TrackName)).ToList();
         if (targets.Count == 0 || p.CfSessionId is not { } sessionId) return new UnpublishResponse(null);
@@ -357,10 +378,10 @@ public sealed class CallService(
     /// 订阅别人的轨道。客户端给参与者 Id + 轨道名，这里换成对方的 Cloudflare 会话：只能拉同一通通话里、还在发布的轨道。
     /// Cloudflare 返回带新轨道的 offer，浏览器回 answer 后调 renegotiate 才算完成。
     /// </summary>
-    public async Task<PullResponse> PullAsync(Guid me, Guid callId, PullRequest req, CancellationToken ct)
+    public async Task<PullResponse> PullAsync(Guid me, Guid callId, PullRequest req, CancellationToken ct, Guid? participantId = null)
     {
         if (req.Tracks is not { Count: >= 1 and <= 32 }) throw ApiException.BadRequest("一次订阅 1–32 条轨道");
-        var p = await MyParticipantAsync(me, callId, ct);
+        var p = await MyParticipantAsync(me, callId, participantId, ct);
         var others = await db.CallParticipants.AsNoTracking().Include(x => x.Tracks)
             .Where(x => x.CallId == callId && x.LeftAt == null && x.Id != p.Id).ToListAsync(ct);
 
@@ -392,30 +413,47 @@ public sealed class CallService(
                 ? new PulledTrackDto(input.ParticipantId, input.TrackName, kind, hit.Mid, null)
                 : new PulledTrackDto(input.ParticipantId, input.TrackName, kind, null, hit?.ErrorCode ?? "no_result");
         }
+        // 记下拉到的 mid：离开时要让 Cloudflare 停止往这个订阅会话转发
+        var mids = results.Where(r => r?.Mid is not null).Select(r => r!.Mid!).ToArray();
+        if (mids.Length > 0)
+            await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE call_participants SET pulled_mids = array_cat(pulled_mids, {mids}) WHERE id = {p.Id}", ct);
         return new PullResponse(cf.RequiresImmediateRenegotiation, cf.SessionDescription, results.Select(r => r!).ToList());
     }
 
     /// <summary>订阅会话的 answer 交给 Cloudflare，完成一次订阅协商。</summary>
-    public async Task RenegotiateAsync(Guid me, Guid callId, SessionDescription answer, CancellationToken ct)
+    public async Task RenegotiateAsync(Guid me, Guid callId, SessionDescription answer, CancellationToken ct, Guid? participantId = null)
     {
         ValidateSdp(answer, "answer");
-        var p = await MyParticipantAsync(me, callId, ct);
+        var p = await MyParticipantAsync(me, callId, participantId, ct);
         if (p.CfPullSessionId is not { } sessionId) throw ApiException.Conflict("还没有订阅会话");
         await CfAsync("协商", async () => { await realtime.RenegotiateAsync(sessionId, answer, ct); return true; });
     }
 
     /// <summary>不再接收某些轨道（对方取消发布 / 离开后）：强制关闭，不需要协商。</summary>
-    public async Task ClosePulledAsync(Guid me, Guid callId, ClosePulledRequest req, CancellationToken ct)
+    public async Task ClosePulledAsync(Guid me, Guid callId, ClosePulledRequest req, CancellationToken ct, Guid? participantId = null)
     {
         if (req.Mids is not { Count: >= 1 and <= 64 }) return;
-        var p = await MyParticipantAsync(me, callId, ct);
+        var p = await MyParticipantAsync(me, callId, participantId, ct);
         if (p.CfPullSessionId is null) return;
-        await CleanupAsync([new Cleanup(p.CfPullSessionId, req.Mids)]);
+        // 浏览器自己要求不再接收：这条订阅会话还在用，关闭要排在它之后的订阅变更前面（Cloudflare 要求同一会话上的变更串行），
+        // 所以这里同步关——但不在通话锁里，超时也短
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(CallCleanupWorker.CloseTimeout);
+            await realtime.CloseTracksAsync(p.CfPullSessionId, req.Mids, null, timeout.Token);
+        }
+        catch (Exception ex) when (ex is CloudflareRealtimeException or HttpRequestException or OperationCanceledException && !ct.IsCancellationRequested)
+        {
+            logger.LogInformation("关闭订阅的轨道没有成功（忽略，Cloudflare 会自行回收）：{Message}", ex.Message);
+        }
+        var mids = req.Mids.ToArray();
+        await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE call_participants SET pulled_mids = ARRAY(SELECT unnest(pulled_mids) EXCEPT SELECT unnest({mids})) WHERE id = {p.Id}", ct);
     }
 
-    public async Task SetStateAsync(Guid me, Guid callId, ParticipantStateRequest req, CancellationToken ct)
+    public async Task SetStateAsync(Guid me, Guid callId, ParticipantStateRequest req, CancellationToken ct, Guid? participantId = null)
     {
-        var p = await MyParticipantAsync(me, callId, ct);
+        var p = await MyParticipantAsync(me, callId, participantId, ct);
         if (p.MicOn == req.MicOn && p.CamOn == req.CamOn) return;
         p.MicOn = req.MicOn;
         p.CamOn = req.CamOn;
@@ -424,27 +462,36 @@ public sealed class CallService(
         await (await AudienceAsync(call, ct)).SendAsync(ChatEvents.ParticipantUpdated, new ParticipantEventDto(callId, ParticipantDto.From(p)), ct);
     }
 
-    /// <summary>心跳。已经不在通话里（被超时清理、被别的设备顶掉）返回 410，客户端据此重新加入或收场。</summary>
-    public async Task HeartbeatAsync(Guid me, Guid callId, CancellationToken ct)
+    /// <summary>
+    /// 心跳。带 participantId 时只认这台设备：已经不在通话里返回 410——被别的设备顶掉时 detail 为 replaced（客户端收场），
+    /// 否则（超时被清理）客户端重新加入。不带时按人算（旧客户端）。
+    /// </summary>
+    public async Task HeartbeatAsync(Guid me, Guid callId, CancellationToken ct, Guid? participantId = null)
     {
         var now = DateTimeOffset.UtcNow;
         var rows = await db.CallParticipants
-            .Where(p => p.CallId == callId && p.UserId == me && p.LeftAt == null)
+            .Where(p => p.CallId == callId && p.UserId == me && p.LeftAt == null && (participantId == null || p.Id == participantId))
             .ExecuteUpdateAsync(s => s.SetProperty(p => p.LastSeenAt, now), ct);
-        if (rows == 0) throw Gone("已不在通话中");
+        if (rows == 0) throw await NotInCallAsync(me, callId, participantId, ct);
     }
 
     // ---------------------------------------------------------------- 超时清理
 
-    /// <summary>由后台任务每几秒调用：响铃超时记未接；心跳断了的参与者按离开处理。返回处理了几通通话。</summary>
-    public async Task<int> SweepAsync(DateTimeOffset now, CancellationToken ct)
+    /// <summary>
+    /// 由后台任务每几秒调用：响铃超时记未接；心跳断了的参与者按离开处理。返回处理了几通通话。
+    /// healthySince：服务从什么时候起一直正常（刚启动、刚从数据库故障或主机休眠里恢复时）。在那之前心跳本来就送不进来，
+    /// 不能拿它判掉线——浏览器和 Cloudflare 之间的媒体并不依赖这里，通话其实好好的。
+    /// </summary>
+    public async Task<int> SweepAsync(DateTimeOffset now, CancellationToken ct, DateTimeOffset? healthySince = null)
     {
         var ringCutoff = now - RingTimeout;
         var staleCutoff = now - StaleAfter;
+        var checkStale = healthySince is not { } since || now - since >= StaleAfter;
+        await PruneRoomHistoryAsync(now, ct);
         var ids = await db.CallSessions.AsNoTracking()
             .Where(c => c.EndedAt == null && (
                 (c.RoomSlug == null && c.AnsweredAt == null && c.StartedAt < ringCutoff) ||
-                c.Participants.Any(p => p.LeftAt == null && p.LastSeenAt < staleCutoff)))
+                (checkStale && c.Participants.Any(p => p.LeftAt == null && p.LastSeenAt < staleCutoff))))
             .Select(c => c.Id).ToListAsync(ct);
 
         var handled = 0;
@@ -462,6 +509,7 @@ public sealed class CallService(
                     handled++;
                     continue;
                 }
+                if (!checkStale) continue;
                 var stale = call.Participants.Where(p => p.LeftAt == null && p.LastSeenAt < staleCutoff).ToList();
                 if (stale.Count == 0) continue;
                 await LeaveCoreAsync(call, stale, "timeout", now, ct);
@@ -473,6 +521,18 @@ public sealed class CallService(
             }
         }
         return handled;
+    }
+
+    /// <summary>
+    /// 会议室永不结束，每次进出都留一行参与者：离开超过一小时的删掉（轨道随之级联删除），
+    /// 免得每次进出客厅都要把几个月的历史加载进来。
+    /// </summary>
+    private Task PruneRoomHistoryAsync(DateTimeOffset now, CancellationToken ct)
+    {
+        var cutoff = now - TimeSpan.FromHours(1);
+        return db.CallParticipants
+            .Where(p => p.LeftAt != null && p.LeftAt < cutoff && db.CallSessions.Any(c => c.Id == p.CallId && c.RoomSlug != null))
+            .ExecuteDeleteAsync(ct);
     }
 
     // ---------------------------------------------------------------- 内部
@@ -508,11 +568,37 @@ public sealed class CallService(
         return hub.Clients.Groups(members.Select(ChatEvents.UserGroup).ToList());
     }
 
-    private async Task<CallParticipant> MyParticipantAsync(Guid me, Guid callId, CancellationToken ct)
-        => await db.CallParticipants.Include(p => p.Tracks)
-               .Where(p => p.CallId == callId && p.UserId == me && p.LeftAt == null)
-               .OrderByDescending(p => p.JoinedAt).FirstOrDefaultAsync(ct)
-           ?? throw Gone("已不在通话中");
+    /// <summary>
+    /// 这台设备在通话里的身份。带 participantId 时严格按它找（旧设备的迟到请求不会落到新设备的会话上）；
+    /// 不带时取这个人最新的一个（旧客户端）。
+    /// </summary>
+    private async Task<CallParticipant> MyParticipantAsync(Guid me, Guid callId, Guid? participantId, CancellationToken ct)
+    {
+        var q = db.CallParticipants.Include(p => p.Tracks).Where(p => p.CallId == callId && p.UserId == me && p.LeftAt == null);
+        var p = participantId is { } pid
+            ? await q.FirstOrDefaultAsync(x => x.Id == pid, ct)
+            : await q.OrderByDescending(x => x.JoinedAt).FirstOrDefaultAsync(ct);
+        return p ?? throw await NotInCallAsync(me, callId, participantId, ct);
+    }
+
+    private async Task<ApiException> NotInCallAsync(Guid me, Guid callId, Guid? participantId, CancellationToken ct)
+    {
+        if (participantId is not { } pid) return Gone("已不在通话中");
+        var mine = await db.CallParticipants.AsNoTracking().Where(x => x.CallId == callId && x.UserId == me).ToListAsync(ct);
+        var old = mine.FirstOrDefault(x => x.Id == pid);
+        return old is not null && ElsewhereSince(mine, me, old) ? ReplacedElsewhere() : Gone("已不在通话中");
+    }
+
+    /// <summary>
+    /// 同一个人在别的设备上：还在通话里，或者在 old 这一份掉线之后进来过（换到那台设备上、又在那边挂了）。
+    /// 这两种情况下 old 那台设备都不能自己回到通话里。例外：这台设备上一次重连（响应丢了）留下的那一份——它的 ReplacesId 就是 old。
+    /// 顶替时新一份的 JoinedAt 与旧一份的 LeftAt 是同一个时刻，所以用 &gt;=。
+    /// </summary>
+    private static bool ElsewhereSince(IEnumerable<CallParticipant> participants, Guid me, CallParticipant old)
+        => participants.Any(p => p.UserId == me && p.Id != old.Id && p.ReplacesId != old.Id
+            && (p.LeftAt == null || (old.LeftAt is { } left && p.JoinedAt >= left)));
+
+    private static ApiException ReplacedElsewhere() => new(410, "已在其他设备上加入通话", ReplacedDetail);
 
     /// <summary>Cloudflare 的会话要等浏览器准备好协商时再建（没用过的会话会过期），所以是第一次发布 / 订阅时才建。</summary>
     private async Task<string> EnsureSessionAsync(CallParticipant p, bool pull, CancellationToken ct)
@@ -546,28 +632,14 @@ public sealed class CallService(
         }
     }
 
-    private sealed record Cleanup(string SessionId, List<string> Mids);
-
-    /// <summary>尽力而为地让 Cloudflare 停止转发：失败也无妨，浏览器关掉连接 30 秒后 Cloudflare 自己会回收。</summary>
-    private async Task CleanupAsync(List<Cleanup> items)
-    {
-        // 凭据被拿掉之后（换了配置重启）留下的旧会话：没法关，也不用关
-        if (!realtime.IsConfigured) return;
-        foreach (var item in items.Where(i => i.Mids.Count > 0))
-        {
-            try
-            {
-                await realtime.CloseTracksAsync(item.SessionId, item.Mids, null, CancellationToken.None);
-            }
-            catch (Exception ex) when (ex is CloudflareRealtimeException or HttpRequestException or OperationCanceledException)
-            {
-                logger.LogDebug("关闭轨道失败（忽略）：{Message}", ex.Message);
-            }
-        }
-    }
+    /// <summary>
+    /// 让 Cloudflare 停止转发这些轨道：只入队，后台去关（见 CallCleanupQueue）。不能在通话锁里同步等——
+    /// 关闭刚断开的连接上的轨道有时要等好几秒，期间同一通通话里别人的加入、离开都会被拖住。
+    /// </summary>
+    private void Cleanup(List<CallCleanup> items) => cleanupQueue.Enqueue(items);
 
     /// <summary>标记离开：轨道一并下线，用量记账，Cloudflare 侧待关闭的轨道记进 cleanup。</summary>
-    private static void MarkLeft(CallSession call, CallParticipant p, DateTimeOffset now, List<Cleanup> cleanup)
+    private static void MarkLeft(CallSession call, CallParticipant p, DateTimeOffset now, List<CallCleanup> cleanup)
     {
         if (p.LeftAt is not null) return;
         var open = p.Tracks.Where(t => t.UnpublishedAt == null).ToList();
@@ -577,7 +649,9 @@ public sealed class CallService(
             t.UnpublishedAt = now;
         }
         p.LeftAt = now;
-        if (p.CfSessionId is not null && open.Count > 0) cleanup.Add(new Cleanup(p.CfSessionId, open.Select(t => t.Mid).ToList()));
+        if (p.CfSessionId is not null && open.Count > 0) cleanup.Add(new CallCleanup(p.CfSessionId, open.Select(t => t.Mid).ToList()));
+        // 订阅会话里拉着的别人的轨道也要关：被顶掉 / 超时的设备如果还连着，否则会一直收到大家的音视频
+        if (p.CfPullSessionId is not null && p.PulledMids.Count > 0) cleanup.Add(new CallCleanup(p.CfPullSessionId, p.PulledMids.Distinct().ToList()));
     }
 
     /// <summary>
@@ -586,7 +660,8 @@ public sealed class CallService(
     /// </summary>
     private static void AccrueEgress(CallSession call, CallParticipant owner, CallTrack track, DateTimeOffset now)
     {
-        var receivers = call.Participants.Where(p => p.LeftAt == null && p.UserId != owner.UserId).Select(p => p.UserId).Distinct().Count();
+        // 同一次操作里一起离开的人（LeftAt == now）在这条轨道的整个时长里都在接收
+        var receivers = call.Participants.Where(p => (p.LeftAt == null || p.LeftAt >= now) && p.UserId != owner.UserId).Select(p => p.UserId).Distinct().Count();
         var seconds = Math.Max(0, (now - track.PublishedAt).TotalSeconds);
         var bitsPerSecond = track.Kind switch { TrackKind.Audio => 32_000, TrackKind.Video => 1_000_000, _ => 1_200_000 };
         call.EgressBytesEstimate += (long)(seconds * bitsPerSecond / 8 * receivers);
@@ -594,7 +669,7 @@ public sealed class CallService(
 
     private async Task LeaveCoreAsync(CallSession call, List<CallParticipant> leaving, string reason, DateTimeOffset now, CancellationToken ct)
     {
-        var cleanup = new List<Cleanup>();
+        var cleanup = new List<CallCleanup>();
         foreach (var p in leaving) MarkLeft(call, p, now, cleanup);
 
         if (call.RoomSlug is null)
@@ -615,11 +690,11 @@ public sealed class CallService(
         var audience = await AudienceAsync(call, ct);
         foreach (var p in leaving)
             await audience.SendAsync(ChatEvents.ParticipantLeft, new ParticipantLeftDto(call.Id, p.Id, p.UserId, reason), ct);
-        await CleanupAsync(cleanup);
+        Cleanup(cleanup);
     }
 
     /// <summary>结束通话：所有人离开、写通话记录消息、广播、未接时给没接的人补一条"未接来电"推送。</summary>
-    private async Task EndCoreAsync(CallSession call, CallEndReason reason, DateTimeOffset now, CancellationToken ct, List<Cleanup>? cleanup = null)
+    private async Task EndCoreAsync(CallSession call, CallEndReason reason, DateTimeOffset now, CancellationToken ct, List<CallCleanup>? cleanup = null)
     {
         cleanup ??= [];
         foreach (var p in call.Participants.Where(p => p.LeftAt == null).ToList()) MarkLeft(call, p, now, cleanup);
@@ -655,20 +730,25 @@ public sealed class CallService(
                 }
             }
 
-            if (reason is CallEndReason.Missed or CallEndReason.Cancelled)
+            // 响过铃却没进来的人：未接 / 取消换成"未接来电"；接通后结束、被拒接时把还挂着的响铃通知收掉
+            var rung = await db.ConversationMembers
+                .Where(m => m.ConversationId == cid && m.UserId != call.StartedBy && !joined.Contains(m.UserId) && (m.MutedUntil == null || m.MutedUntil < now))
+                .Select(m => m.UserId).ToListAsync(ct);
+            if (rung.Count > 0)
             {
-                var missed = await db.ConversationMembers
-                    .Where(m => m.ConversationId == cid && m.UserId != call.StartedBy && !joined.Contains(m.UserId) && (m.MutedUntil == null || m.MutedUntil < now))
-                    .Select(m => m.UserId).ToListAsync(ct);
-                if (missed.Count > 0)
+                if (reason is CallEndReason.Missed or CallEndReason.Cancelled)
                 {
                     var conv = await db.Conversations.AsNoTracking().FirstAsync(c => c.Id == cid, ct);
                     var caller = await db.Users.AsNoTracking().FirstAsync(u => u.Id == call.StartedBy, ct);
-                    push.SendToUsersInBackground(missed, CallPush.Missed(call, conv, caller.DisplayName), PushSender.DefaultTtlSeconds);
+                    push.SendToUsersInBackground(rung, CallPush.Missed(call, conv, caller.DisplayName), PushSender.DefaultTtlSeconds);
+                }
+                else
+                {
+                    push.SendToUsersInBackground(rung, CallPush.Closed(call, cid, "通话已结束"), CallPush.RingTtlSeconds);
                 }
             }
         }
-        await CleanupAsync(cleanup);
+        Cleanup(cleanup);
     }
 }
 
@@ -691,8 +771,11 @@ public static class CallPush
     public static PushPayload Missed(CallSession call, Conversation conv, string callerName)
         => new(Title(conv, callerName), $"未接{Kind(call.Type)}来电", $"/messages/{conv.Id}", Tag(call.Id), Kind: PushKinds.CallMissed, CallId: call.Id);
 
-    public static PushPayload Answered(CallSession call, Guid conversationId)
-        => new("PrivateChat", "已在其他设备接听", $"/messages/{conversationId}", Tag(call.Id), Kind: PushKinds.CallAnswered, CallId: call.Id);
+    public static PushPayload Answered(CallSession call, Guid conversationId) => Closed(call, conversationId, "已在其他设备接听");
+
+    /// <summary>把这通通话还挂着的响铃通知收掉（同一个 tag 原地替换后自动关闭）。</summary>
+    public static PushPayload Closed(CallSession call, Guid conversationId, string body)
+        => new("PrivateChat", body, $"/messages/{conversationId}", Tag(call.Id), Kind: PushKinds.CallAnswered, CallId: call.Id);
 
     /// <summary>通话记录消息的正文（不认识 payload 的客户端、会话列表摘要以外的地方显示它）。</summary>
     public static string Summary(CallType type, CallEndReason reason, int durationSeconds) => reason switch

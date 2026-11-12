@@ -28,11 +28,20 @@ const ctl = vi.hoisted(() => ({
   server: {} as Record<string, unknown>,
   joins: [] as string[],
   joinErrors: [] as number[],
+  /** join 失败时带的原因代码（例如 replaced），与 joinErrors 一一对应 */
+  joinErrorDetails: [] as (string | undefined)[],
+  /** join 时带上的 replacing（重连时原来的参与者 Id） */
+  joinReplacing: [] as (string | undefined)[],
+  ends: [] as string[],
+  created: true,
   leaves: [] as string[],
   declines: [] as string[],
   states: [] as [string, boolean, boolean][],
   heartbeats: 0,
   heartbeatError: 0,
+  heartbeatDetail: undefined as string | undefined,
+  /** 每次心跳带的参与者 Id */
+  heartbeatPids: [] as string[],
   starts: [] as [string, string][],
   sessions: [] as unknown[],
   publishErrors: [] as number[],
@@ -43,6 +52,9 @@ const ctl = vi.hoisted(() => ({
   participantSeq: 0,
   supported: true,
   createdConversations: [] as unknown[],
+  uploadsUnfinished: 0,
+  /** 每个用例建的 store：用例结束时挂断，免得它们还挂在 document / 定时器上影响后面的用例 */
+  stores: [] as { current: unknown; hangup(): Promise<void> }[],
 }))
 
 vi.mock('@/realtime/connection', async () => {
@@ -70,9 +82,11 @@ vi.mock('@/api/client', () => ({
 vi.mock('@/features/calls/rtc/RealtimeSession', () => {
   class SignalingError extends Error {
     status: number
-    constructor(status: number, message: string) {
+    detail: string | undefined
+    constructor(status: number, message: string, detail?: string) {
       super(message)
       this.status = status
+      this.detail = detail
     }
   }
   class RealtimeSession {
@@ -165,11 +179,13 @@ vi.mock('@/features/calls/api', async () => {
         ctl.starts.push([conversationId, type])
         const c = call('call-new', { conversationId, type: type as CallDto['type'], startedBy: ME })
         ctl.server[c.id] = c
-        return clone(c)
+        return { call: clone(c), created: ctl.created }
       },
-      join: async (id: string) => {
+      join: async (id: string, replacing?: string) => {
+        ctl.joinReplacing.push(replacing)
         const status = ctl.joinErrors.shift()
-        if (status) throw new SignalingError(status, 'join failed')
+        const detail = ctl.joinErrorDetails.shift()
+        if (status) throw new SignalingError(status, 'join failed', detail)
         ctl.joins.push(id)
         const c = ctl.server[id] as unknown as CallDto
         const participantId = `p-me-${++ctl.participantSeq}`
@@ -178,18 +194,22 @@ vi.mock('@/features/calls/api', async () => {
         return { participantId, iceServers: [{ urls: ['stun:stun.example:3478'] }], call: clone(c) }
       },
       decline: async (id: string) => { ctl.declines.push(id) },
-      end: async () => undefined,
-      heartbeat: async () => {
+      end: async (id: string, ifUnanswered?: boolean) => { ctl.ends.push(ifUnanswered ? `${id}?ifUnanswered` : id) },
+      heartbeat: async (_id: string, pid: string) => {
         ctl.heartbeats++
-        if (ctl.heartbeatError) throw new SignalingError(ctl.heartbeatError, 'gone')
+        ctl.heartbeatPids.push(pid)
+        if (ctl.heartbeatError) throw new SignalingError(ctl.heartbeatError, 'gone', ctl.heartbeatDetail)
       },
-      setState: async (id: string, micOn: boolean, camOn: boolean) => { ctl.states.push([id, micOn, camOn]) },
+      setState: async (id: string, _pid: string, micOn: boolean, camOn: boolean) => { ctl.states.push([id, micOn, camOn]) },
       leave: async (id: string) => { ctl.leaves.push(id) },
       leaveBeacon: (id: string) => { ctl.leaves.push(id) },
       signaling: () => ({}),
     },
+    isReplaced: (e: unknown) => e instanceof SignalingError && (e as InstanceType<typeof SignalingError>).status === 410 && (e as InstanceType<typeof SignalingError>).detail === 'replaced',
   }
 })
+
+vi.mock('@/stores/driveUploads', () => ({ useDriveUploadsStore: () => ({ unfinished: ctl.uploadsUnfinished }) }))
 
 function participant(id: string, userId: string, tracks: ParticipantDto['tracks'] = [], extra: Partial<ParticipantDto> = {}): ParticipantDto {
   return { id, userId, micOn: true, camOn: tracks.some((t) => t.kind === 'Video'), joinedAt: new Date().toISOString(), tracks, ...extra }
@@ -224,6 +244,7 @@ async function boot() {
   const conversations = useConversationsStore()
   conversations.items = [{ id: CONV, type: 'Direct', title: null, avatarBlobId: null, lastSeq: 0, lastReadSeq: 0, unread: 0, mutedUntil: null, memberIds: [ME, DAD] }]
   const store = useCallsStore()
+  ctl.stores.push(store)
   await store.init()
   return { store, conversations }
 }
@@ -236,14 +257,16 @@ const lastSession = () => sessions()[sessions().length - 1]!
 beforeEach(() => {
   Object.assign(ctl, {
     config: { enabled: true, ringSeconds: 60, heartbeatSeconds: 10 },
-    active: [], rooms: [], server: {}, joins: [], joinErrors: [], leaves: [], declines: [], states: [], heartbeats: 0, heartbeatError: 0,
+    active: [], rooms: [], server: {}, joins: [], joinErrors: [], joinErrorDetails: [], joinReplacing: [], ends: [], created: true,
+    leaves: [], declines: [], states: [], heartbeats: 0, heartbeatError: 0, heartbeatDetail: undefined, heartbeatPids: [],
     starts: [], sessions: [], publishErrors: [], micError: null, camError: null, tracks: [], ringtone: [], participantSeq: 0, supported: true,
-    createdConversations: [],
+    createdConversations: [], uploadsUnfinished: 0,
   })
   localStorage.clear()
 })
 
-afterEach(() => {
+afterEach(async () => {
+  for (const s of ctl.stores.splice(0)) if (s.current) await s.hangup().catch(() => undefined)
   vi.useRealTimers()
 })
 
@@ -470,6 +493,43 @@ describe('呼出', () => {
   })
 })
 
+describe('发起失败与连点', () => {
+  it('发起后自己拿不到麦克风：这次新建的通话取消掉，对方不会空响', async () => {
+    const { store } = await boot()
+    ctl.micError = 'NotAllowedError'
+    expect(await store.startCall(CONV, 'Video')).toBe(false)
+    await settle()
+    expect(ctl.ends).toEqual(['call-new?ifUnanswered'])
+    expect(ctl.joins).toEqual([])
+  })
+
+  it('加入的是已有的通话（不是这次新建的）失败时不取消别人的通话', async () => {
+    const { store } = await boot()
+    ctl.created = false
+    ctl.micError = 'NotAllowedError'
+    expect(await store.startCall(CONV, 'Video')).toBe(false)
+    await settle()
+    expect(ctl.ends).toEqual([])
+  })
+
+  it('连点"视频通话"只发起一次', async () => {
+    const { store } = await boot()
+    const [a, b] = await Promise.all([store.startCall(CONV, 'Video'), store.startCall(CONV, 'Video')])
+    expect([a, b].filter(Boolean)).toHaveLength(1)
+    expect(ctl.starts).toHaveLength(1)
+  })
+
+  it('接听过程中又点了拒接：不进入通话', async () => {
+    const { store } = await boot()
+    store.onIncomingCall(incomingFromDad())
+    const entering = store.accept()
+    store.decline('call-1')
+    expect(await entering).toBe(false)
+    expect(store.current).toBeNull()
+    expect(ctl.joins).toEqual([])
+  })
+})
+
 describe('开关', () => {
   it('静音只停用轨道并上报状态', async () => {
     const { store } = await boot()
@@ -500,6 +560,62 @@ describe('开关', () => {
     expect(store.localVideo?.label).toBe('camera-user')
     expect(tracks().find((t) => t.label === 'placeholder')!.stopped).toBe(true)
     expect(ctl.states.at(-1)).toEqual(['call-new', true, true])
+  })
+
+  it('连点开摄像头只开一个，挂断后没有摄像头还开着', async () => {
+    const { store } = await boot()
+    store.onIncomingCall(incomingFromDad('call-1'))
+    ;(ctl.server['call-1'] as unknown as CallDto).type = 'Audio'
+    store.calls['call-1']!.type = 'Audio'
+    await store.accept()
+    await Promise.all([store.toggleCam(), store.toggleCam()])
+    const cams = tracks().filter((t) => t.label.startsWith('camera'))
+    expect(cams).toHaveLength(1)
+    await store.hangup()
+    expect(cams.every((t) => t.stopped)).toBe(true)
+  })
+
+  it('麦克风被拔掉（轨道 ended）：换一个新的麦克风继续发', async () => {
+    const { store } = await boot()
+    store.onIncomingCall(incomingFromDad())
+    await store.accept()
+    const s = lastSession()
+    const mic = tracks().find((t) => t.label === 'mic')!
+    mic.end()
+    await settle()
+    const mics = tracks().filter((t) => t.label === 'mic')
+    expect(mics).toHaveLength(2)
+    expect(s.replaced).toContainEqual({ kind: 'Audio', track: mics[1] })
+  })
+
+  it('麦克风拔掉后换新的也失败：显示为静音；再点开麦时重新拿麦克风并重新发布', async () => {
+    vi.useFakeTimers()
+    const { store } = await boot()
+    store.onIncomingCall(incomingFromDad())
+    await store.accept()
+    ctl.micError = 'NotFoundError'
+    tracks().find((t) => t.label === 'mic')!.end()
+    await vi.advanceTimersByTimeAsync(10)
+    expect(store.current?.micOn).toBe(false)
+    ;(tracks().find((t) => t.label === 'mic') as FakeTrack & { readyState?: string }).readyState = 'ended'
+
+    ctl.micError = null
+    store.toggleMic()
+    await vi.advanceTimersByTimeAsync(50)
+    expect(store.current?.micOn).toBe(true)
+    expect(tracks().filter((t) => t.label === 'mic')).toHaveLength(2)
+    expect(ctl.joins).toEqual(['call-1', 'call-1'])
+  })
+
+  it('摄像头被拔掉：换成黑画面占位并标记为关闭', async () => {
+    const { store } = await boot()
+    store.onIncomingCall(incomingFromDad())
+    await store.accept()
+    const s = lastSession()
+    tracks().find((t) => t.label.startsWith('camera'))!.end()
+    await settle()
+    expect(store.current?.camOn).toBe(false)
+    expect(s.replaced.at(-1)?.track?.label).toBe('placeholder')
   })
 
   it('语音通话里第一次开摄像头：新发布一条视频轨道', async () => {
@@ -638,6 +754,52 @@ describe('断线与重连', () => {
     expect(store.current).toMatchObject({ participantId: 'p-me-2', phase: 'active' })
   })
 
+  it('被别的设备顶掉而没收到通知：心跳带上自己的身份，410 replaced 时就地收场，不重新加入', async () => {
+    vi.useFakeTimers()
+    const { store } = await boot()
+    store.onIncomingCall(incomingFromDad())
+    await store.accept()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(ctl.heartbeatPids).toEqual(['p-me-1'])
+
+    ctl.heartbeatError = 410
+    ctl.heartbeatDetail = 'replaced'
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(store.current).toBeNull()
+    expect(store.notice?.key).toBe('calls.replaced')
+    expect(ctl.joins).toEqual(['call-1'])
+    expect(ctl.leaves).toEqual([])
+  })
+
+  it('切回前台对账时发现我在别的设备上：收场，不把那台设备顶掉', async () => {
+    const { store } = await boot()
+    store.onIncomingCall(incomingFromDad())
+    await store.accept()
+    await settle()
+    const server = ctl.server['call-1'] as unknown as CallDto
+    server.participants = [...server.participants.filter((p) => p.id !== 'p-me-1'), participant('p-me-other-device', ME)]
+    store.onParticipantJoined({ callId: 'call-1', participant: participant('p-dad', DAD, DAD_TRACKS) })
+    await store.refresh()
+    await settle()
+    expect(store.current).toBeNull()
+    expect(store.notice?.key).toBe('calls.replaced')
+    expect(ctl.joins).toEqual(['call-1'])
+  })
+
+  it('重连时带上原来的身份；服务器说已被别的设备顶掉就收场', async () => {
+    vi.useFakeTimers()
+    const { store } = await boot()
+    store.onIncomingCall(incomingFromDad())
+    await store.accept()
+    ctl.joinErrors.push(410)
+    ctl.joinErrorDetails.push('replaced')
+    lastSession().handlers.onConnectionLost('ice-failed')
+    await vi.advanceTimersByTimeAsync(10)
+    expect(ctl.joinReplacing).toEqual([undefined, 'p-me-1'])
+    expect(store.current).toBeNull()
+    expect(store.notice?.key).toBe('calls.replaced')
+  })
+
   it('别人离开：清掉他的画面和订阅', async () => {
     const { store } = await boot()
     store.onIncomingCall(incomingFromDad())
@@ -650,6 +812,48 @@ describe('断线与重连', () => {
     expect(store.others).toEqual([])
     // 我还在通话里（群聊 / 客厅里别人走了不影响我）
     expect(store.current?.callId).toBe('call-1')
+  })
+})
+
+describe('切回前台', () => {
+  let visibility: 'visible' | 'hidden' = 'visible'
+  beforeEach(() => {
+    visibility = 'visible'
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility })
+  })
+  const setVisible = (v: 'visible' | 'hidden') => {
+    visibility = v
+    document.dispatchEvent(new Event('visibilitychange'))
+  }
+
+  it('桌面切到别的标签页一会儿：采集和心跳照常，回来只对账、不重连', async () => {
+    vi.useFakeTimers()
+    const { store } = await boot()
+    store.onIncomingCall(incomingFromDad())
+    await store.accept()
+    // 之前的用例留下的 store 也挂在同一个 document 上：只看这一个 store 的身份有没有换
+    const pid = store.current!.participantId
+    setVisible('hidden')
+    await vi.advanceTimersByTimeAsync(40_000)
+    setVisible('visible')
+    await vi.advanceTimersByTimeAsync(50)
+    expect(store.current?.participantId).toBe(pid)
+    expect(store.current?.phase).toBe('active')
+  })
+
+  it('手机后台页面被冻结（心跳停了）：回来重新加入、重新发布', async () => {
+    vi.useFakeTimers()
+    const { store } = await boot()
+    store.onIncomingCall(incomingFromDad())
+    await store.accept()
+    const pid = store.current!.participantId
+    setVisible('hidden')
+    // 冻结：时间过去了，定时器一次没跑
+    vi.setSystemTime(Date.now() + 60_000)
+    setVisible('visible')
+    await vi.advanceTimersByTimeAsync(50)
+    expect(store.current?.participantId).not.toBe(pid)
+    expect(store.current?.phase).toBe('active')
   })
 })
 

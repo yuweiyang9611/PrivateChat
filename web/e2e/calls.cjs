@@ -134,6 +134,24 @@ const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasT
 ;(async () => {
   let sfu, browser
   let restoreApi = false
+  // Ctrl+C / 被终止时 finally 不会执行：也要把 api 从假 SFU 改回 deploy/.env 的配置，不能把本地栈留在测试凭据上
+  let interrupted = false
+  const onSignal = (signal) => {
+    if (interrupted) return
+    interrupted = true
+    console.log(`\n收到 ${signal}，还原 api 配置后退出…`)
+    try { sfu?.close?.() } catch { /* ignore */ }
+    if (restoreApi) {
+      try {
+        execSync(`${COMPOSE} up -d --no-build api`, { stdio: 'inherit' })
+      } catch {
+        console.log('还原失败，请运行 docker compose -f deploy/docker-compose.yml up -d api')
+      }
+    }
+    process.exit(130)
+  }
+  // Windows：Ctrl+C 是 SIGINT，Ctrl+Break 是 SIGBREAK，关掉终端窗口是 SIGHUP（SIGTERM 在 Windows 上不会来）
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) process.on(signal, onSignal)
   try {
     if (!['', '0', '1'].includes(process.env.E2E_REAL_CF || '')) throw new Error('E2E_REAL_CF 只接受 0 或 1；拒绝把拼错的真实模式当成假 SFU 模式。')
     const target = new URL(BASE)
@@ -317,11 +335,12 @@ const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasT
     await a.click('[data-testid=call-hangup]')
     check('对方取消后，来电窗自动消失', await waitGone(b, '[data-testid=incoming-call]', 8000))
     await b.goto(`${BASE}/messages/${convId}`)
-    await b.locator('[data-testid=call-message]').last().waitFor({ timeout: 10000 })
+    // 来电窗随"通话结束"事件收起，通话记录消息紧接着才写：等最后一条变成这一通的记录，而不是读到上一通
+    await b.waitForFunction(() => [...document.querySelectorAll('[data-testid=call-message]')].pop()?.textContent?.includes('未接来电'), null, { timeout: 10000 }).catch(() => undefined)
     const missedText = await b.locator('[data-testid=call-message]').last().innerText()
     check('没接到的人在聊天里看到"未接来电"', missedText.includes('未接来电'), missedText)
     await a.goto(`${BASE}/messages/${convId}`)
-    await a.locator('[data-testid=call-message]').last().waitFor({ timeout: 10000 })
+    await a.waitForFunction(() => [...document.querySelectorAll('[data-testid=call-message]')].pop()?.textContent?.includes('已取消'), null, { timeout: 10000 }).catch(() => undefined)
     const cancelledText = await a.locator('[data-testid=call-message]').last().innerText()
     check('发起人看到的是"已取消"', cancelledText.includes('已取消'), cancelledText)
 
@@ -383,7 +402,13 @@ const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasT
     check('有人离开后，留下的人还在客厅里，对方的格子消失', (await waitGone(a, tile(BOB_ID), 10000)) && (await overlay(a).count()) === 1)
     await a.click('[data-testid=call-hangup]')
     await waitGone(a, '[data-testid=call-overlay]')
-    const room = sql(`select (ended_at is null) || ' ' || (select count(*) from call_participants p where p.call_id = c.id and p.left_at is null) from call_sessions c where room_slug = 'living-room'`)
+    // 界面在收到服务器确认之前就关了（挂断先本地收场）：离开请求可能还在路上，轮询几秒等服务器记完
+    const roomSql = `select (ended_at is null) || ' ' || (select count(*) from call_participants p where p.call_id = c.id and p.left_at is null) from call_sessions c where room_slug = 'living-room'`
+    let room = sql(roomSql)
+    for (let i = 0; i < 20 && room !== 'true 0'; i++) {
+      await sleep(250)
+      room = sql(roomSql)
+    }
     check('所有人离开后客厅仍然存在、里面没有人', room === 'true 0', room)
     check('客厅不产生通话记录消息', sql(`select count(*) from messages m join call_sessions c on c.id = m.client_message_id where c.room_slug is not null`) === '0')
 
@@ -395,7 +420,7 @@ const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasT
       const ops = sfu.requests.reduce((m, r) => { const k = r.path.replace(/sessions\/[^/]+/, 'sessions/*').replace(/^\/v1\/apps\/[^/]+/, ''); m[k] = (m[k] || 0) + 1; return m }, {})
       console.log('  SFU 请求统计：', JSON.stringify(ops))
     }
-    const apiLines = execSync(`${COMPOSE} logs --since 10m --no-log-prefix api`).toString().split('\n')
+    const apiLines = execSync(`${COMPOSE} logs --since 10m --no-log-prefix api`, { maxBuffer: 256 * 1024 * 1024 }).toString().split('\n')
     const apiErrors = []
     apiLines.forEach((l, i) => { if (/\[\d\d:\d\d:\d\d ERR\]/.test(l)) apiErrors.push([l, ...apiLines.slice(i + 1, i + 12).filter((x) => /Exception|^\s+at /.test(x))].join(' | ').slice(0, 600)) })
     check('api 日志里没有错误', apiErrors.length === 0, apiErrors.slice(0, 3))

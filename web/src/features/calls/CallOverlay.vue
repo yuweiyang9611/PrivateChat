@@ -182,7 +182,7 @@ const self = computed(() => session.user?.displayName ?? '')
         <!-- 自己的预览 -->
         <ParticipantTile
           v-if="calls.localVideo"
-          class="absolute bottom-3 right-4 h-36 w-24 shadow-lg sm:h-32 sm:w-52"
+          class="!absolute bottom-3 right-4 h-36 w-24 shadow-lg sm:h-32 sm:w-52"
           style="border: 1px solid rgba(255, 255, 255, 0.2)"
           :name="self"
           :track="calls.localVideo"
@@ -202,10 +202,10 @@ const self = computed(() => session.user?.displayName ?? '')
         <button class="pc-call-btn" :class="{ off: !cur.micOn }" type="button" :title="t(cur.micOn ? 'calls.mute' : 'calls.unmute')" data-testid="call-mic" :data-on="cur.micOn" @click="calls.toggleMic()">
           <el-icon :size="24"><component :is="cur.micOn ? Microphone : Mute" /></el-icon>
         </button>
-        <button class="pc-call-btn" :class="{ off: !cur.camOn, slash: !cur.camOn }" type="button" :title="t(cur.camOn ? 'calls.camOff' : 'calls.camOn')" data-testid="call-cam" :data-on="cur.camOn" :disabled="cur.phase === 'reconnecting'" @click="calls.toggleCam()">
+        <button class="pc-call-btn" :class="{ off: !cur.camOn, slash: !cur.camOn }" type="button" :title="t(cur.camOn ? 'calls.camOff' : 'calls.camOn')" data-testid="call-cam" :data-on="cur.camOn" :disabled="cur.phase === 'reconnecting' || calls.camBusy" @click="calls.toggleCam()">
           <el-icon :size="24"><VideoCamera /></el-icon>
         </button>
-        <button v-if="cur.camOn && canFlip" class="pc-call-btn sm:hidden" type="button" :title="t('calls.flip')" data-testid="call-flip" @click="calls.flipCamera()">
+        <button v-if="cur.camOn && canFlip" class="pc-call-btn sm:hidden" type="button" :title="t('calls.flip')" data-testid="call-flip" :disabled="cur.phase === 'reconnecting' || calls.camBusy" @click="calls.flipCamera()">
           <el-icon :size="24"><Refresh /></el-icon>
         </button>
         <button v-if="canShare" class="pc-call-btn" :class="{ active: cur.screenOn }" type="button" :title="t(cur.screenOn ? 'calls.stopShare' : 'calls.share')" data-testid="call-screen" :data-on="cur.screenOn" :disabled="cur.phase === 'reconnecting'" @click="calls.toggleScreen()">

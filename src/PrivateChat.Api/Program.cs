@@ -99,6 +99,8 @@ builder.Services.AddSignalR().AddJsonProtocol(o => o.PayloadSerializerOptions.Co
 builder.Services.AddOpenApi("v1");
 builder.Services.AddHealthChecks().AddNpgSql(connectionString, name: "postgres");
 builder.Services.AddHttpClient<CloudflareRealtimeClient>();
+builder.Services.AddSingleton<CallCleanupQueue>();
+builder.Services.AddHostedService<CallCleanupWorker>();
 
 // ---- Features ----
 builder.Services.AddSingleton<PresenceTracker>();

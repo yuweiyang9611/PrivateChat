@@ -16,14 +16,19 @@ export interface Signaling {
   closePulled(mids: string[]): Promise<void>
 }
 
-/** 信令请求被服务器明确拒绝时抛出；status 为 0 表示网络不通（结果未知） */
+/**
+ * 信令请求被服务器明确拒绝时抛出；status 为 0 表示网络不通（结果未知）。
+ * detail 是服务器给的原因代码，例如 410 的 replaced：这个人在别的设备上还在通话里。
+ */
 export class SignalingError extends Error {
   readonly status: number
+  readonly detail: string | undefined
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, detail?: string) {
     super(message)
     this.name = 'SignalingError'
     this.status = status
+    this.detail = detail
   }
 }
 
@@ -39,8 +44,10 @@ export interface SessionHandlers {
 
 const keyOf = (r: { participantId: string; trackName: string }): string => `${r.participantId}/${r.trackName}`
 /** 订阅时源还没出媒体（对方刚发布）会失败：隔一会儿重试，最多这么多次 */
+/** 拉不到的轨道（对方还没开始发媒体）先快速重试这么多次，之后放慢但不放弃：对方的摄像头可能过一会儿才出画面 */
 const MAX_PULL_RETRIES = 8
 const PULL_RETRY_MS = 1500
+const SLOW_PULL_RETRY_MS = 10_000
 /** ICE 断开后等这么久还没恢复就整体重连 */
 const DISCONNECT_GRACE_MS = 5000
 /** 这些状态码说明服务器在转发给 Cloudflare 之前就拒绝了：本地回滚即可，连接还能用 */
@@ -156,12 +163,18 @@ export class RealtimeSession {
     })
   }
 
-  /** 换源不重新协商：摄像头开关、前后摄像头切换。没在发布这种轨道时返回 false */
-  async replaceTrack(kind: TrackKind, track: MediaStreamTrack | null): Promise<boolean> {
-    const entry = this.published.get(kind)
-    if (!entry || this.closed) return false
-    await entry.transceiver.sender.replaceTrack(track)
-    return true
+/**
+   * 换源不重新协商：摄像头开关、前后摄像头切换。没在发布这种轨道时返回 false。
+   * 排在发布队列里：刚进通话、首次发布还没完成时点了关摄像头，要等发布完成再换，
+   * 否则换源落空，发出去的是已经停掉的摄像头轨道，对方一直看不到画面。
+   */
+  replaceTrack(kind: TrackKind, track: MediaStreamTrack | null): Promise<boolean> {
+    return this.pubQueue.run(async () => {
+      const entry = this.published.get(kind)
+      if (!entry || this.closed || this.lost) return false
+      await entry.transceiver.sender.replaceTrack(track)
+      return true
+    })
   }
 
   isPublished(kind: TrackKind): boolean {
@@ -240,7 +253,7 @@ export class RealtimeSession {
       await this.signaling.closePulled(removed.map((p) => p.mid)).catch(() => undefined)
     }
 
-    const missing = [...this.wanted.values()].filter((r) => !this.pulled.has(keyOf(r)) && (this.retries.get(keyOf(r)) ?? 0) < MAX_PULL_RETRIES)
+    const missing = [...this.wanted.values()].filter((r) => !this.pulled.has(keyOf(r)))
     if (!missing.length || this.closed) return
 
     let retry = false
@@ -273,8 +286,9 @@ export class RealtimeSession {
       throw e
     }
     if (retry && !this.closed) {
+      const attempts = Math.min(...missing.filter((r) => !this.pulled.has(keyOf(r))).map((r) => this.retries.get(keyOf(r)) ?? 0))
       clearTimeout(this.retryTimer)
-      this.retryTimer = setTimeout(() => this.scheduleSync(), PULL_RETRY_MS)
+      this.retryTimer = setTimeout(() => this.scheduleSync(), attempts < MAX_PULL_RETRIES ? PULL_RETRY_MS : SLOW_PULL_RETRY_MS)
     }
   }
 

@@ -22,7 +22,7 @@ const conversation = computed(() => conversations.byId(props.id))
 const typingUsers = computed(() => typing.value[props.id] ?? [])
 
 // ---- 通话入口 ----
-const canCall = computed(() => callsSupported() && calls.enabled && !calls.entering)
+const canCall = computed(() => callsSupported() && calls.enabled && !calls.busy)
 const callHint = computed(() => (!callsSupported() ? t('calls.unsupported') : !calls.enabled ? t('calls.notConfigured') : ''))
 /** 这个会话里正在进行、我还没进去的通话 */
 const ongoing = computed(() => {

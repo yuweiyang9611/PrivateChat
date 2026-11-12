@@ -45,15 +45,26 @@ public sealed class CallsController(CallService calls) : ControllerBase
     public async Task<ActionResult<CallDto>> Get(Guid id, CancellationToken ct)
         => await calls.GetAsync(User.UserId(), id, ct);
 
-    /// <summary>在会话里发起通话，其他成员响铃；已有进行中的通话则返回它。之后调 join 进入。</summary>
+    /// <summary>
+    /// 在会话里发起通话，其他成员响铃（201）；已有进行中的通话则返回它（200）。之后调 join 进入。
+    /// 201 的那次如果发起人自己没能进去（没有麦克风、加入失败），客户端要调 end 取消，别让对方空响。
+    /// </summary>
     [HttpPost]
+    [ProducesResponseType<CallDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<CallDto>(StatusCodes.Status201Created)]
     public async Task<ActionResult<CallDto>> Start([FromBody] StartCallRequest req, CancellationToken ct)
-        => (await calls.StartAsync(User.UserId(), req, ct)).Call;
+    {
+        var (call, created) = await calls.StartAsync(User.UserId(), req, ct);
+        return created ? StatusCode(StatusCodes.Status201Created, call) : call;
+    }
 
-    /// <summary>加入（接听）：返回参与者 Id、ICE 服务器（含短期 TURN 凭据）与通话快照。</summary>
+    /// <summary>
+    /// 加入（接听）：返回参与者 Id、ICE 服务器（含短期 TURN 凭据）与通话快照。
+    /// 重连时带 replacing（原来的参与者 Id）：已被别的设备顶掉时返回 410（detail = replaced），不再反过来顶掉对方。
+    /// </summary>
     [HttpPost("{id:guid}/join")]
-    public async Task<ActionResult<JoinResponse>> Join(Guid id, CancellationToken ct)
-        => await calls.JoinAsync(User.UserId(), id, ct);
+    public async Task<ActionResult<JoinResponse>> Join(Guid id, [FromQuery] Guid? replacing, CancellationToken ct)
+        => await calls.JoinAsync(User.UserId(), id, ct, replacing);
 
     [HttpPost("{id:guid}/decline")]
     public async Task<IActionResult> Decline(Guid id, CancellationToken ct)
@@ -64,62 +75,63 @@ public sealed class CallsController(CallService calls) : ControllerBase
 
     /// <summary>发布本端轨道：SDP offer → answer。</summary>
     [HttpPost("{id:guid}/publish")]
-    public async Task<ActionResult<PublishResponse>> Publish(Guid id, [FromBody] PublishRequest req, CancellationToken ct)
-        => await calls.PublishAsync(User.UserId(), id, req, ct);
+    public async Task<ActionResult<PublishResponse>> Publish(Guid id, [FromBody] PublishRequest req, [FromQuery] Guid? participantId, CancellationToken ct)
+        => await calls.PublishAsync(User.UserId(), id, req, ct, participantId);
 
     [HttpPost("{id:guid}/unpublish")]
-    public async Task<ActionResult<UnpublishResponse>> Unpublish(Guid id, [FromBody] UnpublishRequest req, CancellationToken ct)
-        => await calls.UnpublishAsync(User.UserId(), id, req, ct);
+    public async Task<ActionResult<UnpublishResponse>> Unpublish(Guid id, [FromBody] UnpublishRequest req, [FromQuery] Guid? participantId, CancellationToken ct)
+        => await calls.UnpublishAsync(User.UserId(), id, req, ct, participantId);
 
     /// <summary>订阅他人轨道：返回 Cloudflare 的 offer，浏览器回 answer 后调 renegotiate。</summary>
     [HttpPost("{id:guid}/pull")]
-    public async Task<ActionResult<PullResponse>> Pull(Guid id, [FromBody] PullRequest req, CancellationToken ct)
-        => await calls.PullAsync(User.UserId(), id, req, ct);
+    public async Task<ActionResult<PullResponse>> Pull(Guid id, [FromBody] PullRequest req, [FromQuery] Guid? participantId, CancellationToken ct)
+        => await calls.PullAsync(User.UserId(), id, req, ct, participantId);
 
     [HttpPost("{id:guid}/renegotiate")]
-    public async Task<IActionResult> Renegotiate(Guid id, [FromBody] RenegotiateApiRequest req, CancellationToken ct)
+    public async Task<IActionResult> Renegotiate(Guid id, [FromBody] RenegotiateApiRequest req, [FromQuery] Guid? participantId, CancellationToken ct)
     {
-        await calls.RenegotiateAsync(User.UserId(), id, req.Answer, ct);
+        await calls.RenegotiateAsync(User.UserId(), id, req.Answer, ct, participantId);
         return NoContent();
     }
 
     /// <summary>不再接收某些轨道（按订阅会话里的 mid）。</summary>
     [HttpPost("{id:guid}/pull/close")]
-    public async Task<IActionResult> ClosePulled(Guid id, [FromBody] ClosePulledRequest req, CancellationToken ct)
+    public async Task<IActionResult> ClosePulled(Guid id, [FromBody] ClosePulledRequest req, [FromQuery] Guid? participantId, CancellationToken ct)
     {
-        await calls.ClosePulledAsync(User.UserId(), id, req, ct);
+        await calls.ClosePulledAsync(User.UserId(), id, req, ct, participantId);
         return NoContent();
     }
 
     /// <summary>麦克风 / 摄像头开关状态，给别人显示图标用（媒体本身不经过这里）。</summary>
     [HttpPost("{id:guid}/state")]
-    public async Task<IActionResult> State(Guid id, [FromBody] ParticipantStateRequest req, CancellationToken ct)
+    public async Task<IActionResult> State(Guid id, [FromBody] ParticipantStateRequest req, [FromQuery] Guid? participantId, CancellationToken ct)
     {
-        await calls.SetStateAsync(User.UserId(), id, req, ct);
+        await calls.SetStateAsync(User.UserId(), id, req, ct, participantId);
         return NoContent();
     }
 
-    /// <summary>每 10 秒一次；返回 410 表示已不在通话里。</summary>
+    /// <summary>每 10 秒一次；返回 410 表示这台设备已不在通话里（detail = replaced：在别的设备上了）。</summary>
     [HttpPost("{id:guid}/heartbeat")]
-    public async Task<IActionResult> Heartbeat(Guid id, CancellationToken ct)
+    public async Task<IActionResult> Heartbeat(Guid id, [FromQuery] Guid? participantId, CancellationToken ct)
     {
-        await calls.HeartbeatAsync(User.UserId(), id, ct);
+        await calls.HeartbeatAsync(User.UserId(), id, ct, participantId);
         return NoContent();
     }
 
-    /// <summary>离开。关页面时浏览器用 sendBeacon 调它（没有请求体）。</summary>
+    /// <summary>离开（只离开 participantId 这台设备）。关页面时浏览器用 sendBeacon 调它（没有请求体，参数都在查询串里）。</summary>
     [HttpPost("{id:guid}/leave")]
-    public async Task<IActionResult> Leave(Guid id)
+    public async Task<IActionResult> Leave(Guid id, [FromQuery] Guid? participantId)
     {
         // 不跟随请求取消：关页面发来的 beacon 连接随时会断，离开必须做完
-        await calls.LeaveAsync(User.UserId(), id, CancellationToken.None);
+        await calls.LeaveAsync(User.UserId(), id, CancellationToken.None, participantId);
         return NoContent();
     }
 
+    /// <summary>结束整通通话（发起人或管理员）。ifUnanswered：只在还没人接通时才结束（发起人自己没能进去时取消用）。</summary>
     [HttpPost("{id:guid}/end")]
-    public async Task<IActionResult> End(Guid id, CancellationToken ct)
+    public async Task<IActionResult> End(Guid id, [FromQuery] bool ifUnanswered, CancellationToken ct)
     {
-        await calls.EndAsync(User.UserId(), User.Role(), id, ct);
+        await calls.EndAsync(User.UserId(), User.Role(), id, ct, ifUnanswered);
         return NoContent();
     }
 }
@@ -127,18 +139,28 @@ public sealed class CallsController(CallService calls) : ControllerBase
 /// <summary>每 5 秒扫一遍：响铃超时记未接，心跳断了的参与者按离开处理。</summary>
 public sealed class CallMaintenanceWorker(IServiceScopeFactory scopes, ILogger<CallMaintenanceWorker> logger) : BackgroundService
 {
+    private static readonly TimeSpan Period = TimeSpan.FromSeconds(5);
+
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        // 刚启动、刚从故障里恢复、主机刚从休眠里醒来（两次扫描间隔远超周期）时，之前的心跳本来就送不进来：
+        // 从那一刻起重新计时，满一个掉线判定时长之后才按心跳判掉线
+        var healthySince = DateTimeOffset.UtcNow;
+        var lastOk = healthySince;
+        using var timer = new PeriodicTimer(Period);
         while (await timer.WaitForNextTickAsync(ct))
         {
+            var now = DateTimeOffset.UtcNow;
+            if (now - lastOk > Period * 3) healthySince = now;
             try
             {
                 using var scope = scopes.CreateScope();
-                await scope.ServiceProvider.GetRequiredService<CallService>().SweepAsync(DateTimeOffset.UtcNow, ct);
+                await scope.ServiceProvider.GetRequiredService<CallService>().SweepAsync(now, ct, healthySince);
+                lastOk = now;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                healthySince = DateTimeOffset.UtcNow;
                 logger.LogWarning(ex, "通话清理任务出错");
             }
         }

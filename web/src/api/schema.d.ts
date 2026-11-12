@@ -1851,6 +1851,17 @@ export interface paths {
                         "text/json": components["schemas"]["CallDto"];
                     };
                 };
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["CallDto"];
+                        "application/json": components["schemas"]["CallDto"];
+                        "text/json": components["schemas"]["CallDto"];
+                    };
+                };
             };
         };
         delete?: never;
@@ -2020,7 +2031,9 @@ export interface paths {
         put?: never;
         post: {
             parameters: {
-                query?: never;
+                query?: {
+                    replacing?: string;
+                };
                 header?: never;
                 path: {
                     id: string;
@@ -2094,7 +2107,9 @@ export interface paths {
         put?: never;
         post: {
             parameters: {
-                query?: never;
+                query?: {
+                    participantId?: string;
+                };
                 header?: never;
                 path: {
                     id: string;
@@ -2139,7 +2154,9 @@ export interface paths {
         put?: never;
         post: {
             parameters: {
-                query?: never;
+                query?: {
+                    participantId?: string;
+                };
                 header?: never;
                 path: {
                     id: string;
@@ -2184,7 +2201,9 @@ export interface paths {
         put?: never;
         post: {
             parameters: {
-                query?: never;
+                query?: {
+                    participantId?: string;
+                };
                 header?: never;
                 path: {
                     id: string;
@@ -2229,7 +2248,9 @@ export interface paths {
         put?: never;
         post: {
             parameters: {
-                query?: never;
+                query?: {
+                    participantId?: string;
+                };
                 header?: never;
                 path: {
                     id: string;
@@ -2270,7 +2291,9 @@ export interface paths {
         put?: never;
         post: {
             parameters: {
-                query?: never;
+                query?: {
+                    participantId?: string;
+                };
                 header?: never;
                 path: {
                     id: string;
@@ -2311,7 +2334,9 @@ export interface paths {
         put?: never;
         post: {
             parameters: {
-                query?: never;
+                query?: {
+                    participantId?: string;
+                };
                 header?: never;
                 path: {
                     id: string;
@@ -2352,7 +2377,9 @@ export interface paths {
         put?: never;
         post: {
             parameters: {
-                query?: never;
+                query?: {
+                    participantId?: string;
+                };
                 header?: never;
                 path: {
                     id: string;
@@ -2387,7 +2414,9 @@ export interface paths {
         put?: never;
         post: {
             parameters: {
-                query?: never;
+                query?: {
+                    participantId?: string;
+                };
                 header?: never;
                 path: {
                     id: string;
@@ -2422,7 +2451,9 @@ export interface paths {
         put?: never;
         post: {
             parameters: {
-                query?: never;
+                query?: {
+                    ifUnanswered?: boolean;
+                };
                 header?: never;
                 path: {
                     id: string;

@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -218,9 +219,13 @@ public class CallTests
         Assert.NotNull(ended.EndedAt);
         Assert.Empty(ended.Participants);
         Assert.Equal([x.AdminId, x.Bob.Id], ended.JoinedUserIds);
+        // 关闭在后台进行（不在通话锁里等 Cloudflare）
+        await EventuallyAsync(() => x.App.Realtime.ClosedMids(adminSession).Count == 2 && x.App.Realtime.ClosedMids(bobPullSession).Count == 2, "Cloudflare 关闭轨道");
         Assert.Equal(["0", "1"], x.App.Realtime.ClosedMids(adminSession).Order());
-        var close = x.App.Realtime.CallsTo("/tracks/close").Single();
+        var close = x.App.Realtime.CallsTo($"/sessions/{adminSession}/tracks/close").Single();
         Assert.True(close.Body!["force"]!.GetValue<bool>());
+        // 离开的人订阅会话里拉着的轨道也关掉：Cloudflare 不会因为状态里删了就停止转发
+        Assert.Equal(["r0", "r1"], x.App.Realtime.ClosedMids(bobPullSession).Order());
 
         // 通话记录消息：双方都收到，载荷可解析，参加了的人不算未读
         var message = await bobHub.WaitAsync<MessageDto>("MessageReceived");
@@ -266,8 +271,11 @@ public class CallTests
         // 重复拒接无害
         Assert.Equal(HttpStatusCode.NoContent, (await x.BobClient.PostAsync($"/api/calls/{call.Id}/decline", null)).StatusCode);
         Assert.Single(await MessagesAsync(x.BobClient, conv));
+        // 拒接的人其它设备上还挂着响铃通知：补一条同 tag 的短时推送把它收掉（不是"未接来电"，后者 TTL 是一天）
+        await EventuallyAsync(() => x.App.Push.Requests.Count == 2, "收掉响铃的推送");
         await Task.Delay(200);
-        Assert.Single(x.App.Push.Requests);
+        Assert.Equal(2, x.App.Push.Requests.Count);
+        Assert.Equal(CallPush.RingTtlSeconds.ToString(), x.App.Push.Requests.Last().Ttl);
     }
 
     [PgFact]
@@ -438,12 +446,255 @@ public class CallTests
         Assert.Null(after.EndedAt);
         Assert.Equal(2, after.Participants.Count);
         Assert.Empty(after.Participants.Single(p => p.Id == second.ParticipantId).Tracks);
+        await EventuallyAsync(() => x.App.Realtime.ClosedMids(firstSession).Count == 1, "关闭被顶掉的那份的轨道");
         Assert.Equal(["0"], x.App.Realtime.ClosedMids(firstSession));
 
         // 新的一份重新发布：换了新的 Cloudflare 会话
         await PublishAsync(x.Admin, call.Id, ("0", TrackKind.Audio));
         var secondSession = (await x.CallAsync(call.Id)).Participants.Single(p => p.Id == second.ParticipantId).CfSessionId!;
         Assert.NotEqual(firstSession, secondSession);
+    }
+
+    private static async Task<string?> ProblemDetailAsync(HttpResponseMessage res)
+        => (await res.Content.ReadFromJsonAsync<JsonElement>()).TryGetProperty("detail", out var d) && d.ValueKind == JsonValueKind.String ? d.GetString() : null;
+
+    [PgFact]
+    public async Task A_replaced_device_cannot_take_the_call_back_end_it_or_touch_the_new_devices_session()
+    {
+        await using var x = await SetupAsync();
+        var conv = await ConversationAsync(x.Admin, ConversationType.Direct, x.Bob.Id);
+        var call = await StartAsync(x.Admin, conv);
+        var laptop = await JoinAsync(x.Admin, call.Id);
+        await JoinAsync(x.BobClient, call.Id);
+        // 换到手机上接着打：笔记本那一份被顶掉（它睡着了，没收到通知）
+        var phone = await JoinAsync(x.Admin, call.Id);
+
+        // 笔记本醒来：心跳 410 replaced（不是"被清理"，客户端据此收场而不是重新加入）
+        var hb = await x.Admin.PostAsync($"/api/calls/{call.Id}/heartbeat?participantId={laptop.ParticipantId}", null);
+        Assert.Equal((HttpStatusCode.Gone, "replaced"), (hb.StatusCode, await ProblemDetailAsync(hb)));
+        // 重连带上原来的身份：不会反过来把手机顶掉
+        var rejoin = await x.Admin.PostAsync($"/api/calls/{call.Id}/join?replacing={laptop.ParticipantId}", null);
+        Assert.Equal((HttpStatusCode.Gone, "replaced"), (rejoin.StatusCode, await ProblemDetailAsync(rejoin)));
+        // 迟到的发布 / 订阅请求不会落到手机的会话上
+        var publish = await x.Admin.PostJsonAsync($"/api/calls/{call.Id}/publish?participantId={laptop.ParticipantId}",
+            new PublishRequest(Offer, [new PublishTrackInput("0", TrackKind.Audio)]));
+        Assert.Equal(HttpStatusCode.Gone, publish.StatusCode);
+        // 关笔记本页面发来的离开只离开笔记本：单聊不会因此结束，手机还在
+        Assert.Equal(HttpStatusCode.NoContent, (await x.Admin.PostAsync($"/api/calls/{call.Id}/leave?participantId={laptop.ParticipantId}&via=unload", null)).StatusCode);
+        var after = await GetAsync(x.BobClient, call.Id);
+        Assert.Null(after.EndedAt);
+        Assert.Contains(after.Participants, p => p.Id == phone.ParticipantId);
+        Assert.Equal(HttpStatusCode.NoContent, (await x.Admin.PostAsync($"/api/calls/{call.Id}/heartbeat?participantId={phone.ParticipantId}", null)).StatusCode);
+
+        // 只有一台设备、因为掉线被清理：410 但不是 replaced（客户端重新加入）
+        await x.App.WithDbAsync(db => db.CallParticipants.Where(p => p.Id == phone.ParticipantId).ExecuteUpdateAsync(s => s.SetProperty(p => p.LeftAt, DateTimeOffset.UtcNow)));
+        hb = await x.Admin.PostAsync($"/api/calls/{call.Id}/heartbeat?participantId={phone.ParticipantId}", null);
+        Assert.Equal(HttpStatusCode.Gone, hb.StatusCode);
+        Assert.NotEqual("replaced", await ProblemDetailAsync(hb));
+    }
+
+    [PgFact]
+    public async Task A_device_replaced_by_another_that_already_hung_up_does_not_rejoin_by_itself()
+    {
+        await using var x = await SetupAsync();
+        var group = await ConversationAsync(x.Admin, ConversationType.Group, x.Bob.Id, x.Carol.Id);
+        var call = await StartAsync(x.Admin, group);
+        var phone = await JoinAsync(x.Admin, call.Id);
+        await JoinAsync(x.BobClient, call.Id);
+        await JoinAsync(x.CarolClient, call.Id);
+        // 手机睡着了；在笔记本上进来（顶掉手机），聊完在笔记本上挂了，群通话继续
+        var laptop = await JoinAsync(x.Admin, call.Id);
+        await x.Admin.PostAsync($"/api/calls/{call.Id}/leave?participantId={laptop.ParticipantId}", null);
+        Assert.Null((await x.CallAsync(call.Id)).EndedAt);
+
+        // 手机醒来：心跳、重连都得到 replaced，不会带着麦克风回到通话里
+        var hb = await x.Admin.PostAsync($"/api/calls/{call.Id}/heartbeat?participantId={phone.ParticipantId}", null);
+        Assert.Equal((HttpStatusCode.Gone, "replaced"), (hb.StatusCode, await ProblemDetailAsync(hb)));
+        var rejoin = await x.Admin.PostAsync($"/api/calls/{call.Id}/join?replacing={phone.ParticipantId}", null);
+        Assert.Equal((HttpStatusCode.Gone, "replaced"), (rejoin.StatusCode, await ProblemDetailAsync(rejoin)));
+        Assert.DoesNotContain((await GetAsync(x.BobClient, call.Id)).Participants, p => p.UserId == x.AdminId);
+    }
+
+    [PgFact]
+    public async Task Rejoin_after_a_timeout_or_a_lost_join_response_still_works()
+    {
+        await using var x = await SetupAsync();
+        var group = await ConversationAsync(x.Admin, ConversationType.Group, x.Bob.Id, x.Carol.Id);
+        var call = await StartAsync(x.Admin, group);
+        var first = await JoinAsync(x.Admin, call.Id);
+        await JoinAsync(x.BobClient, call.Id);
+
+        // 只有这一台设备，因为掉线被清理：带着原来的身份重新加入可以
+        await x.App.WithDbAsync(db => db.CallParticipants.Where(p => p.Id == first.ParticipantId).ExecuteUpdateAsync(s => s.SetProperty(p => p.LeftAt, DateTimeOffset.UtcNow)));
+        var hb = await x.Admin.PostAsync($"/api/calls/{call.Id}/heartbeat?participantId={first.ParticipantId}", null);
+        Assert.Equal(HttpStatusCode.Gone, hb.StatusCode);
+        Assert.NotEqual("replaced", await ProblemDetailAsync(hb));
+        var second = await (await x.Admin.PostAsync($"/api/calls/{call.Id}/join?replacing={first.ParticipantId}", null)).ReadAsync<JoinResponse>();
+
+        // 重连的响应丢了，客户端拿同一个旧身份再试一次：认出是自己上次那份，顶掉它，而不是说"在别的设备上"
+        var third = await x.Admin.PostAsync($"/api/calls/{call.Id}/join?replacing={first.ParticipantId}", null);
+        Assert.Equal(HttpStatusCode.OK, third.StatusCode);
+        var stored = await x.CallAsync(call.Id);
+        Assert.NotNull(stored.Participants.Single(p => p.Id == second.ParticipantId).LeftAt);
+        Assert.Single(stored.Participants, p => p.UserId == x.AdminId && p.LeftAt == null);
+    }
+
+    [PgFact]
+    public async Task Cancelling_a_call_the_starter_could_not_join_never_ends_a_call_others_answered()
+    {
+        await using var x = await SetupAsync();
+        var group = await ConversationAsync(x.Admin, ConversationType.Group, x.Bob.Id, x.Carol.Id);
+        var call = await StartAsync(x.Admin, group);
+        // 发起人还在等麦克风权限，家人们先接起来聊上了
+        await JoinAsync(x.BobClient, call.Id);
+        await JoinAsync(x.CarolClient, call.Id);
+        Assert.Equal(HttpStatusCode.NoContent, (await x.Admin.PostAsync($"/api/calls/{call.Id}/end?ifUnanswered=true", null)).StatusCode);
+        Assert.Null((await x.CallAsync(call.Id)).EndedAt);
+
+        // 没人接的：照常取消
+        var conv = await ConversationAsync(x.Admin, ConversationType.Direct, x.Bob.Id);
+        var lonely = await StartAsync(x.Admin, conv);
+        Assert.Equal(HttpStatusCode.NoContent, (await x.Admin.PostAsync($"/api/calls/{lonely.Id}/end?ifUnanswered=true", null)).StatusCode);
+        Assert.Equal(CallEndReason.Cancelled, (await x.CallAsync(lonely.Id)).EndReason);
+    }
+
+    [PgFact]
+    public async Task Joining_a_group_call_late_still_clears_the_ring_on_other_devices()
+    {
+        await using var x = await SetupAsync();
+        var group = await ConversationAsync(x.Admin, ConversationType.Group, x.Bob.Id, x.Carol.Id);
+        await x.App.AddPushSubscriptionAsync(x.Carol.Id, "carol-phone");
+        var call = await StartAsync(x.Admin, group);
+        await JoinAsync(x.Admin, call.Id);
+        await JoinAsync(x.BobClient, call.Id);
+        await EventuallyAsync(() => x.App.Push.Requests.Count(r => r.Endpoint.EndsWith("/carol-phone")) == 1, "Carol 的响铃推送");
+        // 两分钟后 Carol 在笔记本上加入：手机上还挂着的响铃通知要收掉
+        await x.App.WithDbAsync(db => db.CallSessions.Where(c => c.Id == call.Id).ExecuteUpdateAsync(s => s.SetProperty(c => c.StartedAt, DateTimeOffset.UtcNow.AddMinutes(-2))));
+        await JoinAsync(x.CarolClient, call.Id);
+        await EventuallyAsync(() => x.App.Push.Requests.Count(r => r.Endpoint.EndsWith("/carol-phone")) == 2, "收掉 Carol 手机上的响铃");
+    }
+
+    [PgFact]
+    public async Task Sweep_right_after_an_outage_does_not_drop_participants_whose_heartbeats_could_not_arrive()
+    {
+        await using var x = await SetupAsync();
+        var conv = await ConversationAsync(x.Admin, ConversationType.Direct, x.Bob.Id);
+        var call = await StartAsync(x.Admin, conv);
+        await JoinAsync(x.Admin, call.Id);
+        await JoinAsync(x.BobClient, call.Id);
+        var later = DateTimeOffset.UtcNow.AddMinutes(2);
+
+        using (var scope = x.App.Services.CreateScope())
+        {
+            var service = scope.ServiceProvider.GetRequiredService<CallService>();
+            // api 刚恢复 5 秒：心跳在停机期间本来就送不进来，不能据此判掉线
+            Assert.Equal(0, await service.SweepAsync(later, default, healthySince: later.AddSeconds(-5)));
+            Assert.Null((await x.CallAsync(call.Id)).EndedAt);
+            // 恢复已经超过判定时长仍没有心跳：才算真的掉线
+            Assert.Equal(1, await service.SweepAsync(later, default, healthySince: later.AddMinutes(-1)));
+        }
+        Assert.NotNull((await x.CallAsync(call.Id)).EndedAt);
+    }
+
+    [PgFact]
+    public async Task Start_reports_whether_it_created_the_call()
+    {
+        await using var x = await SetupAsync();
+        var conv = await ConversationAsync(x.Admin, ConversationType.Direct, x.Bob.Id);
+        var first = await x.Admin.PostJsonAsync("/api/calls", new StartCallRequest(conv, CallType.Audio));
+        Assert.Equal(HttpStatusCode.Created, first.StatusCode);
+        var id = (await first.ReadAsync<CallDto>()).Id;
+        var again = await x.BobClient.PostJsonAsync("/api/calls", new StartCallRequest(conv, CallType.Audio));
+        Assert.Equal(HttpStatusCode.OK, again.StatusCode);
+        Assert.Equal(id, (await again.ReadAsync<CallDto>()).Id);
+
+        // 发起人自己没能进去（没有麦克风）：客户端用 end 取消，记为已取消，对方不再空响
+        Assert.Equal(HttpStatusCode.NoContent, (await x.Admin.PostAsync($"/api/calls/{id}/end", null)).StatusCode);
+        Assert.Equal(CallEndReason.Cancelled, (await x.CallAsync(id)).EndReason);
+    }
+
+    [PgFact]
+    public async Task Ring_notifications_are_withdrawn_when_a_group_call_ends_or_is_declined()
+    {
+        await using var x = await SetupAsync();
+        var group = await ConversationAsync(x.Admin, ConversationType.Group, x.Bob.Id, x.Carol.Id);
+        await x.App.AddPushSubscriptionAsync(x.Bob.Id, "bob-phone");
+        await x.App.AddPushSubscriptionAsync(x.Carol.Id, "carol-phone");
+        var call = await StartAsync(x.Admin, group);
+        await JoinAsync(x.Admin, call.Id);
+        await EventuallyAsync(() => x.App.Push.Requests.Count == 2, "两人的响铃推送");
+
+        // Carol 在笔记本上拒接：她手机上还在响的通知收掉
+        await x.CarolClient.PostAsync($"/api/calls/{call.Id}/decline", null);
+        await EventuallyAsync(() => x.App.Push.Requests.Count(r => r.Endpoint.EndsWith("/carol-phone")) == 2, "收掉 Carol 的响铃");
+
+        // Bob 接了又挂：通话正常结束；没进来的 Carol 再收到一条收尾（同 tag，短 TTL），不是"未接来电"
+        await JoinAsync(x.BobClient, call.Id);
+        await x.BobClient.PostAsync($"/api/calls/{call.Id}/leave", null);
+        await x.Admin.PostAsync($"/api/calls/{call.Id}/leave", null);
+        Assert.Equal(CallEndReason.Completed, (await x.CallAsync(call.Id)).EndReason);
+        await EventuallyAsync(() => x.App.Push.Requests.Count(r => r.Endpoint.EndsWith("/carol-phone")) == 3, "通话结束时收掉 Carol 的响铃");
+        Assert.All(x.App.Push.Requests.Where(r => r.Endpoint.EndsWith("/carol-phone")).Skip(1), r => Assert.Equal(CallPush.RingTtlSeconds.ToString(), r.Ttl));
+    }
+
+    [PgFact]
+    public async Task Answering_on_one_device_only_tells_other_devices_when_they_actually_rang()
+    {
+        await using var x = await SetupAsync();
+        var conv = await ConversationAsync(x.Admin, ConversationType.Direct, x.Bob.Id);
+        await x.App.AddPushSubscriptionAsync(x.Bob.Id, "bob-phone");
+        // Bob 静音了这个会话：不响铃，接听时也不必去收响铃通知
+        await x.App.WithDbAsync(db => db.ConversationMembers.Where(m => m.ConversationId == conv && m.UserId == x.Bob.Id)
+            .ExecuteUpdateAsync(s => s.SetProperty(m => m.MutedUntil, DateTimeOffset.UtcNow.AddDays(1))));
+        var call = await StartAsync(x.Admin, conv);
+        await JoinAsync(x.Admin, call.Id);
+        await JoinAsync(x.BobClient, call.Id);
+        await Task.Delay(300);
+        Assert.Empty(x.App.Push.Requests);
+    }
+
+    [PgFact]
+    public async Task Leaving_and_joining_do_not_wait_for_cloudflare_to_close_tracks()
+    {
+        await using var x = await SetupAsync();
+        var room = (await (await x.Admin.GetAsync("/api/calls/rooms")).ReadAsync<List<CallDto>>()).Single();
+        var admin = await JoinAsync(x.Admin, room.Id);
+        var bob = await JoinAsync(x.BobClient, room.Id);
+        await PublishAsync(x.Admin, room.Id, ("0", TrackKind.Audio), ("1", TrackKind.Video));
+        await PublishAsync(x.BobClient, room.Id, ("0", TrackKind.Audio));
+        var adminSession = (await x.CallAsync(room.Id)).Participants.Single(p => p.Id == admin.ParticipantId).CfSessionId!;
+
+        // Cloudflare 关闭轨道卡住了：离开、别人的离开和加入都不能被它拖住
+        x.App.Realtime.ForcedCloseGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        Assert.Equal(HttpStatusCode.NoContent, (await x.Admin.PostAsync($"/api/calls/{room.Id}/leave?participantId={admin.ParticipantId}", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await x.BobClient.PostAsync($"/api/calls/{room.Id}/leave?participantId={bob.ParticipantId}", null)).StatusCode);
+        await JoinAsync(x.CarolClient, room.Id);
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(2), $"离开 / 加入用了 {watch.ElapsedMilliseconds} ms");
+        var inRoom = (await x.CallAsync(room.Id)).Participants.Where(p => p.LeftAt == null).Select(p => p.UserId).ToList();
+        Assert.Equal([x.Carol.Id], inRoom);
+
+        // 关闭请求已经发出去了，只是还没回来；放行后最终关掉
+        await EventuallyAsync(() => x.App.Realtime.CallsTo($"/sessions/{adminSession}/tracks/close").Count == 1, "关闭请求已发出");
+        Assert.Empty(x.App.Realtime.ClosedMids(adminSession));
+        x.App.Realtime.ForcedCloseGate.SetResult();
+        await EventuallyAsync(() => x.App.Realtime.ClosedMids(adminSession).Count == 2, "Cloudflare 最终关闭了轨道");
+    }
+
+    [PgFact]
+    public async Task Sweep_prunes_old_living_room_participants()
+    {
+        await using var x = await SetupAsync();
+        var room = (await (await x.Admin.GetAsync("/api/calls/rooms")).ReadAsync<List<CallDto>>()).Single();
+        var old = await JoinAsync(x.Admin, room.Id);
+        await x.Admin.PostAsync($"/api/calls/{room.Id}/leave?participantId={old.ParticipantId}", null);
+        var recent = await JoinAsync(x.Admin, room.Id);
+        await x.Admin.PostAsync($"/api/calls/{room.Id}/leave?participantId={recent.ParticipantId}", null);
+        await x.App.WithDbAsync(db => db.CallParticipants.Where(p => p.Id == old.ParticipantId)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.LeftAt, DateTimeOffset.UtcNow.AddHours(-2))));
+        await x.SweepAsync(TimeSpan.Zero);
+        var ids = await x.App.WithDbAsync(db => db.CallParticipants.Where(p => p.CallId == room.Id).Select(p => p.Id).ToListAsync());
+        Assert.Equal([recent.ParticipantId], ids);
     }
 
     [PgFact]
@@ -650,15 +901,16 @@ public class CallTests
         await JoinAsync(x.Admin, call.Id);
         await JoinAsync(x.BobClient, call.Id);
         await PublishAsync(x.Admin, call.Id, ("0", TrackKind.Video));
-        // 让这条轨道"发布了 100 秒"
+        await PublishAsync(x.BobClient, call.Id, ("0", TrackKind.Video));
+        // 让两条轨道都"发布了 100 秒"
         await x.App.WithDbAsync(db => db.CallTracks.ExecuteUpdateAsync(s => s.SetProperty(t => t.PublishedAt, DateTimeOffset.UtcNow.AddSeconds(-100))));
         await x.Admin.PostAsync($"/api/calls/{call.Id}/leave", null);
 
         Assert.Equal(HttpStatusCode.Forbidden, (await x.BobClient.GetAsync("/api/calls/usage")).StatusCode);
         var usage = await (await x.Admin.GetAsync("/api/calls/usage")).ReadAsync<CallUsageDto>();
         Assert.Equal(1, usage.Calls);
-        // 100 秒 × 1 Mbps × 1 个接收者 ≈ 12.5 MB
-        Assert.InRange(usage.EgressBytesEstimate, 12_000_000, 13_500_000);
+        // 两条各 100 秒 × 1 Mbps × 1 个接收者 ≈ 25 MB（Bob 的那条在通话结束时才下线，挂断的 Admin 仍算接收方）
+        Assert.InRange(usage.EgressBytesEstimate, 24_000_000, 27_000_000);
     }
 
     [PgFact]
