@@ -46,8 +46,8 @@ interface PushPayload {
   url: string
   tag: string
   count?: number
-  /** message 新消息；call 来电；call-missed 未接来电；call-answered 已在别的设备接听 */
-  kind?: 'message' | 'call' | 'call-missed' | 'call-answered'
+  /** message 新消息；moment 动态被评论 / 点赞；call 来电；call-missed 未接来电；call-answered 已在别的设备接听 */
+  kind?: 'message' | 'moment' | 'call' | 'call-missed' | 'call-answered'
   callId?: string | null
 }
 
@@ -63,7 +63,7 @@ async function windows(): Promise<WindowClient[]> {
 async function handlePush(payload: PushPayload): Promise<void> {
   const kind = payload.kind ?? 'message'
   const data: NotificationData = { url: payload.url, kind, callId: payload.callId }
-  if (kind === 'message') {
+  if (kind === 'message' || kind === 'moment') {
     await self.registration.showNotification(payload.title, {
       body: payload.body,
       tag: payload.tag,

@@ -117,12 +117,23 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<Post>(e =>
         {
             e.HasIndex(x => x.CreatedAt).IsDescending();
+            e.HasIndex(x => x.AuthorId);
             e.HasMany(x => x.Media).WithOne().HasForeignKey(x => x.PostId);
         });
-        b.Entity<PostMedia>(e => e.Property(x => x.Meta).HasColumnType("jsonb"));
-        b.Entity<Comment>(e => e.HasIndex(x => x.PostId));
+        b.Entity<PostMedia>(e =>
+        {
+            e.Property(x => x.Meta).HasColumnType("jsonb");
+            e.HasIndex(x => x.BlobId); // 读权限判断、垃圾回收
+        });
+        b.Entity<Comment>(e => e.HasIndex(x => new { x.PostId, x.CreatedAt }));
         b.Entity<Reaction>(e => e.HasKey(x => new { x.TargetType, x.TargetId, x.UserId, x.Emoji }));
-        b.Entity<AlbumItem>(e => e.HasKey(x => new { x.AlbumId, x.BlobId }));
+        b.Entity<AlbumItem>(e =>
+        {
+            e.HasKey(x => new { x.AlbumId, x.BlobId });
+            e.HasIndex(x => x.BlobId);
+            // 删相册时条目一起删；相册删掉之后也插不进孤儿条目（孤儿条目会让照片一直对全家可见）
+            e.HasOne<Album>().WithMany().HasForeignKey(x => x.AlbumId).OnDelete(DeleteBehavior.Cascade);
+        });
 
         b.Entity<CallSession>(e =>
         {

@@ -142,7 +142,9 @@ async function idbCount(page, store) {
   }
   const otherPage = await context.newPage()
   await otherPage.goto(BASE + '/settings').catch(() => undefined)
-  const settingsOffline = await otherPage.evaluate(() => document.body.innerText.includes('设置')).catch(() => false)
+  // 懒加载的设置页在 load 事件之后才渲染出来：等它出现，而不是在 load 那一刻就判断
+  const settingsOffline = await otherPage.waitForFunction(() => document.body.innerText.includes('退出登录'), null, { timeout: 10000 })
+    .then(() => true).catch(() => false)
   check('断网时直接打开其它路由（/settings，懒加载分片）也能显示', settingsOffline)
   await otherPage.close()
 

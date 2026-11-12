@@ -144,6 +144,586 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/albums": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["AlbumsOverviewDto"];
+                        "application/json": components["schemas"]["AlbumsOverviewDto"];
+                        "text/json": components["schemas"]["AlbumsOverviewDto"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateAlbumRequest"];
+                    "text/json": components["schemas"]["CreateAlbumRequest"];
+                    "application/*+json": components["schemas"]["CreateAlbumRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["AlbumDto"];
+                        "application/json": components["schemas"]["AlbumDto"];
+                        "text/json": components["schemas"]["AlbumDto"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/albums/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PatchAlbumRequest"];
+                    "text/json": components["schemas"]["PatchAlbumRequest"];
+                    "application/*+json": components["schemas"]["PatchAlbumRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["AlbumDto"];
+                        "application/json": components["schemas"]["AlbumDto"];
+                        "text/json": components["schemas"]["AlbumDto"];
+                    };
+                };
+            };
+        };
+        trace?: never;
+    };
+    "/api/albums/{id}/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    before?: string;
+                    beforeId?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["AlbumItemsPageDto"];
+                        "application/json": components["schemas"]["AlbumItemsPageDto"];
+                        "text/json": components["schemas"]["AlbumItemsPageDto"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AddAlbumItemsRequest"];
+                    "text/json": components["schemas"]["AddAlbumItemsRequest"];
+                    "application/*+json": components["schemas"]["AddAlbumItemsRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["AddAlbumItemsResult"];
+                        "application/json": components["schemas"]["AddAlbumItemsResult"];
+                        "text/json": components["schemas"]["AddAlbumItemsResult"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/albums/{id}/items/{blobId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    blobId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["AlbumDto"];
+                        "application/json": components["schemas"]["AlbumDto"];
+                        "text/json": components["schemas"]["AlbumDto"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/posts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    before?: string;
+                    beforeId?: string;
+                    authorId?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["PostPageDto"];
+                        "application/json": components["schemas"]["PostPageDto"];
+                        "text/json": components["schemas"]["PostPageDto"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreatePostRequest"];
+                    "text/json": components["schemas"]["CreatePostRequest"];
+                    "application/*+json": components["schemas"]["CreatePostRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["PostDto"];
+                        "application/json": components["schemas"]["PostDto"];
+                        "text/json": components["schemas"]["PostDto"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/posts/on-this-day": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    date?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["OnThisDayDto"];
+                        "application/json": components["schemas"]["OnThisDayDto"];
+                        "text/json": components["schemas"]["OnThisDayDto"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/posts/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["PostDto"];
+                        "application/json": components["schemas"]["PostDto"];
+                        "text/json": components["schemas"]["PostDto"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/posts/{id}/comments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateCommentRequest"];
+                    "text/json": components["schemas"]["CreateCommentRequest"];
+                    "application/*+json": components["schemas"]["CreateCommentRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["PostDto"];
+                        "application/json": components["schemas"]["PostDto"];
+                        "text/json": components["schemas"]["PostDto"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/comments/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["PostDto"];
+                        "application/json": components["schemas"]["PostDto"];
+                        "text/json": components["schemas"]["PostDto"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/posts/{id}/reactions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ToggleReactionRequest"];
+                    "text/json": components["schemas"]["ToggleReactionRequest"];
+                    "application/*+json": components["schemas"]["ToggleReactionRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["PostDto"];
+                        "application/json": components["schemas"]["PostDto"];
+                        "text/json": components["schemas"]["PostDto"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/comments/{id}/reactions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ToggleReactionRequest"];
+                    "text/json": components["schemas"]["ToggleReactionRequest"];
+                    "application/*+json": components["schemas"]["ToggleReactionRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["PostDto"];
+                        "application/json": components["schemas"]["PostDto"];
+                        "text/json": components["schemas"]["PostDto"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/family/members": {
         parameters: {
             query?: never;
@@ -930,6 +1510,7 @@ export interface paths {
                 query?: {
                     before?: string;
                     beforeId?: string;
+                    since?: string;
                     limit?: number;
                 };
                 header?: never;
@@ -2258,6 +2839,58 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AddAlbumItemsRequest: {
+            blobIds: string[];
+        };
+        AddAlbumItemsResult: {
+            /** Format: int32 */
+            added: number;
+            album: components["schemas"]["AlbumDto"];
+        };
+        AlbumDto: {
+            /** Format: uuid */
+            id: string;
+            title: string;
+            /** Format: uuid */
+            createdBy: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+            /** Format: uuid */
+            coverBlobId: null | string;
+            /** Format: int32 */
+            itemCount: number;
+        };
+        AlbumItemDto: {
+            /** Format: uuid */
+            blobId: string;
+            mime: string;
+            /** Format: date-time */
+            sortAt: string;
+            /** Format: date-time */
+            takenAt: null | string;
+            /** Format: int32 */
+            width: null | number;
+            /** Format: int32 */
+            height: null | number;
+            /** Format: double */
+            durationSeconds: null | number;
+            /** Format: uuid */
+            addedBy: string;
+        };
+        AlbumItemsPageDto: {
+            album: components["schemas"]["AlbumDto"];
+            items: components["schemas"]["AlbumItemDto"][];
+            /** Format: date-time */
+            nextBefore: null | string;
+            /** Format: uuid */
+            nextBeforeId: null | string;
+        };
+        AlbumsOverviewDto: {
+            albums: components["schemas"]["AlbumDto"][];
+            months: components["schemas"]["GalleryMonthDto"][];
+        };
         AttachmentDto: {
             /** Format: uuid */
             id: string;
@@ -2317,6 +2950,22 @@ export interface components {
         ClosePulledRequest: {
             mids: string[];
         };
+        CommentDto: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            postId: string;
+            /** Format: uuid */
+            authorId: string;
+            /** Format: uuid */
+            replyToCommentId: null | string;
+            /** Format: uuid */
+            replyToUserId: null | string;
+            text: string;
+            /** Format: date-time */
+            createdAt: string;
+            reactions: components["schemas"]["ReactionSummaryDto"][];
+        };
         ConversationDto: {
             /** Format: uuid */
             id: string;
@@ -2339,6 +2988,15 @@ export interface components {
         };
         /** @enum {unknown} */
         ConversationType: "Direct" | "Group" | "Family";
+        CreateAlbumRequest: {
+            title: string;
+            blobIds?: null | string[];
+        };
+        CreateCommentRequest: {
+            text: string;
+            /** Format: uuid */
+            replyToCommentId?: null | string;
+        };
         CreateConversationRequest: {
             type: components["schemas"]["ConversationType"];
             title: null | string;
@@ -2369,6 +3027,11 @@ export interface components {
              * @default 30
              */
             expiresInDays: number;
+        };
+        CreatePostRequest: {
+            text: null | string;
+            visibility?: components["schemas"]["PostVisibility"];
+            blobIds?: null | string[];
         };
         CreateShareRequest: {
             /** Format: uuid */
@@ -2433,6 +3096,17 @@ export interface components {
             /** Format: uuid */
             contextId: string;
             name: null | string;
+        };
+        GalleryMonthDto: {
+            month: string;
+            /** Format: int32 */
+            count: number;
+            /** Format: uuid */
+            coverBlobId: string;
+            /** Format: date-time */
+            since: string;
+            /** Format: date-time */
+            before: string;
         };
         GalleryPageDto: {
             items: components["schemas"]["GalleryItemDto"][];
@@ -2554,6 +3228,21 @@ export interface components {
             /** Format: date-time */
             takenAt: null | string;
         };
+        OnThisDayDto: {
+            /** Format: date */
+            date: string;
+            years: components["schemas"]["OnThisDayYearDto"][];
+        };
+        OnThisDayYearDto: {
+            /** Format: int32 */
+            year: number;
+            /** Format: int32 */
+            yearsAgo: number;
+            photos: components["schemas"]["GalleryItemDto"][];
+            /** Format: int32 */
+            photoCount: number;
+            posts: components["schemas"]["PostDto"][];
+        };
         ParticipantDto: {
             /** Format: uuid */
             id: string;
@@ -2568,6 +3257,12 @@ export interface components {
         ParticipantStateRequest: {
             micOn: boolean;
             camOn: boolean;
+        };
+        PatchAlbumRequest: {
+            title?: null | string;
+            /** Format: uuid */
+            coverBlobId?: null | string;
+            clearCover?: null | boolean;
         };
         PatchMemberRequest: {
             displayName: null | string;
@@ -2585,6 +3280,41 @@ export interface components {
             clearQuota: null | boolean;
             childReadOnly: null | boolean;
         };
+        PostDto: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            authorId: string;
+            text: null | string;
+            visibility: components["schemas"]["PostVisibility"];
+            /** Format: date-time */
+            createdAt: string;
+            media: components["schemas"]["PostMediaDto"][];
+            reactions: components["schemas"]["ReactionSummaryDto"][];
+            comments: components["schemas"]["CommentDto"][];
+        };
+        PostMediaDto: {
+            /** Format: uuid */
+            blobId: string;
+            mime: string;
+            /** Format: int32 */
+            width: null | number;
+            /** Format: int32 */
+            height: null | number;
+            /** Format: double */
+            durationSeconds: null | number;
+            /** Format: date-time */
+            takenAt: null | string;
+        };
+        PostPageDto: {
+            items: components["schemas"]["PostDto"][];
+            /** Format: date-time */
+            nextBefore: null | string;
+            /** Format: uuid */
+            nextBeforeId: null | string;
+        };
+        /** @enum {unknown} */
+        PostVisibility: "Family" | "Private";
         PrecheckRequest: {
             sha256: string;
             /** Format: int64 */
@@ -2672,6 +3402,11 @@ export interface components {
             seq: number;
             reactions: components["schemas"]["ReactionDto"][];
         };
+        ReactionSummaryDto: {
+            /** Format: uuid */
+            userId: string;
+            emoji: string;
+        };
         ReactRequest: {
             emoji: string;
         };
@@ -2748,6 +3483,9 @@ export interface components {
             /** Format: uuid */
             conversationId: string;
             type: components["schemas"]["CallType"];
+        };
+        ToggleReactionRequest: {
+            emoji: string;
         };
         TrackDto: {
             trackName: string;

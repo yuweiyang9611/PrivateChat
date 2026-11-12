@@ -5,6 +5,7 @@ import { isOnline, onOnline } from '@/net/online'
 import { useMessagesStore } from '@/stores/messages'
 import { useConversationsStore } from '@/stores/conversations'
 import { useDriveStore } from '@/stores/drive'
+import { useMomentsStore, type AlbumChangedEvent, type PostChangedEvent } from '@/stores/moments'
 import { useCallsStore, type CallDeclinedEvent, type ParticipantEvent, type ParticipantLeftEvent, type TrackEvent } from '@/stores/calls'
 import type { CallDto } from '@/features/calls/api'
 
@@ -144,6 +145,8 @@ async function onConnected(): Promise<void> {
   void messages.flushPendingReads()
   // 服务器重启 / 隧道恢复后网盘的出错、离线状态也要恢复（没打开过网盘时什么也不做）
   useDriveStore().resync()
+  // 断线期间错过的动态和相册改动（没打开过时光页时什么也不做）
+  useMomentsStore().resync()
   // 断线期间的来电、通话结束、有人进出都没收到：和服务器对一遍
   void useCallsStore().refresh()
 }
@@ -193,6 +196,9 @@ function registerHandlers(conn: HubConnection): void {
   conn.on('Presence', (e: PresenceEvent) => { presence.value = { ...presence.value, [e.userId]: e } })
   conn.on('ConversationUpdated', () => void useConversationsStore().load())
   conn.on('DriveChanged', (e: { spaceId: string; parentId?: string | null }) => useDriveStore().onChanged(e))
+  // 时光：有人发了 / 评论了 / 点赞了 / 删了动态，相册被改了
+  conn.on('PostChanged', (e: PostChangedEvent) => useMomentsStore().onPostChanged(e))
+  conn.on('AlbumChanged', (e: AlbumChangedEvent) => useMomentsStore().onAlbumChanged(e))
   conn.on('IncomingCall', (c: CallDto) => useCallsStore().onIncomingCall(c))
   conn.on('CallUpdated', (c: CallDto) => useCallsStore().onCallUpdated(c))
   conn.on('CallDeclined', (e: CallDeclinedEvent) => useCallsStore().onCallDeclined(e))

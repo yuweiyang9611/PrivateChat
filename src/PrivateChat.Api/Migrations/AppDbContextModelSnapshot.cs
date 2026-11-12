@@ -46,6 +46,10 @@ namespace PrivateChat.Api.Migrations
                         .HasColumnType("text")
                         .HasColumnName("title");
 
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
                     b.HasKey("Id")
                         .HasName("pk_albums");
 
@@ -76,6 +80,9 @@ namespace PrivateChat.Api.Migrations
 
                     b.HasKey("AlbumId", "BlobId")
                         .HasName("pk_album_items");
+
+                    b.HasIndex("BlobId")
+                        .HasDatabaseName("ix_album_items_blob_id");
 
                     b.ToTable("album_items", (string)null);
                 });
@@ -369,8 +376,8 @@ namespace PrivateChat.Api.Migrations
                     b.HasKey("Id")
                         .HasName("pk_comments");
 
-                    b.HasIndex("PostId")
-                        .HasDatabaseName("ix_comments_post_id");
+                    b.HasIndex("PostId", "CreatedAt")
+                        .HasDatabaseName("ix_comments_post_id_created_at");
 
                     b.ToTable("comments", (string)null);
                 });
@@ -1014,6 +1021,9 @@ namespace PrivateChat.Api.Migrations
                     b.HasKey("Id")
                         .HasName("pk_posts");
 
+                    b.HasIndex("AuthorId")
+                        .HasDatabaseName("ix_posts_author_id");
+
                     b.HasIndex("CreatedAt")
                         .IsDescending()
                         .HasDatabaseName("ix_posts_created_at");
@@ -1046,6 +1056,9 @@ namespace PrivateChat.Api.Migrations
 
                     b.HasKey("Id")
                         .HasName("pk_post_media");
+
+                    b.HasIndex("BlobId")
+                        .HasDatabaseName("ix_post_media_blob_id");
 
                     b.HasIndex("PostId")
                         .HasDatabaseName("ix_post_media_post_id");
@@ -1272,6 +1285,16 @@ namespace PrivateChat.Api.Migrations
                         .HasDatabaseName("ix_users_username");
 
                     b.ToTable("users", (string)null);
+                });
+
+            modelBuilder.Entity("PrivateChat.Api.Domain.AlbumItem", b =>
+                {
+                    b.HasOne("PrivateChat.Api.Domain.Album", null)
+                        .WithMany()
+                        .HasForeignKey("AlbumId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_album_items_albums_album_id");
                 });
 
             modelBuilder.Entity("PrivateChat.Api.Domain.CallParticipant", b =>

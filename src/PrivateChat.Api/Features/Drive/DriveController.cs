@@ -87,8 +87,8 @@ public sealed class DriveController(DriveService drive, DriveSharing sharing, Ga
     [HttpPost("nodes/{id:guid}/send")]
     public Task<MessageDto> Send(Guid id, [FromBody] SendToChatRequest req, CancellationToken ct) => sharing.SendToChatAsync(id, req, Actor, ct);
 
-    /// <summary>相册时间线：游标分页（上一页最后一项的 sortAt + blobId）。</summary>
+    /// <summary>相册时间线：游标分页（上一页最后一项的 sortAt + blobId）；since 限定下界（按月相册：只看这个月）。</summary>
     [HttpGet("gallery")]
-    public Task<GalleryPageDto> Gallery([FromQuery] DateTimeOffset? before, [FromQuery] Guid? beforeId, [FromQuery] int limit = 60, CancellationToken ct = default)
-        => gallery.PageAsync(User.UserId(), before, beforeId, limit, ct);
+    public Task<GalleryPageDto> Gallery([FromQuery] DateTimeOffset? before, [FromQuery] Guid? beforeId, [FromQuery] DateTimeOffset? since, [FromQuery] int limit = 60, CancellationToken ct = default)
+        => gallery.PageAsync(User.UserId(), before, beforeId, limit, ct, since);
 }

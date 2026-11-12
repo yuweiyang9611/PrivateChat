@@ -9,6 +9,7 @@ declare module 'vue-router' {
     titleKey: string
     /** 网盘内的分区（导航高亮） */
     driveSection?: 'my' | 'family' | 'gallery' | 'shared' | 'trash'
+    momentsSection?: 'feed' | 'albums'
   }
 }
 
@@ -67,7 +68,18 @@ const routes: RouteRecordRaw[] = [
       },
     ],
   },
-  { path: '/moments', component: () => import('@/features/moments/MomentsPage.vue'), meta: { section: 'moments', titleKey: 'nav.moments' } },
+  {
+    path: '/moments',
+    component: () => import('@/features/moments/MomentsPage.vue'),
+    meta: { section: 'moments', titleKey: 'nav.moments' },
+    children: [
+      { path: '', component: () => import('@/features/moments/FeedView.vue'), meta: { section: 'moments', titleKey: 'nav.moments', momentsSection: 'feed' } },
+      { path: 'posts/:id', component: () => import('@/features/moments/PostView.vue'), meta: { section: 'moments', titleKey: 'nav.moments', momentsSection: 'feed' } },
+      { path: 'albums', component: () => import('@/features/moments/AlbumsView.vue'), meta: { section: 'moments', titleKey: 'nav.moments', momentsSection: 'albums' } },
+      { path: 'albums/:id', component: () => import('@/features/moments/AlbumView.vue'), meta: { section: 'moments', titleKey: 'nav.moments', momentsSection: 'albums' } },
+      { path: 'months/:month', component: () => import('@/features/moments/MonthView.vue'), meta: { section: 'moments', titleKey: 'nav.moments', momentsSection: 'albums' } },
+    ],
+  },
   { path: '/devices', component: () => import('@/features/remote/DevicesPage.vue'), meta: { section: 'devices', titleKey: 'nav.devices' } },
   { path: '/settings', component: () => import('@/features/settings/SettingsPage.vue'), meta: { section: 'settings', titleKey: 'nav.settings' } },
   { path: '/family', component: () => import('@/features/family/FamilyPage.vue'), meta: { section: 'family', titleKey: 'nav.family' } },

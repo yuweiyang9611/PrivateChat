@@ -12,7 +12,7 @@ namespace PrivateChat.Api.Features.Notifications;
 
 /// <summary>
 /// Service Worker 收到的 JSON。tag 相同的通知会互相替换（同一会话只留一条）。
-/// Kind：message 新消息；call 来电（带接听 / 拒绝按钮、持续显示）；call-missed 未接来电；call-answered 已在别的设备接听（把响铃通知收掉）。
+/// Kind：message 新消息；moment 动态被评论 / 点赞；call 来电（带接听 / 拒绝按钮、持续显示）；call-missed 未接来电；call-answered 已在别的设备接听（把响铃通知收掉）。
 /// </summary>
 public sealed record PushPayload(string Title, string Body, string Url, string Tag, int Count = 1, string Kind = PushKinds.Message, Guid? CallId = null);
 
@@ -22,6 +22,8 @@ public static class PushKinds
     public const string Call = "call";
     public const string CallMissed = "call-missed";
     public const string CallAnswered = "call-answered";
+    /// <summary>动态被评论、回复、点赞。</summary>
+    public const string Moment = "moment";
 }
 
 /// <summary>

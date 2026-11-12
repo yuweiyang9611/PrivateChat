@@ -27,6 +27,8 @@ public static class ChatEvents
     public const string TrackPublished = "TrackPublished";
     public const string TrackUnpublished = "TrackUnpublished";
     public const string DriveChanged = "DriveChanged";
+    public const string PostChanged = "PostChanged";
+    public const string AlbumChanged = "AlbumChanged";
     public const string Notification = "Notification";
     public const string RemoteSessionChanged = "RemoteSessionChanged";
 

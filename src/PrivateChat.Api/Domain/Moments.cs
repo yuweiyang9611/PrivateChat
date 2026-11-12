@@ -47,9 +47,12 @@ public class Album
 {
     public Guid Id { get; set; } = Guid.CreateVersion7();
     public string Title { get; set; } = "";
+    /// <summary>手动指定的封面（必须是相册里的一项）；为空时用最近加入的一项。</summary>
     public Guid? CoverBlobId { get; set; }
     public Guid CreatedBy { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    /// <summary>最后一次改名 / 加减照片的时间：相册列表按它排序。</summary>
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
 public class AlbumItem

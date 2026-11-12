@@ -294,7 +294,7 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 
 - 连接建立时服务端把连接加入 `user:{id}` 组和该用户所有 `conv:{id}` 组，并标记在线；客户端随后调用 `Sync` 补拉缺失消息。
 - 客户端 → 服务端：`SendMessage(dto)`、`Typing(conversationId)`、`MarkRead(conversationId, seq)`、`Sync(Dictionary<convId, lastSeq>)`。
-- 服务端 → 客户端：`MessageReceived`、`MessageUpdated`、`MessageDeleted`、`ReactionChanged`、`ReadReceipt`、`Typing`、`Presence`、`ConversationUpdated`、`IncomingCall`、`CallUpdated`、`CallDeclined`、`ParticipantJoined`、`ParticipantLeft`、`ParticipantUpdated`、`TrackPublished`、`TrackUnpublished`、`DriveChanged`、`Notification`、`RemoteSessionChanged`。
+- 服务端 → 客户端：`MessageReceived`、`MessageUpdated`、`MessageDeleted`、`ReactionChanged`、`ReadReceipt`、`Typing`、`Presence`、`ConversationUpdated`、`IncomingCall`、`CallUpdated`、`CallDeclined`、`ParticipantJoined`、`ParticipantLeft`、`ParticipantUpdated`、`TrackPublished`、`TrackUnpublished`、`DriveChanged`、`PostChanged`、`AlbumChanged`、`Notification`、`RemoteSessionChanged`。
 
 可靠性约定：
 
@@ -395,10 +395,14 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 
 ### 4.7 动态（SNS）
 
-- 动态 = 文本 + 至多 9 个媒体 + 可见范围；评论支持回复；表情点赞。
-- 那年今天：按 taken_at 的月日聚合历史照片与动态，每天凌晨预计算一次。
-- 相册：手动相册 + 自动按月相册。
-- 推送：有人评论或点赞你的动态。
+- 动态 = 文本（≤ 5000 字）+ 至多 9 张照片 / 视频 + 可见范围："家人"（全家可见、可评论点赞，孩子也一样）或"仅自己"（私密日记，只有作者能看到它和里面的照片）。照片 / 视频必须是发布人本来就持有或能看到的（不能借动态转发自己看不到的文件）。
+- 评论支持回复（显示"X 回复 Y"，被回复的评论删了也保留是谁）；动态和评论都能表情点赞（同一表情再点取消，规则与消息表情回应相同）。
+- 删除：动态由作者或管理员删，媒体引用一并去掉（别处没人用的内容由垃圾回收清理）；评论由评论者、动态作者或管理员删。
+- 时间线按 (created_at, id) 游标分页；每次评论 / 点赞 / 删除后接口直接返回整条动态，前端替换。实时：SignalR `PostChanged`（家人可见的发给所有人，私密的只发给作者），前端 300 ms 内合并后重新取那一条；重连后合并最新一页。
+- 那年今天：往年同月同日（家庭时区）的照片 / 视频（复用相册时间线的"我能看到的"集合，每年最多 9 张另给总数）和动态，按年从近到远。家庭规模的数据量实时计算即可，没有做凌晨预计算。
+- 相册：手动相册全家共享——每个人都能看、都能往里加自己能看到的照片（加进来就等于分享给了全家）；改名、设封面、删相册由创建人或管理员，移出某一项由加它的人、创建人或管理员。没指定封面时用最近加入的一项。删相册不删照片。自动按月相册不落库，就是时间线按月份（家庭时区）分组。
+- 相册时间线的来源加上了动态（家人可见的 + 自己私密的）和相册。
+- 推送：有人评论、回复、点赞你的动态或评论时推给当事人；只推给当前不在线的人（在线的页面会实时刷新），同一条动态的通知互相替换。
 - 不做算法推荐流、公开页、关注关系，家庭不需要。
 
 ### 4.8 远程控制
@@ -785,7 +789,7 @@ docker compose up -d     # 首次会构建 web 与 api 镜像
 | M1 聊天（已完成） | 3 周 | 文字 / 图片 / 语音 / 视频 / 文件消息、群、已读、撤回、表情回应、推送、PWA |
 | M2 网盘（已完成） | 2 周 | tus 上传、目录、共享、相册时间线、发送到聊天、回收站 |
 | M3 通话（已完成） | 3 周 | Cloudflare Realtime 会话 / 轨道编排、1:1 / 会议、屏幕共享、客厅、通话记录、来电推送；真实 Cloudflare 上尚未实测 |
-| M4 时光 | 2 周 | 动态 / 评论 / 点赞 / 那年今天 / 相册 |
+| M4 时光（已完成） | 2 周 | 动态 / 评论 / 点赞 / 那年今天 / 相册 |
 | M5 远程 | 3–4 周 | Agent v1（Windows）+ 中继 + 浏览器控制端 + 审计 |
 | M6 打磨 | 持续 | 长辈模式、搜索、WebDAV、备份脚本、Capacitor、通话 simulcast / 网络自适应 |
 
@@ -845,8 +849,13 @@ Calls     GET /api/calls/config（是否已配置、响铃 / 心跳秒数） ; G
           POST /api/calls/{id}/decline · /leave · /end · /heartbeat · /state（麦克风 / 摄像头开关）
           POST /api/calls/{id}/publish（SDP offer → answer） ; POST /api/calls/{id}/unpublish
           POST /api/calls/{id}/pull（订阅，返回 offer） ; POST /api/calls/{id}/renegotiate ; POST /api/calls/{id}/pull/close
-Moments   GET /api/posts?before= ; POST/DELETE /api/posts ; POST /api/posts/{id}/comments
-          POST /api/posts/{id}/reactions ; GET /api/posts/on-this-day ; GET/POST /api/albums
+Moments   GET /api/posts?before=&beforeId=&authorId=&limit= ; GET /api/posts/{id} ; POST /api/posts ; DELETE /api/posts/{id}
+          POST /api/posts/{id}/comments ; DELETE /api/comments/{id}
+          POST /api/posts/{id}/reactions ; POST /api/comments/{id}/reactions（同一表情再点取消）
+          GET /api/posts/on-this-day?date=
+Albums    GET /api/albums（手动相册 + 按月相册） ; POST /api/albums ; PATCH/DELETE /api/albums/{id}
+          GET /api/albums/{id}/items?before=&beforeId= ; POST /api/albums/{id}/items ; DELETE /api/albums/{id}/items/{blobId}
+          GET /api/drive/gallery?since=（按月相册：限定时间下界）
 Remote    GET /api/devices ; PATCH /api/devices/{id}（策略 / 名称） ; DELETE /api/devices/{id}（吊销）
           POST /api/remote/sessions ; POST /api/remote/sessions/{id}/consent · /end
           GET /api/remote/sessions（审计） ; WS /ws/remote/{sessionId}/{agent|controller}
@@ -875,6 +884,8 @@ Admin     GET /api/admin/stats ; GET /api/admin/jobs ; GET /healthz ; GET /opena
 | S→C | ParticipantLeft | callId, participantId, userId, reason（left / replaced / timeout / ended） |
 | S→C | TrackPublished / TrackUnpublished | callId, participantId, trackName, kind |
 | S→C | DriveChanged | spaceId, parentId |
+| S→C | PostChanged | postId, authorId, change（created / updated / deleted） |
+| S→C | AlbumChanged | albumId, deleted |
 | S→C | Notification | NotificationDto |
 | S→C | RemoteSessionChanged | RemoteSessionDto |
 

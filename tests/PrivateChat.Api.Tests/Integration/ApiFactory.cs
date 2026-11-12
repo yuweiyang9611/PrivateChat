@@ -223,7 +223,7 @@ public sealed class HubListener : IAsyncDisposable
     private static readonly string[] Events =
     [
         "IncomingCall", "CallUpdated", "CallDeclined", "ParticipantJoined", "ParticipantLeft", "ParticipantUpdated",
-        "TrackPublished", "TrackUnpublished", "MessageReceived", "ReadReceipt", "ConversationUpdated",
+        "TrackPublished", "TrackUnpublished", "MessageReceived", "ReadReceipt", "ConversationUpdated", "PostChanged", "AlbumChanged",
     ];
 
     private readonly List<(string Name, JsonElement Payload)> _received = [];

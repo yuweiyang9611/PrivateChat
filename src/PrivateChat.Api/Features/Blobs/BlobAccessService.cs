@@ -26,8 +26,13 @@ public sealed class BlobAccessService(AppDbContext db, DriveAccess drive)
         if (await db.Users.AnyAsync(u => u.AvatarBlobId == blobId, ct)) return true;
         if (await db.Conversations.AnyAsync(c => c.AvatarBlobId == blobId && db.ConversationMembers.Any(cm => cm.ConversationId == c.Id && cm.UserId == userId), ct)) return true;
 
-        // 动态：家庭内全员可见（M4 再细化可见范围）
-        if (await db.PostMedia.AnyAsync(p => p.BlobId == blobId, ct)) return true;
+        // 动态：家人可见的动态全家都能看，"仅自己"的只有作者；删掉的动态不再算
+        if (await db.PostMedia.AnyAsync(pm => pm.BlobId == blobId
+                && db.Posts.Any(p => p.Id == pm.PostId && p.DeletedAt == null && (p.Visibility == PostVisibility.Family || p.AuthorId == userId)), ct))
+            return true;
+
+        // 相册：全家共享
+        if (await db.AlbumItems.AnyAsync(i => i.BlobId == blobId, ct)) return true;
 
         // 网盘：个人空间主人、家庭空间成员、被共享的人（读权限与角色无关）
         return await drive.CanReadBlobViaDriveAsync(blobId, new DriveActor(userId, UserRole.Member), ct);
