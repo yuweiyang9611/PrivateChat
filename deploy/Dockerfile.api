@@ -1,11 +1,11 @@
 # PrivateChat api 镜像（草案；项目路径随骨架落地后确认）
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:11.0 AS build
 WORKDIR /src
 COPY . .
 RUN dotnet publish src/PrivateChat.Api -c Release -o /app
 
 # 运行时带 ffmpeg 做缩略图与转码
-FROM mcr.microsoft.com/dotnet/aspnet:10.0
+FROM mcr.microsoft.com/dotnet/aspnet:11.0
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app

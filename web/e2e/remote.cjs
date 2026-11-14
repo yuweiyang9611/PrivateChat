@@ -13,7 +13,7 @@ const { execSync, spawn } = require('child_process')
 const BASE = process.env.E2E_BASE || 'http://localhost:8080'
 const ROOT = path.resolve(__dirname, '../..')
 const COMPOSE = `docker compose -f "${path.resolve(ROOT, 'deploy/docker-compose.yml')}"`
-const AGENT = path.resolve(ROOT, 'src/PrivateChat.Agent/bin/Debug/net10.0-windows/PrivateChat.Agent.exe')
+const AGENT = path.resolve(ROOT, 'src/PrivateChat.Agent/bin/Debug/net11.0-windows/PrivateChat.Agent.exe')
 const results = []
 function check(name, ok, detail) {
   results.push({ name, ok: !!ok })
