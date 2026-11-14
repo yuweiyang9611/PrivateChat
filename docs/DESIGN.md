@@ -5,13 +5,13 @@
 | 版本 | v0.4 |
 | 日期 | 2026-11-11 |
 | 状态 | M0–M5 已实现，M6 进行中（搜索已完成）；文档随代码更新 |
-| 技术栈 | .NET 10 · ASP.NET Core · SignalR · PostgreSQL 17 · Cloudflare Realtime · Vue 3 · TypeScript · Element Plus · Docker Compose |
+| 技术栈 | .NET 11 · ASP.NET Core · SignalR · PostgreSQL 17 · Cloudflare Realtime · Vue 3 · TypeScript · Element Plus · Docker Compose |
 
 ---
 
 ## 0. 结论先行
 
-1. **后端做成模块化单体**：一个 ASP.NET Core 10 进程承载 REST、SignalR、WebSocket 中继和后台媒体任务；前端静态文件由 nginx 托管。家庭规模不需要微服务，但代码按功能"垂直切片"组织，将来拆得开。
+1. **后端做成模块化单体**：一个 ASP.NET Core 11 进程承载 REST、SignalR、WebSocket 中继和后台媒体任务；前端静态文件由 nginx 托管。家庭规模不需要微服务，但代码按功能"垂直切片"组织，将来拆得开。
 2. **音视频通话/会议用 Cloudflare Realtime SFU + TURN**：媒体 100% 走 Cloudflare，家里不跑媒体服务器、不开任何 UDP 端口；.NET 负责房间编排（调用会话 / 轨道 API）和通话记录。
 3. **远程控制必须有原生 Agent**：浏览器只能共享屏幕，无法注入键鼠。用 .NET 写 Windows 被控端 Agent（被控电脑都是 Windows）；传输先走服务器 WebSocket 中继（443 一个端口通吃、不怕 NAT），浏览器用 WebCodecs 解码。v1 Agent 进程内用 GDI 截屏、Windows 自带的 Media Foundation H.264 编码器编码，单个 exe，不带外部程序。
 4. **存储用本地磁盘卷 + 内容寻址 Blob 表**：聊天附件、网盘文件、动态图片三处引用同一份数据，按 SHA-256 去重；通过 `IBlobStore` 抽象，日后可换 S3。
@@ -56,7 +56,7 @@
 
 | 层 | 选择 | 理由 | 备选 |
 |---|---|---|---|
-| 运行时 | .NET 10（LTS，支持到 2028-11） | 本机已装 SDK 10.0.403 | .NET 9 |
+| 运行时 | .NET 11（STS，支持到 2028-11） | 本机已装 SDK 11.0.100 | .NET 10（LTS） |
 | Web 框架 | ASP.NET Core MVC Controller（`[ApiController]` + 特性路由）+ SignalR | 按资源分组清晰，自动模型校验、过滤器做统一异常与审计；实时推送内置 | Minimal API |
 | ORM / 数据库 | EF Core 10 + PostgreSQL 17 | JSONB 存消息载荷；`pg_trgm` 做中文子串搜索；只要一个容器 | SQLite（并发写弱）、MySQL |
 | 对象存储 | 本地磁盘卷 + 内容寻址 + `IBlobStore` 抽象 | 零额外组件，ffmpeg 直接读，备份就是拷目录 | S3 兼容（Garage / RustFS / 云 OSS） |
@@ -116,7 +116,7 @@
 flowchart LR
   subgraph clients["家庭成员设备"]
     web["Vue 3 PWA<br/>桌面 / 手机浏览器"]
-    agent["远程控制 Agent<br/>.NET 10 托盘程序"]
+    agent["远程控制 Agent<br/>.NET 11 托盘程序"]
   end
   subgraph cf["Cloudflare"]
     edge["边缘：TLS 终结 · WAF<br/>Access 身份门禁"]
@@ -205,7 +205,7 @@ PrivateChat/
 │  │  └─ Infrastructure/     AppDbContext、FileSystemBlobStore、FfmpegMediaProcessor、
 │  │                         DbJobQueue、WebPushSender、CloudflareRealtimeClient、CloudflareAccessAuthHandler
 │  ├─ PrivateChat.Contracts/           # Api 与 Agent 共享的协议（远程控制帧格式等）
-│  └─ PrivateChat.Agent/               # 远程控制 Agent（net10.0-windows，仅 Windows；托盘 + 后台 Worker）
+│  └─ PrivateChat.Agent/               # 远程控制 Agent（net11.0-windows，仅 Windows；托盘 + 后台 Worker）
 ├─ web/                                 # Vue 3 + TS
 ├─ deploy/                              # docker-compose.yml、nginx.conf、Dockerfile.api / .web、init-env.sh
 ├─ docs/
@@ -419,7 +419,7 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 
 **组成**
 
-- Agent（被控端）：.NET 10 WinForms 托盘程序（`net10.0-windows`），Windows 10 / 11，随用户登录自启（`HKCU\…\Run`，不需要管理员权限）。被控电脑全部是 Windows，不做 Linux / macOS。
+- Agent（被控端）：.NET 11 WinForms 托盘程序（`net11.0-windows`），Windows 10 / 11，随用户登录自启（`HKCU\…\Run`，不需要管理员权限）。被控电脑全部是 Windows，不做 Linux / macOS。
 - 控制端：浏览器页面（Vue，`/remote/:id`），无需安装；手机上也能用（触摸当鼠标，中文用"输入文字"框）。
 - 服务端 `Remote` 模块：设备与策略、会话状态机、Agent 的 SignalR 通道 `/hubs/agent`、数据面中继（原生 WebSocket `/ws/remote/{sessionId}/{agent|controller}`）。
 
@@ -707,7 +707,7 @@ web/src/
 |---|---|---|---|
 | cloudflared | `cloudflare/cloudflared` | 是 | 出站隧道，把 `chat.example.com` 指到 `http://web:80`，服务器不开入站端口 |
 | web | 本地构建（node 构建 → `nginx:alpine`） | 是 | 托管 Vue 静态文件；反代 `/api` `/hubs` `/ws` `/s` 到 api |
-| api | 本地构建（.NET 10，含 ffmpeg） | 是 | 纯 API，不托管前端 |
+| api | 本地构建（.NET 11，含 ffmpeg） | 是 | 纯 API，不托管前端 |
 | postgres | `postgres:17-alpine` | 是 | |
 | hbbs / hbbr | `rustdesk/rustdesk-server` | 否（profile `rustdesk`） | 远程控制兜底，需要自己开端口 |
 
@@ -765,12 +765,12 @@ COPY --from=build /src/dist /usr/share/nginx/html
 后端 `deploy/Dockerfile.api`：
 
 ```dockerfile
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:11.0 AS build
 WORKDIR /src
 COPY . .
 RUN dotnet publish src/PrivateChat.Api -c Release -o /app
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0
+FROM mcr.microsoft.com/dotnet/aspnet:11.0
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app

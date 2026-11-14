@@ -7,7 +7,7 @@ COPY web/ .
 RUN npm run build
 
 # 远程协助 Agent：.NET 能在 Linux 上交叉编译 WinForms 程序（EnableWindowsTargeting），自带运行时、单文件
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS agent
+FROM mcr.microsoft.com/dotnet/sdk:11.0 AS agent
 WORKDIR /src
 COPY Directory.Build.props Directory.Packages.props ./
 COPY src/PrivateChat.Contracts/ src/PrivateChat.Contracts/

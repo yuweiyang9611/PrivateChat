@@ -2,7 +2,7 @@
 
 家庭私有通讯平台：聊天（文字 / 图片 / 语音 / 视频 / 文件）、音视频通话与会议、网盘与共享、家庭动态、远程控制（被控端 Windows）。
 
-- 后端：.NET 10 · ASP.NET Core（Controller）· SignalR · PostgreSQL
+- 后端：.NET 11 · ASP.NET Core（Controller）· SignalR · PostgreSQL
 - 通话：Cloudflare Realtime SFU + TURN，媒体不经过家庭网络
 - 前端：Vue 3 · TypeScript · Vite · Element Plus · PWA，由 nginx 托管
 - 入口：Cloudflare Tunnel + Cloudflare Access（零入站端口、无需证书）
