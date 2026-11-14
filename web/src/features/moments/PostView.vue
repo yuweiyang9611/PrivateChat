@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
@@ -17,6 +17,8 @@ const family = useFamilyStore()
 const id = computed(() => String(route.params.id ?? ''))
 const post = computed(() => moments.cache[id.value] ?? null)
 const state = ref<'loading' | 'ok' | 'gone' | 'error'>('loading')
+/** 从服务器拉到最新的一份之后加一：缓存里那份可能还没有要高亮的评论 */
+const fetched = ref(0)
 
 watch(id, async (pid) => {
   if (!pid) return
@@ -25,9 +27,24 @@ watch(id, async (pid) => {
   try {
     await moments.fetchPost(pid)
     state.value = 'ok'
+    fetched.value++
   } catch (e) {
     state.value = e instanceof MomentsError && (e.status === 404 || e.status === 403) ? 'gone' : moments.cache[pid] ? 'ok' : 'error'
   }
+}, { immediate: true })
+
+// 搜索结果跳过来：?comment={id} —— 滚到那条评论闪一下
+let flashed = ''
+watch([state, () => route.query.comment, fetched], async ([s, comment]) => {
+  if (s !== 'ok' || typeof comment !== 'string' || !comment || flashed === comment) return
+  await nextTick()
+  const el = document.querySelector<HTMLElement>(`[data-comment="${CSS.escape(comment)}"]`)
+  if (!el) return
+  flashed = comment
+  el.scrollIntoView({ block: 'center' })
+  el.classList.remove('pc-flash')
+  void el.offsetWidth // 重新触发动画
+  el.classList.add('pc-flash')
 }, { immediate: true })
 
 // 别人把它删了（实时事件）：缓存里没了

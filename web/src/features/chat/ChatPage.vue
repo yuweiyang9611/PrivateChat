@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import { ElMessage } from 'element-plus'
 import { ArrowLeft, Phone, VideoCamera, MoreFilled } from '@element-plus/icons-vue'
 import MessageList from './MessageList.vue'
 import Composer from './Composer.vue'
@@ -13,6 +15,8 @@ import { typing } from '@/realtime/connection'
 
 const props = defineProps<{ id: string }>()
 const { t } = useI18n()
+const route = useRoute()
+const router = useRouter()
 const conversations = useConversationsStore()
 const messages = useMessagesStore()
 const calls = useCallsStore()
@@ -36,14 +40,47 @@ const ongoingText = computed(() => {
   return names ? t('calls.ongoingWith', { names }) : t('calls.ringing')
 })
 
+/** 已经加载好的会话（跳到某条消息要等加载完） */
+const loadedId = ref<string | null>(null)
+const focusSeq = ref<number | null>(null)
+/** 每次跳转一个编号；页面卸载或开始新的跳转后，旧的那次回来就什么都不做 */
+let jump = 0
+onBeforeUnmount(() => jump++)
+
 watch(
   () => props.id,
   async (id) => {
+    loadedId.value = null
     await messages.load(id)
+    if (props.id !== id) return
+    loadedId.value = id
     await messages.read(id)
   },
   { immediate: true },
 )
+
+// 搜索结果跳过来：/messages/{id}?seq=N —— 往前翻到那条消息，滚过去闪一下，然后把参数去掉
+watch(
+  [() => route.query.seq, loadedId],
+  async ([raw, loaded]) => {
+    const seq = Number(raw)
+    if (typeof raw !== 'string' || !Number.isSafeInteger(seq) || seq <= 0 || loaded !== props.id) return
+    const my = ++jump
+    const path = route.path
+    const result = await messages.ensureSeq(loaded, seq)
+    if (my !== jump || loadedId.value !== loaded || route.path !== path || route.query.seq !== raw) return
+    if (result === 'found') focusSeq.value = seq
+    else ElMessage.warning(t(result === 'missing' ? 'search.messageGone' : 'search.jumpFailed'))
+    const { seq: _drop, ...rest } = route.query
+    void router.replace({ path, query: rest })
+  },
+  { immediate: true },
+)
+
+function onFocused(found: boolean): void {
+  focusSeq.value = null
+  if (!found) ElMessage.warning(t('search.messageGone'))
+}
 </script>
 
 <template>
@@ -71,7 +108,7 @@ watch(
       <el-button type="success" size="small" round :disabled="!canCall" data-testid="chat-call-join" @click="calls.join(ongoing.id)">{{ t('calls.joinCall') }}</el-button>
     </div>
 
-    <MessageList :conversation-id="id" class="min-h-0 flex-1" />
+    <MessageList :conversation-id="id" :focus-seq="focusSeq" class="min-h-0 flex-1" @focused="onFocused" />
 
     <Composer :conversation-id="id" />
   </div>

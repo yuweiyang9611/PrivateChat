@@ -132,13 +132,20 @@ public sealed class MessageService(AppDbContext db, PrivateChat.Api.Features.Blo
         return (long)result;
     }
 
-    public async Task<List<Message>> ListAsync(Guid conversationId, Guid userId, long? beforeSeq, int limit, CancellationToken ct)
+    public async Task<List<Message>> ListAsync(Guid conversationId, Guid userId, long? beforeSeq, int limit, CancellationToken ct, long? afterSeq = null)
     {
         if (!await IsMemberAsync(conversationId, userId, ct)) throw ApiException.Forbidden("不是该会话成员");
         limit = Math.Clamp(limit, 1, 200);
         var q = db.Messages.Include(m => m.Attachments).Include(m => m.Reactions)
             .Where(m => m.ConversationId == conversationId);
         if (beforeSeq is { } b) q = q.Where(m => m.Seq < b);
+        if (afterSeq is { } a)
+        {
+            // 紧挨着 afterSeq 之后的一段（升序取，再倒过来和向前翻页保持一致）
+            var after = await q.Where(m => m.Seq > a).OrderBy(m => m.Seq).Take(limit).ToListAsync(ct);
+            after.Reverse();
+            return after;
+        }
         return await q.OrderByDescending(m => m.Seq).Take(limit).ToListAsync(ct);
     }
 

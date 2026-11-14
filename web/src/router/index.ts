@@ -5,7 +5,7 @@ declare module 'vue-router' {
     /** 桌面三栏布局中栏显示哪种列表；为空则内容区占满 */
     panel?: 'conversations'
     /** 导航高亮用的分区 */
-    section: 'messages' | 'calls' | 'drive' | 'moments' | 'devices' | 'settings' | 'family'
+    section: 'messages' | 'calls' | 'drive' | 'moments' | 'devices' | 'settings' | 'family' | 'search'
     titleKey: string
     /** 网盘内的分区（导航高亮） */
     driveSection?: 'my' | 'family' | 'gallery' | 'shared' | 'trash'
@@ -80,6 +80,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'months/:month', component: () => import('@/features/moments/MonthView.vue'), meta: { section: 'moments', titleKey: 'nav.moments', momentsSection: 'albums' } },
     ],
   },
+  { path: '/search', component: () => import('@/features/search/SearchPage.vue'), meta: { section: 'search', titleKey: 'search.title' } },
   { path: '/devices', component: () => import('@/features/remote/DevicesPage.vue'), meta: { section: 'devices', titleKey: 'nav.devices' } },
   { path: '/remote/:id', component: () => import('@/features/remote/RemoteView.vue'), props: true, meta: { section: 'devices', titleKey: 'nav.devices' } },
   { path: '/settings', component: () => import('@/features/settings/SettingsPage.vue'), meta: { section: 'settings', titleKey: 'nav.settings' } },

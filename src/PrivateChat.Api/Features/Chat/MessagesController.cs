@@ -10,11 +10,14 @@ namespace PrivateChat.Api.Features.Chat;
 [Authorize]
 public sealed class MessagesController(MessageService messages, IHubContext<ChatHub> hub, PushService push) : ControllerBase
 {
-    /// <summary>向前翻页：seq 小于 beforeSeq 的消息，按 seq 倒序。</summary>
+    /// <summary>
+    /// 向前翻页：seq 小于 beforeSeq 的消息（最新的 limit 条）；afterSeq：seq 大于它的最早 limit 条（补列表中间的空档）。
+    /// 都按 seq 倒序返回。
+    /// </summary>
     [HttpGet("api/conversations/{conversationId:guid}/messages")]
-    public async Task<ActionResult<List<MessageDto>>> List(Guid conversationId, [FromQuery] long? beforeSeq, [FromQuery] int limit = 50, CancellationToken ct = default)
+    public async Task<ActionResult<List<MessageDto>>> List(Guid conversationId, [FromQuery] long? beforeSeq, [FromQuery] int limit = 50, [FromQuery] long? afterSeq = null, CancellationToken ct = default)
     {
-        var list = await messages.ListAsync(conversationId, User.UserId(), beforeSeq, limit, ct);
+        var list = await messages.ListAsync(conversationId, User.UserId(), beforeSeq, limit, ct, afterSeq);
         return list.Select(MessageDto.From).ToList();
     }
 

@@ -8,7 +8,9 @@ import { parseMeta, type LocalMessage } from '@/db'
 import { useMessagesStore } from '@/stores/messages'
 import { useSessionStore } from '@/stores/session'
 
-const props = defineProps<{ conversationId: string }>()
+/** focusSeq：滚到这条消息并闪一下（搜索结果跳过来）；处理完发 focused，父组件把它清掉，下次同一条还能再跳 */
+const props = defineProps<{ conversationId: string; focusSeq?: number | null }>()
+const emit = defineEmits<{ focused: [found: boolean] }>()
 const { t } = useI18n()
 const messages = useMessagesStore()
 const session = useSessionStore()
@@ -104,21 +106,50 @@ function onScroll(): void {
   void maybeLoadOlder()
 }
 
-// 新消息：自己发的或本来就在底部 → 跟到底；否则计数提示
-watch(
-  () => list.value.length,
-  async (n, old) => {
-    const last = list.value[n - 1]
-    const mine = last?.senderId === session.user?.id
-    if (stickToBottom.value || mine || !old) {
-      stickToBottom.value = true
-      await nextTick()
-      scrollToBottom()
-    } else if (n > (old ?? 0)) {
-      unseen.value += n - old
-    }
-  },
-)
+// 新消息（末尾那条变了）：自己发的或本来就在底部 → 跟到底；否则计数提示。
+// 往前翻页、补空档只是在中间 / 前面插入，末尾不变，不算新消息
+const keyOf = (m: LocalMessage) => m.clientMessageId || m.id
+const lastKey = computed(() => {
+  const l = list.value
+  return l.length ? keyOf(l[l.length - 1]!) : null
+})
+watch(lastKey, async (key, oldKey) => {
+  if (key === null) return
+  const l = list.value
+  const mine = l[l.length - 1]!.senderId === session.user?.id
+  if (stickToBottom.value || mine || oldKey === null || oldKey === undefined) {
+    stickToBottom.value = true
+    await nextTick()
+    scrollToBottom()
+  } else {
+    const before = l.findIndex((m) => keyOf(m) === oldKey)
+    unseen.value += before >= 0 ? l.length - 1 - before : 1
+  }
+})
+
+// ---- 空档：相邻两条已发送的消息 seq 不连号（跳到很早的消息时只取了它附近一段）----
+const filling = ref<number | null>(null)
+/** 补过、发现其实没有缺的空档（按较新那条的 seq 记） */
+const noGap = ref(new Set<number>())
+
+function gapAbove(i: number): { older: number; newer: number } | null {
+  if (i <= 0) return null
+  const cur = list.value[i]!
+  const prev = list.value[i - 1]!
+  if (cur.status !== 'sent' || prev.status !== 'sent' || cur.seq - prev.seq <= 1 || noGap.value.has(cur.seq)) return null
+  return { older: prev.seq, newer: cur.seq }
+}
+
+async function fillGap(gap: { older: number; newer: number }): Promise<void> {
+  if (filling.value !== null) return
+  filling.value = gap.newer
+  try {
+    const n = await messages.fillGap(props.conversationId, gap.older, gap.newer)
+    if (n === 0) noGap.value = new Set([...noGap.value, gap.newer])
+  } finally {
+    filling.value = null
+  }
+}
 
 // 测量导致总高度变化（图片加载、首屏估算校正）时，吸附状态下继续贴底
 watch(totalSize, async () => {
@@ -138,9 +169,35 @@ watch(
   },
 )
 
+const flashSeq = ref<number | null>(null)
+let flashTimer: number | undefined
+
+watch(
+  () => props.focusSeq,
+  async (seq) => {
+    if (seq === null || seq === undefined) return
+    await nextTick()
+    const index = list.value.findIndex((m) => m.seq === seq && m.status === 'sent')
+    emit('focused', index >= 0)
+    if (index < 0) return
+    // 不再贴底：新消息、图片加载都不会把视图拉回最下面
+    stickToBottom.value = false
+    virtualizer.value.scrollToIndex(index, { align: 'center' })
+    // 估算高度被实际测量校正后位置会偏，等两帧再对一次
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const again = list.value.findIndex((m) => m.seq === seq && m.status === 'sent')
+      if (again >= 0) virtualizer.value.scrollToIndex(again, { align: 'center' })
+    }))
+    flashSeq.value = seq
+    window.clearTimeout(flashTimer)
+    flashTimer = window.setTimeout(() => (flashSeq.value = null), 2600)
+  },
+  { immediate: true },
+)
+
 onMounted(async () => {
   await nextTick()
-  scrollToBottom()
+  if (props.focusSeq === null || props.focusSeq === undefined) scrollToBottom()
   // 首屏内容不足一屏时主动补一页
   if (scroller.value && scroller.value.scrollHeight <= scroller.value.clientHeight) void maybeLoadOlder()
 })
@@ -159,7 +216,25 @@ onMounted(async () => {
           :data-index="row.index"
           :style="{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${row.start}px)` }"
         >
-          <MessageItem :message="list[row.index]!" :mine="list[row.index]!.senderId === session.user?.id" />
+          <div v-if="gapAbove(row.index)" class="mb-2 flex justify-center">
+            <button
+              type="button"
+              class="rounded-full px-3 py-1 text-xs"
+              style="background: var(--pc-border); color: var(--pc-text-muted)"
+              data-testid="message-gap"
+              :data-newer="list[row.index]!.seq"
+              :data-older="list[row.index - 1]!.seq"
+              :disabled="filling !== null"
+              @click="fillGap(gapAbove(row.index)!)"
+            >
+              {{ filling === list[row.index]!.seq ? t('chat.gapLoading') : t('chat.gapLoad') }}
+            </button>
+          </div>
+          <MessageItem
+            :message="list[row.index]!"
+            :mine="list[row.index]!.senderId === session.user?.id"
+            :highlighted="flashSeq !== null && list[row.index]!.seq === flashSeq && list[row.index]!.status === 'sent'"
+          />
         </div>
       </div>
     </div>

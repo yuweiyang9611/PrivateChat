@@ -4,6 +4,48 @@
  */
 
 export interface paths {
+    "/api/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    q?: string;
+                    type?: components["schemas"]["SearchType"];
+                    cursor?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["SearchResultDto"];
+                        "application/json": components["schemas"]["SearchResultDto"];
+                        "text/json": components["schemas"]["SearchResultDto"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/devices": {
         parameters: {
             query?: never;
@@ -1944,6 +1986,7 @@ export interface paths {
                 query?: {
                     beforeSeq?: number;
                     limit?: number;
+                    afterSeq?: number;
                 };
                 header?: never;
                 path: {
@@ -3276,6 +3319,17 @@ export interface components {
             /** Format: int32 */
             itemCount: number;
         };
+        AlbumHitDto: {
+            /** Format: uuid */
+            albumId: string;
+            title: string;
+            /** Format: uuid */
+            coverBlobId: null | string;
+            /** Format: int32 */
+            itemCount: number;
+            /** Format: date-time */
+            updatedAt: string;
+        };
         AlbumItemDto: {
             /** Format: uuid */
             blobId: string;
@@ -3525,6 +3579,27 @@ export interface components {
         };
         /** @enum {unknown} */
         DrivePermission: "None" | "Read" | "Write" | "Owner";
+        FileHitDto: {
+            /** Format: uuid */
+            nodeId: string;
+            /** Format: uuid */
+            spaceId: string;
+            space: string;
+            /** Format: uuid */
+            parentId: null | string;
+            parentReadable: boolean;
+            name: string;
+            isFolder: boolean;
+            /** Format: uuid */
+            blobId: null | string;
+            mime: null | string;
+            /** Format: int64 */
+            size: number;
+            /** Format: date-time */
+            updatedAt: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
         FolderRefDto: {
             /** Format: uuid */
             id: string;
@@ -3641,8 +3716,39 @@ export interface components {
             attachments: components["schemas"]["AttachmentDto"][];
             reactions: components["schemas"]["ReactionDto"][];
         };
+        MessageHitDto: {
+            /** Format: uuid */
+            messageId: string;
+            /** Format: uuid */
+            conversationId: string;
+            /** Format: int64 */
+            seq: number;
+            /** Format: uuid */
+            senderId: string;
+            /** Format: date-time */
+            createdAt: string;
+            kind: string;
+            snippet: string;
+            /** Format: uuid */
+            blobId: null | string;
+            fileName: null | string;
+            mime: null | string;
+            attachmentKind: null | string;
+        };
         /** @enum {unknown} */
         MessageType: "Text" | "Image" | "Video" | "Audio" | "File" | "Sticker" | "Call" | "System";
+        MomentHitDto: {
+            kind: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            postId: string;
+            /** Format: uuid */
+            authorId: string;
+            /** Format: date-time */
+            createdAt: string;
+            snippet: string;
+        };
         MoveTarget: {
             /** Format: uuid */
             spaceId: string;
@@ -3915,6 +4021,20 @@ export interface components {
             height: number;
             primary: boolean;
         };
+        SearchResultDto: {
+            query: string;
+            terms: string[];
+            messages: components["schemas"]["MessageHitDto"][];
+            messagesNext: null | string;
+            files: components["schemas"]["FileHitDto"][];
+            filesNext: null | string;
+            moments: components["schemas"]["MomentHitDto"][];
+            momentsNext: null | string;
+            albums: components["schemas"]["AlbumHitDto"][];
+            albumsMore: boolean;
+        };
+        /** @enum {unknown} */
+        SearchType: "All" | "Messages" | "Files" | "Moments";
         SendMessageRequest: {
             /** Format: uuid */
             conversationId: string;

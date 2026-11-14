@@ -74,7 +74,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             e.Property(x => x.Payload).HasColumnType("jsonb");
             e.HasMany(x => x.Attachments).WithOne().HasForeignKey(x => x.MessageId);
             e.HasMany(x => x.Reactions).WithOne().HasForeignKey(x => x.MessageId);
-            // TODO: 迁移里追加 pg_trgm 扩展与 body 的 GIN 索引（gin_trgm_ops）
+            // 搜索用的 pg_trgm GIN 索引在迁移 Search 里用 SQL 建（部分索引 / 表达式索引，模型里不描述）
         });
         b.Entity<MessageAttachment>(e =>
         {

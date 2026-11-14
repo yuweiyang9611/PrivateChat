@@ -27,7 +27,11 @@ const tabs = computed(() => {
   return ui.elderMode ? all.filter((x) => ['messages', 'calls', 'moments'].includes(x.section)) : all
 })
 
-const activeSection = computed(() => (route.meta.section === 'devices' || route.meta.section === 'family' ? 'settings' : route.meta.section))
+const activeSection = computed(() => {
+  const s = route.meta.section
+  if (s === 'devices' || s === 'family') return 'settings'
+  return s === 'search' ? 'messages' : s // 搜索从消息页的搜索框进来
+})
 </script>
 
 <template>

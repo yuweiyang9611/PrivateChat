@@ -182,6 +182,8 @@ export const useMessagesStore = defineStore('messages', () => {
   const hasMore = ref<Record<string, boolean>>({})
   const loadingOlder = ref<Record<string, boolean>>({})
   const PAGE = 50
+  /** 跳到某条消息时，离已加载的最早一条在这么多条以内就往前翻页，再远就直接取它附近一段 */
+  const NEAR_JUMP = 400
 
   /** 先读 IndexedDB 秒开（含发件箱里未发出的），再拉最新一页；离线时只用本地 */
   async function load(conversationId: string, limit = PAGE): Promise<void> {
@@ -220,6 +222,57 @@ export const useMessagesStore = defineStore('messages', () => {
       return 0
     } finally {
       loadingOlder.value[conversationId] = false
+    }
+  }
+
+  /**
+   * 搜索结果跳过来，让这条消息出现在列表里：
+   * - 就在已加载的最早一条前面不远（400 条以内）：照常往前翻一两页，列表保持连续；
+   * - 更远、或者落在已加载的片段之间：直接取它附近的一段（前后各约 25 条）。和其它片段之间的空档，
+   *   列表里会显示"加载中间的消息"（seq 在会话里是连续的，相邻两条不连号就是空档）。
+   * 返回 found / missing（服务器上没有了）/ failed（网络不通，稍后再试）。
+   */
+  async function ensureSeq(conversationId: string, seq: number): Promise<'found' | 'missing' | 'failed'> {
+    const has = () => list(conversationId).some((m) => m.seq === seq && m.status === 'sent')
+    const more = () => hasMore.value[conversationId] !== false
+    // 列表自己正在往前翻：等它翻完（最多 10 秒）
+    for (let waited = 0; loadingOlder.value[conversationId] && waited < 10_000; waited += 100) await new Promise((r) => setTimeout(r, 100))
+    if (has()) return 'found'
+    const first = list(conversationId).find((m) => m.status === 'sent')
+    if (first && first.seq > seq && first.seq - seq <= NEAR_JUMP) {
+      for (let page = 0; page < 5 && !has() && more(); page++) {
+        if (!(await loadOlder(conversationId, 200))) return more() ? 'failed' : has() ? 'found' : 'missing'
+      }
+      return has() ? 'found' : more() ? 'failed' : 'missing'
+    }
+    try {
+      const { data } = await api.GET('/api/conversations/{conversationId}/messages', {
+        params: { path: { conversationId }, query: { beforeSeq: seq + 26, limit: 50 } },
+      })
+      if (!data) return 'failed'
+      await applyIncoming(data)
+      // 拿到的就是最早的一段了：服务端没有更早的
+      if (data.length < 50 && !data.some((m) => m.seq < seq)) hasMore.value[conversationId] = false
+    } catch {
+      return 'failed'
+    }
+    return has() ? 'found' : 'missing'
+  }
+
+  /**
+   * 补上 olderSeq 与 newerSeq 之间的空档：从较早那一侧接着往后取 200 条（跳过去之后是往下读的）。返回这次补进来的、落在空档里的条数
+   * （0 表示空档其实不存在或网络不通，调用方据此不再显示按钮 / 提示重试）。
+   */
+  async function fillGap(conversationId: string, olderSeq: number, newerSeq: number): Promise<number | null> {
+    try {
+      const { data } = await api.GET('/api/conversations/{conversationId}/messages', {
+        params: { path: { conversationId }, query: { afterSeq: olderSeq, limit: 200 } },
+      })
+      if (!data) return null
+      await applyIncoming(data)
+      return data.filter((m) => m.seq > olderSeq && m.seq < newerSeq).length
+    } catch {
+      return null
     }
   }
 
@@ -652,7 +705,7 @@ export const useMessagesStore = defineStore('messages', () => {
 
   return {
     byConversation, blobVersion, hasMore, loadingOlder, outboxCount,
-    list, lastSeqs, load, loadOlder, applyIncoming, applyUpdated,
+    list, lastSeqs, load, loadOlder, ensureSeq, fillGap, applyIncoming, applyUpdated,
     sendText, sendFiles, sendVoice, retry, cancel, restoreOutbox, flushOutbox,
     read, flushPendingReads, toggleReaction, applyReactions, markDeleted, recall,
   }

@@ -13,6 +13,7 @@ using PrivateChat.Api.Features.Calls;
 using PrivateChat.Api.Features.Chat;
 using PrivateChat.Api.Features.Notifications;
 using PrivateChat.Api.Features.Remote;
+using PrivateChat.Api.Features.Search;
 using PrivateChat.Api.Infrastructure;
 using PrivateChat.Api.Infrastructure.Blobs;
 using PrivateChat.Api.Infrastructure.Keys;
@@ -134,6 +135,7 @@ builder.Services.AddSingleton<AgentRegistry>();
 builder.Services.AddSingleton<RemoteRelay>();
 builder.Services.AddSingleton<RemoteNotifier>();
 builder.Services.AddScoped<RemoteService>();
+builder.Services.AddScoped<SearchService>();
 builder.Services.AddHostedService<RemoteMaintenanceWorker>();
 
 var app = builder.Build();

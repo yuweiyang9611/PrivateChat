@@ -12,7 +12,7 @@
     "gen:icons": "pwa-assets-generator",
     "test": "vitest run",
     "test:e2e-cli": "node --test e2e/calls-mode.test.cjs",
-    "e2e": "node e2e/pwa-offline.cjs && node e2e/pwa-session.cjs && node e2e/drive.cjs && node e2e/moments.cjs && node e2e/remote.cjs && node e2e/calls.cjs"
+    "e2e": "node e2e/pwa-offline.cjs && node e2e/pwa-session.cjs && node e2e/drive.cjs && node e2e/moments.cjs && node e2e/search.cjs && node e2e/remote.cjs && node e2e/calls.cjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

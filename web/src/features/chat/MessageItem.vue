@@ -12,7 +12,7 @@ import { parseMeta } from '@/db'
 import { online } from '@/net/online'
 import { callOutcome, outcomeText, parseCallPayload } from '@/features/calls/format'
 
-const props = defineProps<{ message: LocalMessage; mine: boolean }>()
+const props = defineProps<{ message: LocalMessage; mine: boolean; highlighted?: boolean }>()
 const { t } = useI18n()
 const messages = useMessagesStore()
 const session = useSessionStore()
@@ -106,7 +106,7 @@ async function recall(): Promise<void> {
 </script>
 
 <template>
-  <div class="group mb-2 flex" :class="mine ? 'justify-end' : 'justify-start'" :data-seq="message.seq">
+  <div class="group mb-2 flex" :class="[mine ? 'justify-end' : 'justify-start', { 'pc-flash': highlighted }]" :data-seq="message.seq" :data-highlighted="highlighted ? '' : undefined">
     <div
       v-if="callInfo"
       class="mx-auto my-1 flex items-center gap-1.5 rounded-full px-3 py-1 text-xs"

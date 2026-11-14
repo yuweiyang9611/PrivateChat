@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { ChatDotRound, Phone, Folder, PictureRounded, Monitor, Setting, User } from '@element-plus/icons-vue'
+import { ChatDotRound, Phone, Folder, PictureRounded, Monitor, Setting, User, Search } from '@element-plus/icons-vue'
 import ConversationList from '@/features/chat/ConversationList.vue'
 import ConnectionBanner from '@/components/ConnectionBanner.vue'
 import { useConversationsStore } from '@/stores/conversations'
@@ -19,6 +19,7 @@ const nav = computed(() => [
   { to: '/drive', section: 'drive', icon: Folder, label: t('nav.drive') },
   { to: '/moments', section: 'moments', icon: PictureRounded, label: t('nav.moments') },
   { to: '/devices', section: 'devices', icon: Monitor, label: t('nav.devices') },
+  { to: '/search', section: 'search', icon: Search, label: t('nav.search') },
 ])
 </script>
 

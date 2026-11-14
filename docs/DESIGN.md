@@ -4,7 +4,7 @@
 |---|---|
 | 版本 | v0.4 |
 | 日期 | 2026-11-11 |
-| 状态 | M0–M3 已实现，文档随代码更新；M4–M6 为计划 |
+| 状态 | M0–M5 已实现，M6 进行中（搜索已完成）；文档随代码更新 |
 | 技术栈 | .NET 10 · ASP.NET Core · SignalR · PostgreSQL 17 · Cloudflare Realtime · Vue 3 · TypeScript · Element Plus · Docker Compose |
 
 ---
@@ -503,8 +503,14 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 
 ### 4.11 搜索
 
-- `pg_trgm` GIN 索引覆盖消息正文、文件名、动态文本，中文子串匹配对家庭规模够用。
-- 后期可选 Meilisearch（compose profile）。
+- 一个接口 `GET /api/search?q=&type=All|Messages|Files|Moments&cursor=&limit=`，搜四类：聊天消息（文字正文、附件文件名）、网盘文件 / 文件夹名、动态正文与评论、相册名；家人按名字在前端名单里过滤。
+- 可见性与各模块完全一致：我所在会话里没撤回的消息（通话记录这类服务端生成的消息不算）；我的个人空间、家庭空间、共享给我的节点及其子孙（共享没过期、不在回收站）；家人可见的动态和我自己的私密动态，评论跟着它所在的动态走（删动态不会标删评论，所以要连上动态判断）；相册全家共享。
+- 匹配：按空白（含全角空格）和控制字符分词（不做 Unicode 规范化，和库里存的原样对得上），每个词都要出现，不区分大小写，`% _ \` 按字面。SQL 是 `ILIKE 最长的词 AND ILIKE ALL (全部词)`，前一个条件能用上 `pg_trgm` GIN 索引（部分索引的条件与查询一致；附件文件名是 `(meta ->> 'name')` 表达式索引）。三个字以上的词走索引，一两个字（中文常见）退化为扫描，家庭规模（十万条消息量级）仍然够快。数据库区域设置是 en_US.utf8，中文字符会被切成三元组。
+- 结果新的在前（网盘按创建时间：改名、移动会改修改时间，用它翻页会漏项），每类各自按 (时间, Id) 游标翻页；相册不翻页，"全部"给 5 个、"时光"给 50 个并告诉前端还有没有更多；"全部"每类给 5 条，"查看全部"再按类型翻页。服务端给命中附近的一段摘要（前后约 30 字），前端用 `<mark>` 高亮（不用 v-html）。
+- 入口：消息页的搜索框（按会话名过滤的同时给出"在聊天、文件、动态里搜索"）、桌面左栏的搜索图标；地址里的 q / type 就是状态，刷新、返回都还在。
+- 点结果：消息跳到聊天里那一条（`/messages/{id}?seq=N`），滚过去闪一下。离已加载的最早一条 400 条以内就往前翻页；更远就直接取它附近一段（前后各约 25 条）。会话里的 seq 是连续的，相邻两条不连号就是空档，列表里在那儿显示"加载中间的消息"，点一下从较早那一侧接着往后取 200 条（`afterSeq`），往下读不会断（登录同步只拿最近 500 条、离线期间漏掉的也一样补）。没找到时区分"已经没有了"和"网络不通"；图片 / 视频直接预览，文件可以打开所在文件夹（直接共享给我的那一项看不到上一级）；评论跳到动态并闪那条评论（`?comment=`）。
+- 离线时只在这台设备保存过的聊天记录里搜（打开过的会话、登录后同步下来的、实时收到的），页面上会说明。
+- 以后要模糊匹配 / 相关度排序，再上 Meilisearch（compose profile）。
 
 ### 4.12 后台任务
 
@@ -813,7 +819,7 @@ docker compose up -d     # 首次会构建 web 与 api 镜像
 | M3 通话（已完成） | 3 周 | Cloudflare Realtime 会话 / 轨道编排、1:1 / 会议、屏幕共享、客厅、通话记录、来电推送；真实 Cloudflare 上尚未实测 |
 | M4 时光（已完成） | 2 周 | 动态 / 评论 / 点赞 / 那年今天 / 相册 |
 | M5 远程（已完成） | 3–4 周 | Agent v1（Windows 托盘，GDI + Media Foundation H.264，SendInput）+ 设备码 + 同意 / 无人值守 PIN + 中继（按帧确认流控）+ 浏览器控制端（WebCodecs）+ 审计；经 Cloudflare 隧道、实体机上尚未实测 |
-| M6 打磨 | 持续 | 长辈模式、搜索、WebDAV、备份脚本、Capacitor、通话 simulcast / 网络自适应 |
+| M6 打磨 | 持续 | 搜索（已完成）、长辈模式、WebDAV、备份脚本、Capacitor、通话 simulcast / 网络自适应 |
 
 一个人业余做，M0–M5 约 4–5 个月。建议 M1 完成就让家人用起来，后面按反馈排序。
 
@@ -853,7 +859,7 @@ Auth      GET  /api/auth/me（凭 Cf-Access-Jwt-Assertion 自动登录 / 建号�
           POST /api/auth/device/code · /device/poll · /device/confirm      设备码登录
 Family    GET/PUT /api/family ; GET /api/family/members ; PATCH /api/family/members/{id}
           POST /api/family/invites ; POST /api/family/join
-Chat      GET/POST /api/conversations ; GET /api/conversations/{id}/messages?beforeSeq=&limit=
+Chat      GET/POST /api/conversations ; GET /api/conversations/{id}/messages?beforeSeq=&afterSeq=&limit=
           PUT/DELETE /api/messages/{id} ; POST /api/messages/{id}/reactions
           POST /api/conversations/{id}/read                                  （发送走 SignalR）
 Blobs     POST /api/blobs/precheck ; /api/uploads（tus） ; GET /api/blobs/{id}?v= ; GET /s/{token}
@@ -885,7 +891,7 @@ Remote    GET /api/devices ; PATCH /api/devices/{id}（名称 / 白名单 / PIN�
           POST /api/remote/sessions ; GET /api/remote/sessions/{id} ; POST /api/remote/sessions/{id}/consent（Agent） · /end
           GET /api/remote/sessions（审计） ; WS /ws/remote/{sessionId}/{agent|controller} ; SignalR /hubs/agent（设备令牌）
 Notify    GET /api/notifications ; POST /api/notifications/read ; POST/DELETE /api/push/subscribe
-Search    GET /api/search?q=&type=
+Search    GET /api/search?q=&type=All|Messages|Files|Moments&cursor=&limit=
 Admin     GET /api/admin/stats ; GET /api/admin/jobs ; GET /healthz ; GET /openapi/v1.json
 ```
 

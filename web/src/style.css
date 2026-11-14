@@ -29,6 +29,16 @@ html.dark {
   color-scheme: dark;
 }
 
+/* 搜索结果跳过去时闪一下：消息、评论 */
+@keyframes pc-flash {
+  0%, 55% { background-color: var(--pc-primary-soft); }
+  100% { background-color: transparent; }
+}
+.pc-flash {
+  animation: pc-flash 2.6s ease-out;
+  border-radius: 12px;
+}
+
 /* 长辈模式：全局字号 +25%，触控目标更大 */
 html.elder {
   font-size: 125%;
