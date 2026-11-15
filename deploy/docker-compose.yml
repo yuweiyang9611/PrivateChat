@@ -48,7 +48,8 @@ services:
       CloudflareRealtime__TurnApiToken: ${CF_TURN_KEY_API_TOKEN}
       # 仅测试用：端到端测试把它指向本机的假 SFU（web/e2e/fake-sfu.cjs）；正常部署不用设置
       CloudflareRealtime__BaseUrl: ${CF_REALTIME_BASE_URL:-https://rtc.live.cloudflare.com/v1}
-      WebPush__Subject: mailto:${ADMIN_EMAIL}
+      # 每条推送都会把这个联系方式带给推送服务（Google / Apple / 微软）；写网站地址，不把管理员邮箱发出去
+      WebPush__Subject: https://${DOMAIN}
       # 远程协助：Access 服务令牌，写进"添加电脑"的配置串里，电脑上的程序用它过 Access 门禁（没有就留空，局域网直连照样能用）
       Remote__AgentAccessClientId: ${REMOTE_AGENT_ACCESS_CLIENT_ID:-}
       Remote__AgentAccessClientSecret: ${REMOTE_AGENT_ACCESS_CLIENT_SECRET:-}

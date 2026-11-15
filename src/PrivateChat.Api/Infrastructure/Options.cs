@@ -41,7 +41,10 @@ public sealed class CloudflareRealtimeOptions
     public int TurnCredentialTtlSeconds { get; set; } = 86400;
 }
 
-/// <summary>环境变量 WebPush__Subject（mailto:）。密钥对由 KeyStore 自动生成。</summary>
+/// <summary>
+/// 环境变量 WebPush__Subject：VAPID 联系方式，随每条推送发给推送服务，可以是 https:// 网址或 mailto:。
+/// docker compose 里设为站点地址（https://DOMAIN），不暴露管理员邮箱。密钥对由 KeyStore 自动生成。
+/// </summary>
 public sealed class WebPushOptions
 {
     public const string Section = "WebPush";

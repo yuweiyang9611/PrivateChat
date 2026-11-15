@@ -28,10 +28,10 @@ public class PushSenderTests : IDisposable
         }
     }
 
-    private (PushSender Sender, StubHandler Handler) Make(HttpStatusCode status)
+    private (PushSender Sender, StubHandler Handler) Make(HttpStatusCode status, string subject = "mailto:test@example.com")
     {
         var keys = new KeyStore(_dir);
-        var vapid = new VapidAuthentication(keys.Vapid.PublicKey, keys.Vapid.PrivateKey) { Subject = "mailto:test@example.com" };
+        var vapid = new VapidAuthentication(keys.Vapid.PublicKey, keys.Vapid.PrivateKey) { Subject = subject };
         var handler = new StubHandler(status);
         return (new PushSender(new HttpClient(handler), vapid, NullLogger.Instance), handler);
     }
@@ -57,6 +57,22 @@ public class PushSenderTests : IDisposable
         Assert.NotNull(handler.Body);
         Assert.DoesNotContain("晚上回来吃饭", System.Text.Encoding.UTF8.GetString(handler.Body!));
         Assert.True(handler.Body!.Length > 100);
+    }
+
+    [Fact]
+    public async Task Site_url_works_as_vapid_contact()
+    {
+        // docker compose 用站点地址做联系方式（不把管理员邮箱发给推送服务）：VAPID JWT 的 sub 就是这个网址
+        var (sender, handler) = Make(HttpStatusCode.Created, "https://family.example.com");
+
+        var result = await sender.SendAsync(Sub, new PushPayload("t", "b", "/", "x"), CancellationToken.None);
+
+        Assert.Equal(PushSendResult.Sent, result);
+        var auth = handler.Request!.Headers.Authorization!.ToString();
+        var jwt = auth["vapid t=".Length..].Split(',')[0].Trim();
+        var token = new Microsoft.IdentityModel.JsonWebTokens.JsonWebToken(jwt);
+        Assert.Equal("https://family.example.com", token.Subject);
+        Assert.Equal("https://push.example.test", token.Audiences.Single());
     }
 
     [Theory]
