@@ -57,6 +57,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             e.HasIndex(x => x.UserId);
             e.Property(x => x.PushSubscription).HasColumnType("jsonb");
             e.Property(x => x.AllowedControllers).HasColumnType("jsonb");
+            e.Property(x => x.TrustedControllers).HasColumnType("jsonb").HasDefaultValueSql("'[]'::jsonb");
         });
         b.Entity<RefreshToken>(e => e.HasIndex(x => x.Hash).IsUnique());
 

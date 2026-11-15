@@ -573,6 +573,13 @@ namespace PrivateChat.Api.Migrations
                         .HasColumnType("text")
                         .HasColumnName("token_hash");
 
+                    b.Property<string>("TrustedControllers")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("trusted_controllers")
+                        .HasDefaultValueSql("'[]'::jsonb");
+
                     b.Property<string>("UnattendedPinHash")
                         .HasColumnType("text")
                         .HasColumnName("unattended_pin_hash");

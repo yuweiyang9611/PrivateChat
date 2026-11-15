@@ -7,7 +7,8 @@ public sealed record ScreenDto(int Width, int Height, bool Primary);
 
 /// <summary>
 /// 一台装了 Agent 的电脑。canControl：我能发起远程；canManage：我能改策略、吊销（主人或管理员）。
-/// allowedControllers 只给能管理的人看。session：这台设备上还没结束的会话（谁在用），没有为空。
+/// allowedControllers、trustedControllers（免同意名单）只给能管理的人看。trusted：我在免同意名单里，点了就直接连上。
+/// session：这台设备上还没结束的会话（谁在用），没有为空。
 /// </summary>
 public sealed record DeviceDto(
     Guid Id,
@@ -25,7 +26,9 @@ public sealed record DeviceDto(
     List<Guid>? AllowedControllers,
     bool HasPin,
     DateTimeOffset? PinLockedUntil,
-    RemoteSessionDto? Session);
+    RemoteSessionDto? Session,
+    bool Trusted,
+    List<Guid>? TrustedControllers);
 
 public sealed record RemoteSessionDto(
     Guid Id,
@@ -50,13 +53,16 @@ public sealed record RemoteSessionDto(
 
 public sealed record RemoteSessionPageDto(List<RemoteSessionDto> Items, DateTimeOffset? NextBefore);
 
-/// <summary>pin：无人值守时直接输入设备 PIN，不用等对方点同意。</summary>
+/// <summary>pin：无人值守时直接输入设备 PIN，不用等对方点同意。在免同意名单里的人不用带 PIN 也直接开始。</summary>
 public sealed record CreateRemoteSessionRequest(Guid TargetDeviceId, RemoteSessionMode Mode, string? Pin);
 
 public sealed record RemoteConsentRequest(bool Accept);
 
-/// <summary>只改给了的字段。pin 设新 PIN（至少 6 位数字），clearPin 清掉。</summary>
-public sealed record UpdateDeviceRequest(string? Name, List<Guid>? AllowedControllers, string? Pin, bool? ClearPin);
+/// <summary>
+/// 只改给了的字段。pin 设新 PIN（至少 6 位数字），clearPin 清掉。
+/// trustedControllers：免同意名单，只能是电脑的主人或（这次改完之后的）远程名单里的人。
+/// </summary>
+public sealed record UpdateDeviceRequest(string? Name, List<Guid>? AllowedControllers, string? Pin, bool? ClearPin, List<Guid>? TrustedControllers = null);
 
 /// <summary>"添加电脑"向导：Agent 下载地址和配置串（服务器地址 + Cloudflare Access 服务令牌）。</summary>
 public sealed record AgentSetupDto(string ServerUrl, string? DownloadUrl, string SetupCode, bool AccessTokenConfigured);

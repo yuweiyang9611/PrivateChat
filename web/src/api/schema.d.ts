@@ -3594,6 +3594,8 @@ export interface components {
             /** Format: date-time */
             pinLockedUntil: null | string;
             session: null | components["schemas"]["RemoteSessionDto"];
+            trusted: boolean;
+            trustedControllers: null | string[];
         };
         DeviceLookupResponse: {
             name: string;
@@ -4011,7 +4013,7 @@ export interface components {
             accept: boolean;
         };
         /** @enum {unknown} */
-        RemoteConsentType: "Prompt" | "Unattended";
+        RemoteConsentType: "Prompt" | "Unattended" | "Trusted";
         RemoteSessionDto: {
             /** Format: uuid */
             id: string;
@@ -4174,6 +4176,7 @@ export interface components {
             allowedControllers: null | string[];
             pin: null | string;
             clearPin: null | boolean;
+            trustedControllers?: null | string[];
         };
         UserDto: {
             /** Format: uuid */

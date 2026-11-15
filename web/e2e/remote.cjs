@@ -2,7 +2,8 @@
 // Agent 用测试画面（四色象限 + 移动黑块，两块假显示器 1280×720 / 1920×1080），键鼠不注入系统、写到日志文件——
 // 不碰这台电脑的真实屏幕和鼠标键盘。E2E_REAL_SCREEN=1 时最后再用真实屏幕跑一遍（只检查尺寸和非黑屏，不截图）。
 // 覆盖：下载安装包、设备码添加（管理员替爸爸添加）、主人实时看到在线 / 被远程提醒、远程控制（自动同意）、
-// 画面像素、键鼠 / 滚轮 / 文字 / 特殊键 / 剪贴板、画质与切换显示器、结束与记录、只看模式不注入、拒绝、移除电脑。
+// 画面像素、键鼠 / 滚轮 / 文字 / 特殊键 / 剪贴板、画质与切换显示器、结束与记录、只看模式不注入、拒绝、
+// 免同意名单（勾上后不经同意直接连、移出后立即结束）、移除电脑。
 // 前提：compose 栈已启动，装有 Edge；用法：cd web && node e2e/remote.cjs
 const fs = require('fs')
 const os = require('os')
@@ -255,6 +256,50 @@ async function moveOnCanvas(page, fx, fy) {
   await card.locator('[data-testid=device-control]').click()
   check('对方拒绝 → 显示"对方拒绝了"', await admin.locator('[data-testid=remote-end-reason]', { hasText: '对方拒绝了' }).waitFor({ timeout: 15000 }).then(() => true, () => false))
   check('Agent 重启后用保存的令牌直接上线（没有再要设备码）', !agent.out.includes('DEVICE-CODE'))
+
+  // ---- 免同意名单：Agent 还是"一律拒绝"，名单里的人点了直接连上 ----
+  const openSettings = async (page, c) => {
+    await c.locator('[data-testid=device-more]').click()
+    await page.locator('[data-testid=device-settings]:visible').click()
+    await page.locator('[data-testid=device-trusted]').waitFor()
+  }
+  await admin.goto(BASE + '/devices')
+  await card.locator('[data-testid=device-online]', { hasText: '在线' }).waitFor({ timeout: 10000 })
+  await openSettings(admin, card)
+  const trustOptions = (await admin.locator('[data-testid=device-trusted] .el-checkbox').allTextContents()).map((s) => s.trim())
+  check('电脑设置里能勾免同意的人：主人和远程名单里的人，默认都没勾',
+    trustOptions.includes('爸爸（电脑的主人）') && trustOptions.includes('admin') && (await admin.locator('[data-testid=device-trusted] .el-checkbox.is-checked').count()) === 0, trustOptions)
+  await admin.locator('[data-testid=device-trusted] .el-checkbox', { hasText: 'admin' }).click()
+  await admin.locator('[data-testid=save-device]').click()
+  const mine = await card.locator('[data-testid=device-trusted]').waitFor({ timeout: 10000 }).then(() => true, () => false)
+  const listed = await card.locator('[data-testid=device-trusted-list]').textContent().catch(() => '')
+  const ownerSees = await bobCard.locator('[data-testid=device-trusted-list]', { hasText: 'admin' }).waitFor({ timeout: 10000 }).then(() => true, () => false)
+  check('卡片上写明谁免同意：我自己看到提示，主人不用刷新也看得到', mine && listed.includes('免同意：我') && ownerSees, { mine, listed, ownerSees })
+
+  // 主人的提醒几秒后自己消失：先等着，再点
+  const ownerNotified = bob.locator('.el-notification', { hasText: '正在控制你的电脑' }).last().waitFor({ timeout: 20000 }).then(() => true, () => false)
+  await card.locator('[data-testid=device-control]').click()
+  await admin.waitForURL(/\/remote\//, { timeout: 10000 })
+  const trustedSession = admin.url().split('/remote/')[1]
+  const direct = await until(async () => (await admin.locator('[data-testid=remote-stats]').textContent().catch(() => '')).includes('1280×720'), 20000)
+  check('免同意名单里的人：电脑前没人同意（Agent 设成一律拒绝）也直接连上',
+    !!direct && sql(`select consent || ',' || state from remote_sessions where id = '${trustedSession}'`) === 'Trusted,Active',
+    await admin.locator('[data-testid=remote-end-reason]').textContent().catch(() => ''))
+  const banner = !!(await until(() => agent.out.includes('红条：正在被 admin 远程控制'), 5000))
+  const notified = await ownerNotified
+  check('被控电脑照样显示红条，主人照样收到提醒', banner && notified, { banner, notified })
+
+  // 主人把 admin 从免同意名单里去掉：正在进行的这次立即结束，之后又要等同意（被拒绝）
+  await openSettings(bob, bobCard)
+  await bob.locator('[data-testid=device-trusted] .el-checkbox', { hasText: 'admin' }).click()
+  await bob.locator('[data-testid=save-device]').click()
+  check('被移出免同意名单：正在进行的这次远程立即结束', await admin.locator('[data-testid=remote-ended]').waitFor({ timeout: 10000 }).then(() => true, () => false))
+  await admin.goto(BASE + '/devices')
+  const historyRow = await admin.locator('[data-testid=remote-history-item]').first().textContent({ timeout: 10000 }).catch(() => '')
+  check('远程记录里标着这次是"免同意"进来的', historyRow.includes('免同意'), historyRow)
+  await card.locator('[data-testid=device-online]', { hasText: '在线' }).waitFor({ timeout: 10000 })
+  await card.locator('[data-testid=device-control]').click()
+  check('移出名单之后再点：回到等对方同意（这里被拒绝）', await admin.locator('[data-testid=remote-end-reason]', { hasText: '对方拒绝了' }).waitFor({ timeout: 15000 }).then(() => true, () => false))
 
   // ---- 移除电脑：Agent 回到设备码登记 ----
   await admin.goto(BASE + '/devices')

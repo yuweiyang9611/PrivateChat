@@ -15,14 +15,25 @@ const remote = useRemoteStore()
 
 const name = ref('')
 const allowed = ref<string[]>([])
+const trusted = ref<string[]>([])
 const pin = ref('')
 const clearPin = ref(false)
 const busy = ref(false)
 let initialAllowed: string[] = []
+let initialTrusted: string[] = []
 
 /** 能被加进名单的人：成年成员（孩子不能远程），不含主人自己 */
 const candidates = computed(() => family.members.filter((m) => !m.disabled && m.role !== 'Child' && m.id !== props.device?.ownerId))
+/** 能勾免同意的人：电脑的主人自己（成年、没停用），加上上面远程名单里现在勾着的人 */
+const trustCandidates = computed(() => {
+  const owner = family.byId(props.device?.ownerId)
+  const list = candidates.value.filter((m) => allowed.value.includes(m.id)).map((m) => ({ id: m.id, label: m.displayName || m.username }))
+  if (owner && !owner.disabled && owner.role !== 'Child') list.unshift({ id: owner.id, label: t('remote.trustedOwner', { name: owner.displayName || owner.username }) })
+  return list
+})
 const pinValid = computed(() => pin.value === '' || /^\d{6,12}$/.test(pin.value))
+
+const sameSet = (a: string[], b: string[]): boolean => a.length === b.length && a.every((id) => b.includes(id))
 
 watch(open, (v) => {
   if (!v || !props.device) return
@@ -30,9 +41,17 @@ watch(open, (v) => {
   name.value = props.device.name
   initialAllowed = [...(props.device.allowedControllers ?? [])]
   allowed.value = [...initialAllowed]
+  initialTrusted = [...(props.device.trustedControllers ?? [])]
+  trusted.value = [...initialTrusted]
   pin.value = ''
   clearPin.value = false
 }, { immediate: true })
+
+// 从远程名单里去掉一个人：免同意也跟着去掉（服务器也是这个规矩）
+watch(allowed, (now) => {
+  const owner = props.device?.ownerId
+  trusted.value = trusted.value.filter((id) => id === owner || now.includes(id))
+})
 
 async function save(): Promise<void> {
   const d = props.device
@@ -41,11 +60,13 @@ async function save(): Promise<void> {
   try {
     // 名单没动就不发（里面可能有后来被停用 / 降为孩子的人，界面上看不到也去不掉，发过去会被拒）；
     // 动了就只发界面上能选的人
-    const changed = allowed.value.length !== initialAllowed.length || allowed.value.some((id) => !initialAllowed.includes(id))
+    const changed = !sameSet(allowed.value, initialAllowed)
     const selectable = new Set(candidates.value.map((m) => m.id))
+    const trustable = new Set(trustCandidates.value.map((m) => m.id))
     await remote.update(d.id, {
       name: name.value.trim(),
       allowedControllers: changed ? allowed.value.filter((id) => selectable.has(id)) : null,
+      trustedControllers: sameSet(trusted.value, initialTrusted) ? null : trusted.value.filter((id) => trustable.has(id)),
       pin: pin.value || null,
       clearPin: clearPin.value && !pin.value ? true : null,
     })
@@ -71,6 +92,14 @@ async function save(): Promise<void> {
             <el-checkbox v-for="m in candidates" :key="m.id" :value="m.id" :label="m.displayName || m.username" />
           </el-checkbox-group>
           <div class="text-xs" style="color: var(--pc-text-muted)">{{ t('remote.allowedHint') }}</div>
+        </div>
+      </el-form-item>
+      <el-form-item :label="t('remote.trusted')">
+        <div class="w-full">
+          <el-checkbox-group v-model="trusted" class="flex flex-col" data-testid="device-trusted">
+            <el-checkbox v-for="m in trustCandidates" :key="m.id" :value="m.id" :label="m.label" />
+          </el-checkbox-group>
+          <div class="text-xs leading-relaxed" style="color: var(--pc-text-muted)">{{ t('remote.trustedHint') }}</div>
         </div>
       </el-form-item>
       <el-form-item :label="`${t('remote.pin')}（${device.hasPin ? t('remote.pinSet') : t('remote.pinNone')}）`">

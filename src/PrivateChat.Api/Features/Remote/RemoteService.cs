@@ -16,6 +16,7 @@ namespace PrivateChat.Api.Features.Remote;
 /// - 谁能控：Admin / Member（孩子不行），且是设备主人或在设备的白名单里；谁能管（改名、白名单、PIN、吊销）：主人或管理员。
 /// - 一台设备同一时间只有一个未结束的会话（数据库部分唯一索引兜底）；同一个人再点一次就顶掉自己之前那次。
 /// - 默认要被控端点同意（30 秒）；输入设备的无人值守 PIN 则直接开始。PIN 连错 5 次锁 15 分钟。
+/// - 免同意名单（主人或管理员按人勾选，默认为空）：名单里的人不用同意也不用 PIN，点了就开始。只能是主人自己或远程名单里的人。
 /// - 状态迁移都是带条件的 UPDATE（WHERE 还没结束 / 还在等同意），同意、超时、挂断同时发生也只会有一个生效。
 /// - 进行中的会话任一端断开超过 30 秒就结束（RemoteMaintenanceWorker）。
 /// </summary>
@@ -35,10 +36,19 @@ public sealed class RemoteService(AppDbContext db, AgentRegistry agents, RemoteR
         catch (JsonException) { return []; }
     }
 
+    public static List<Guid> TrustedOf(Device d)
+    {
+        try { return JsonSerializer.Deserialize<List<Guid>>(d.TrustedControllers) ?? []; }
+        catch (JsonException) { return []; }
+    }
+
     public static bool CanManage(Device d, Guid me, UserRole role) => d.UserId == me || role == UserRole.Admin;
 
     public static bool CanControl(Device d, Guid me, UserRole role)
         => role != UserRole.Child && (d.UserId == me || AllowedOf(d).Contains(me));
+
+    /// <summary>在免同意名单里、而且现在还能控这台电脑（被移出远程名单、降为孩子的，名单里留着名字也不算）。</summary>
+    public static bool IsTrusted(Device d, Guid me, UserRole role) => CanControl(d, me, role) && TrustedOf(d).Contains(me);
 
     private async Task<Device> VisibleDeviceAsync(Guid id, Guid me, UserRole role, CancellationToken ct)
     {
@@ -70,7 +80,8 @@ public sealed class RemoteService(AppDbContext db, AgentRegistry agents, RemoteR
             [.. (entry?.Report?.Screens ?? []).Select(s => new ScreenDto(s.Width, s.Height, s.Primary))],
             CanControl(d, me, role), manage, manage ? AllowedOf(d) : null,
             d.UnattendedPinHash is not null, manage && d.PinLockedUntil > DateTimeOffset.UtcNow ? d.PinLockedUntil : null,
-            open is null ? null : RemoteSessionDto.From(open, d));
+            open is null ? null : RemoteSessionDto.From(open, d),
+            IsTrusted(d, me, role), manage ? TrustedOf(d) : null);
     }
 
     public async Task<DeviceDto> UpdateDeviceAsync(Guid me, UserRole role, Guid id, UpdateDeviceRequest req, CancellationToken ct)
@@ -91,6 +102,26 @@ public sealed class RemoteService(AppDbContext db, AgentRegistry agents, RemoteR
             if (valid.Count != wanted.Count) throw ApiException.BadRequest("名单里有不存在、已停用或孩子账号的成员");
             device.AllowedControllers = JsonSerializer.Serialize(wanted);
         }
+        // 免同意名单：只能是主人自己或（这次改完之后的）远程名单里的人；没给就只把已经不在远程名单里的人清出去
+        if (req.TrustedControllers is not null || req.AllowedControllers is not null)
+        {
+            var allowedNow = AllowedOf(device);
+            var eligible = (Guid u) => u == device.UserId || allowedNow.Contains(u);
+            List<Guid> trusted;
+            if (req.TrustedControllers is { } wantedTrusted)
+            {
+                trusted = [.. wantedTrusted.Distinct()];
+                if (!trusted.All(eligible)) throw ApiException.BadRequest("免同意名单里只能是电脑的主人或远程名单里的人");
+                var added = trusted.Except(TrustedOf(device)).ToList();
+                var valid = await db.Users.CountAsync(u => added.Contains(u.Id) && u.DisabledAt == null && u.Role != UserRole.Child, ct);
+                if (valid != added.Count) throw ApiException.BadRequest("免同意名单里有不存在、已停用或孩子账号的成员");
+            }
+            else
+            {
+                trusted = [.. TrustedOf(device).Where(eligible)];
+            }
+            device.TrustedControllers = JsonSerializer.Serialize(trusted);
+        }
         var pinChanged = req.ClearPin == true || req.Pin is not null;
         if (req.ClearPin == true)
         {
@@ -106,7 +137,8 @@ public sealed class RemoteService(AppDbContext db, AgentRegistry agents, RemoteR
             device.PinLockedUntil = null;
         }
         await db.SaveChangesAsync(ct);
-        // 移出名单的人、凭旧 PIN 进来的无人值守会话：立即结束（不然对方还能一直控制、断了还能重连回来）
+        // 移出名单的人、凭旧 PIN 进来的无人值守会话、被移出免同意名单的人凭名单进来的会话：立即结束
+        // （不然对方还能一直控制、断了还能重连回来）
         await EndDisallowedAsync(deviceId: device.Id, endUnattended: pinChanged);
         await notifier.DeviceChangedAsync(device.Id);
         var open = await db.RemoteSessions.AsNoTracking().FirstOrDefaultAsync(s => s.TargetDeviceId == id && s.EndedAt == null, ct);
@@ -114,8 +146,8 @@ public sealed class RemoteService(AppDbContext db, AgentRegistry agents, RemoteR
     }
 
     /// <summary>
-    /// 权限变了（移出名单、改 / 清 PIN、成员被降为孩子或停用、设备被吊销）：结束不再被允许的未结束会话。
-    /// endUnattended：凭 PIN 进来的会话也结束（PIN 改了 / 清了）。
+    /// 权限变了（移出名单、移出免同意名单、改 / 清 PIN、成员被降为孩子或停用、设备被吊销）：结束不再被允许的未结束会话。
+    /// endUnattended：凭 PIN 进来的会话也结束（PIN 改了 / 清了）。凭免同意名单进来的会话不受 PIN 影响，只看人还在不在名单里。
     /// </summary>
     public async Task EndDisallowedAsync(Guid? deviceId = null, Guid? controllerId = null, bool endUnattended = false)
     {
@@ -128,7 +160,8 @@ public sealed class RemoteService(AppDbContext db, AgentRegistry agents, RemoteR
                           select new { s.Id, s.Consent, s.ControllerUserId, Device = d, u.Role, u.DisabledAt }).ToListAsync();
         foreach (var r in rows)
             if (r.DisabledAt is not null || r.Device.RevokedAt is not null || !CanControl(r.Device, r.ControllerUserId, r.Role)
-                || (endUnattended && r.Consent == RemoteConsentType.Unattended))
+                || (endUnattended && r.Consent == RemoteConsentType.Unattended)
+                || (r.Consent == RemoteConsentType.Trusted && !TrustedOf(r.Device).Contains(r.ControllerUserId)))
                 await EndCoreAsync(r.Id, "stopped");
     }
 
@@ -168,25 +201,15 @@ public sealed class RemoteService(AppDbContext db, AgentRegistry agents, RemoteR
         if (!CanControl(device, me, role)) throw ApiException.Forbidden("你不在这台电脑的远程控制名单里，请让电脑的主人把你加进去");
         if (!agents.IsOnline(device.Id)) throw ApiException.Conflict("这台电脑现在不在线（没开机，或者远程协助程序没有运行）");
 
-        var consent = RemoteConsentType.Prompt;
+        var pinVerified = false;
         if (!string.IsNullOrEmpty(req.Pin))
         {
             await VerifyPinAsync(device.Id, req.Pin, ct);
-            consent = RemoteConsentType.Unattended;
+            pinVerified = true;
         }
 
         var now = DateTimeOffset.UtcNow;
-        var session = new RemoteSession
-        {
-            ControllerUserId = me,
-            TargetDeviceId = device.Id,
-            Mode = req.Mode,
-            Consent = consent,
-            State = consent == RemoteConsentType.Unattended ? RemoteSessionState.Active : RemoteSessionState.Pending,
-            StartedAt = now,
-            ExpiresAt = now + ConsentTimeout,
-            AcceptedAt = consent == RemoteConsentType.Unattended ? now : null,
-        };
+        RemoteSession session;
         List<Guid> replaced;
         await using (var tx = await db.Database.BeginTransactionAsync(ct))
         {
@@ -195,6 +218,22 @@ public sealed class RemoteService(AppDbContext db, AgentRegistry agents, RemoteR
             var fresh = await db.Devices.FromSqlInterpolated($"SELECT * FROM devices WHERE id = {device.Id} AND revoked_at IS NULL FOR UPDATE")
                 .AsNoTracking().FirstOrDefaultAsync(ct) ?? throw ApiException.NotFound("设备");
             if (!CanControl(fresh, me, role)) throw ApiException.Forbidden("你不在这台电脑的远程控制名单里，请让电脑的主人把你加进去");
+            // 不用等同意的两种情况：输对了 PIN，或者（按锁里读到的）我在免同意名单里。刚被移出名单的，这次就回到等同意
+            var consent = pinVerified ? RemoteConsentType.Unattended
+                : IsTrusted(fresh, me, role) ? RemoteConsentType.Trusted
+                : RemoteConsentType.Prompt;
+            var immediate = consent != RemoteConsentType.Prompt;
+            session = new RemoteSession
+            {
+                ControllerUserId = me,
+                TargetDeviceId = device.Id,
+                Mode = req.Mode,
+                Consent = consent,
+                State = immediate ? RemoteSessionState.Active : RemoteSessionState.Pending,
+                StartedAt = now,
+                ExpiresAt = now + ConsentTimeout,
+                AcceptedAt = immediate ? now : null,
+            };
             var open = await db.RemoteSessions.Where(s => s.TargetDeviceId == device.Id && s.EndedAt == null).ToListAsync(ct);
             if (open.FirstOrDefault(s => s.ControllerUserId != me) is { } busy)
             {
@@ -225,13 +264,19 @@ public sealed class RemoteService(AppDbContext db, AgentRegistry agents, RemoteR
         await notifier.SessionRequestedAsync(device.Id, ToAgentRequest(session, controller));
         var dto = RemoteSessionDto.From(session, device);
         await notifier.SessionChangedAsync(dto);
-        logger.LogInformation("远程控制：{User} 请求{Mode} 设备 {Device}（{Consent}）", me, req.Mode, device.Id, consent);
+        logger.LogInformation("远程控制：{User} 请求{Mode} 设备 {Device}（{Consent}）", me, req.Mode, device.Id, session.Consent);
         return dto;
     }
 
-    /// <summary>倒计时用相对秒数：被控电脑的时钟可能不准，不能拿服务器的绝对时间去减它自己的时间。</summary>
+    /// <summary>
+    /// 倒计时用相对秒数：被控电脑的时钟可能不准，不能拿服务器的绝对时间去减它自己的时间。
+    /// 免同意名单（Trusted）按无人值守（Unattended）告诉 Agent：已经装出去的 Agent 不认识新值——枚举按字符串传，
+    /// 解析不了整条通知就丢了——而它只看 Active 决定要不要弹窗。
+    /// </summary>
     private static AgentSessionRequest ToAgentRequest(RemoteSession s, string controllerName)
-        => new(s.Id, controllerName, s.Mode, s.Consent, s.ExpiresAt, s.State == RemoteSessionState.Active,
+        => new(s.Id, controllerName, s.Mode,
+            s.Consent == RemoteConsentType.Trusted ? RemoteConsentType.Unattended : s.Consent,
+            s.ExpiresAt, s.State == RemoteSessionState.Active,
             Math.Max(0, (int)Math.Floor((s.ExpiresAt - DateTimeOffset.UtcNow).TotalSeconds)));
 
     /// <summary>在设备行锁里校验 PIN：并发猜 PIN 也只能一个个来，错满 5 次立刻锁上。</summary>

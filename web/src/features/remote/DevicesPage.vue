@@ -58,6 +58,13 @@ function ownerText(d: DeviceDto): string {
   return d.ownerId === me.value ? t('remote.mine') : t('remote.ownerOf', { name: family.nameOf(d.ownerId) })
 }
 
+/** 给能管理的人看：这台电脑上谁不用同意就能直接连（主人应当一眼看得到） */
+function trustedText(d: DeviceDto): string {
+  const ids = d.trustedControllers ?? []
+  if (!ids.length) return ''
+  return t('remote.trustedList', { names: ids.map((id) => (id === me.value ? '我' : family.nameOf(id))).join('、') })
+}
+
 function screensText(d: DeviceDto): string {
   if (!d.screens.length) return ''
   if (d.screens.length > 1) return t('remote.screensMany', { n: d.screens.length })
@@ -141,6 +148,9 @@ function historyDetail(s: RemoteSessionDto): string {
   const parts = [formatWhen(s.startedAt)]
   const minutes = sessionMinutes(s)
   if (minutes !== null) parts.push(minutes === 0 ? t('remote.underMinute') : t('remote.minutes', { n: minutes }))
+  // 没人点同意就开始的，记录里标出来是怎么进来的
+  if (s.consent === 'Trusted') parts.push(t('remote.consentTrusted'))
+  else if (s.consent === 'Unattended') parts.push(t('remote.consentPin'))
   if (s.bytesRelayed > 0) parts.push(formatBytes(s.bytesRelayed))
   if (s.endReason && s.endReason in reasonKeys) parts.push(t(`remote.reasons.${s.endReason}`))
   return parts.join(' · ')
@@ -176,6 +186,7 @@ const reasonKeys = { declined: 1, timeout: 1, controller: 1, agent: 1, stopped: 
                 <template v-if="d.online && screensText(d)"> · {{ screensText(d) }}</template>
                 <template v-else-if="!d.online && d.lastSeenAt"> · {{ t('remote.lastSeen', { time: formatWhen(d.lastSeenAt) }) }}</template>
               </div>
+              <div v-if="trustedText(d)" class="truncate text-xs" style="color: var(--pc-text-muted)" data-testid="device-trusted-list">{{ trustedText(d) }}</div>
             </div>
             <el-dropdown v-if="d.canManage || (d.hasPin && d.canControl)" trigger="click" @command="(c: string) => onCommand(d, c)">
               <el-button :icon="MoreFilled" circle text data-testid="device-more" />
@@ -200,6 +211,7 @@ const reasonKeys = { declined: 1, timeout: 1, controller: 1, agent: 1, stopped: 
             <el-button round type="primary" :icon="Mouse" :disabled="!d.online || !online || starting === d.id" :loading="starting === d.id" data-testid="device-control" @click="start(d, 'Control')">{{ t('remote.control') }}</el-button>
           </div>
           <div v-else class="mt-2 text-xs" style="color: var(--pc-text-muted)">{{ t('remote.noPermission') }}</div>
+          <div v-if="d.canControl && d.trusted" class="mt-2 text-xs" style="color: var(--pc-text-muted)" data-testid="device-trusted">{{ t('remote.trustedMe') }}</div>
         </li>
       </ul>
 

@@ -46,7 +46,12 @@ public enum RemoteMouseButton : byte { Left = 0, Middle = 1, Right = 2, Back = 3
 
 public enum RemoteSessionMode { View, Control }
 
-public enum RemoteConsentType { Prompt, Unattended }
+/// <summary>
+/// 这次远程是怎么开始的：Prompt 电脑前的人点了同意；Unattended 输了设备的无人值守 PIN；
+/// Trusted 控制的人在这台电脑的免同意名单里。Trusted 只存在于服务端和网页：发给 Agent 时按 Unattended 说
+/// （已经装出去的 Agent 不认识新值，而它只关心要不要弹窗）。
+/// </summary>
+public enum RemoteConsentType { Prompt, Unattended, Trusted }
 
 public enum RemoteSessionState { Pending, Active, Ended }
 

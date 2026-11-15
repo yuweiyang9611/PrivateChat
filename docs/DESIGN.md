@@ -231,7 +231,7 @@ PrivateChat/
 | `users` | id, email（Access 身份映射键）, username, display_name, avatar_blob_id, password_hash（仅局域网备用登录）, role（Admin / Member / Child）, elder_mode, created_at, disabled_at |
 | `families` | id, name。v1 单家庭，表保留给未来 |
 | `invites` | email（允许自动建号的家人邮箱）, code（局域网模式用）, created_by, role, expires_at, used_by |
-| `devices` | id, user_id, kind（Browser / Agent）, name, platform, push_subscription jsonb, token_hash, last_seen_at, remote_capable, unattended_pin_hash, pin_failures, pin_locked_until, allowed_controllers jsonb, agent_version, os, revoked_at |
+| `devices` | id, user_id, kind（Browser / Agent）, name, platform, push_subscription jsonb, token_hash, last_seen_at, remote_capable, unattended_pin_hash, pin_failures, pin_locked_until, allowed_controllers jsonb, trusted_controllers jsonb（免同意名单）, agent_version, os, revoked_at |
 | `refresh_tokens` | id, user_id, device_id, hash, expires_at, revoked_at |
 
 **聊天**
@@ -280,7 +280,7 @@ PrivateChat/
 | `call_sessions` | id, conversation_id, type（Audio / Video / Meeting）, room_slug（常驻会议室）, started_by, started_at, answered_at, ended_at, end_reason（Completed / Missed / Declined / Cancelled）, scheduled_at, egress_bytes_estimate。同一会话只允许一条未结束的记录（部分唯一索引） |
 | `call_participants` | id, call_id, user_id, cf_session_id（发布用的 Cloudflare 会话）, cf_pull_session_id（订阅用的）, mic_on, cam_on, joined_at, last_seen_at（心跳）, left_at |
 | `call_tracks` | id, participant_id, track_name, kind（Audio / Video / Screen）, mid（发布会话里的 mid，强制关闭用）, published_at, unpublished_at |
-| `remote_sessions` | id, controller_user_id, target_device_id, mode（View / Control）, consent（Prompt / Unattended）, state（Pending / Active / Ended）, started_at, expires_at（等同意的截止）, accepted_at, ended_at, end_reason（declined / timeout / controller / agent / stopped / revoked / disconnected / replaced）, bytes_relayed。一台设备只允许一条未结束的记录（部分唯一索引） |
+| `remote_sessions` | id, controller_user_id, target_device_id, mode（View / Control）, consent（Prompt 点了同意 / Unattended 输了 PIN / Trusted 在免同意名单里）, state（Pending / Active / Ended）, started_at, expires_at（等同意的截止）, accepted_at, ended_at, end_reason（declined / timeout / controller / agent / stopped / revoked / disconnected / replaced）, bytes_relayed。一台设备只允许一条未结束的记录（部分唯一索引） |
 
 **通知与任务**
 
@@ -434,12 +434,12 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 **会话建立**
 
 1. 控制端 `POST /api/remote/sessions {targetDeviceId, mode, pin?}`。服务端校验：请求者是 Admin / Member（孩子不行），是设备主人或在白名单里，设备在线；锁住设备行后检查没有别人的未结束会话（同一个人再点一次就顶掉自己之前那次）。
-2. 没带 PIN：会话 Pending（30 秒），经 `/hubs/agent` 通知 Agent 弹窗"XX 想远程控制这台电脑"（默认焦点在"拒绝"上，回车不会误同意）；Agent 回 `/consent`。带了 PIN（设备主人设置的无人值守 PIN，6–12 位数字，PBKDF2 哈希）：在设备行锁里校验，直接 Active；连错 5 次锁 15 分钟。
+2. 没带 PIN：会话 Pending（30 秒），经 `/hubs/agent` 通知 Agent 弹窗"XX 想远程控制这台电脑"（默认焦点在"拒绝"上，回车不会误同意）；Agent 回 `/consent`。带了 PIN（设备主人设置的无人值守 PIN，6–12 位数字，PBKDF2 哈希）：在设备行锁里校验，直接 Active；连错 5 次锁 15 分钟。请求的人在这台电脑的**免同意名单**里（`trusted_controllers`，按锁里读到的为准）：不带 PIN 也直接 Active，`consent = Trusted`。发给 Agent 时 Trusted 按 Unattended 说——已经装出去的 Agent 不认识新值，而它只看 `active` 决定要不要弹窗，所以加这个模式不用重装 Agent。
 3. Active 后双方各自连接 `/ws/remote/{sessionId}/agent` 与 `/controller`；控制的人和设备主人都收到 SignalR `RemoteSessionChanged`（主人的网页会弹提醒）。
 4. 被控端顶部常驻红色条"正在被 XX 远程控制 [断开]"，本地按 Ctrl+Alt+Shift+Q 立即断开；托盘图标变红。
 5. 状态迁移都是带条件的 UPDATE（WHERE 还在等同意 / 还没结束），同意、超时、挂断同时发生也只有一个生效。维护任务每 5 秒：等同意超时的结束（timeout），进行中但任一端断开超过 30 秒的结束（disconnected）。服务重启后两端各自重连，会话照常继续。
 6. 主人或管理员可以在网页上替电脑挂断（stopped）、移除电脑（吊销令牌，先通知 Agent 再作废，在设备行锁里改，Agent 回到设备码登记）。
-7. 权限一变就生效：把人移出名单、改 / 清 PIN（凭旧 PIN 进来的无人值守会话）、成员被降为孩子或停用，正在进行的会话立即结束（stopped）；中继每次接受连接都按当时的权限再查一遍。
+7. 权限一变就生效：把人移出名单、移出免同意名单（凭名单进来的会话）、改 / 清 PIN（凭旧 PIN 进来的无人值守会话）、成员被降为孩子或停用，正在进行的会话立即结束（stopped）；中继每次接受连接都按当时的权限再查一遍。
 8. Agent 每次连上 `/hubs/agent` 都补发这台设备未结束的会话（等同意的再弹窗，进行中的直接连数据面），请求恰好发到旧连接上也不会丢；倒计时用服务器给的相对秒数，被控电脑的时钟不准也不影响。
 
 **数据面**（帧格式定义在 `PrivateChat.Contracts`，浏览器那份在 `web/src/features/remote/protocol.ts`，详见附录 C）
@@ -468,6 +468,7 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 
 - 仅 Admin / Member 可控，Child 不可；设备主人（或管理员）维护白名单与 PIN；每次会话审计（谁、何时、多久、流量、结束原因），网页"设备"页可查。
 - 默认每次都要电脑前的人点同意；无人值守 PIN 要主人主动设置。
+- 免同意名单（"谁可以不经同意直接连接"）：主人或管理员在电脑设置里按人勾选，默认为空；只能勾主人自己或远程名单里的成年成员，被移出远程名单的同时也移出这里。名单里的人点"查看 / 控制"就直接开始，不弹窗、不输 PIN。代价是少了连接时的第二道验证：谁拿到那个人已登录的设备，谁就能直接控制这台电脑，所以只该勾少数信得过的人。不变的是：被控端的红条、托盘变红、随时可断开，主人网页上的提醒，以及每次会话的审计（记录里标明"免同意"或"PIN"）；设备卡片上对主人和管理员写明"免同意：谁谁"。
 - 设备令牌可在网页一键吊销，且只能用于远程接口；中继只接受已同意会话的控制人与目标设备。Agent 本地配置里的设备令牌和 Access 密钥只存 DPAPI 加密后的值（明文属性不序列化）。
 
 **RustDesk 兜底**：`docker compose --profile rustdesk up -d` 启动 hbbs / hbbr；网页"设备"页可记录成员的 RustDesk ID，一键复制或深链 `rustdesk://`。
@@ -929,7 +930,7 @@ Agent 的通道 `/hubs/agent`（只认设备令牌）：
 
 | 方向 | 名称 | 载荷 |
 |---|---|---|
-| S→A | SessionRequested | sessionId, controllerName, mode, consent, expiresAt, active（无人值守时为 true，直接连数据面） |
+| S→A | SessionRequested | sessionId, controllerName, mode, consent, expiresAt, active（无人值守、免同意名单时为 true，直接连数据面；consent 对 Agent 只有 Prompt / Unattended 两种） |
 | S→A | SessionEnded | sessionId, reason |
 | S→A | Revoked | 无（删本地令牌、回到设备码登记） |
 | A→S | Report | version, os, screens[]（连上后、显示器变化时） |

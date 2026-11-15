@@ -60,6 +60,11 @@ public class Device
     public DateTimeOffset? PinLockedUntil { get; set; }
     /// <summary>允许远程控制本设备的用户 Id 列表（JSON）。设备主人总是可以，不用列。</summary>
     public string AllowedControllers { get; set; } = "[]";
+    /// <summary>
+    /// 免同意名单：这些人发起远程时直接开始，不用电脑前的人点同意，也不用 PIN（JSON 的用户 Id 列表）。
+    /// 只能是主人自己或 AllowedControllers 里的人；默认为空。
+    /// </summary>
+    public string TrustedControllers { get; set; } = "[]";
     /// <summary>Agent 上报：版本、系统（显示器信息只在内存里，见 AgentRegistry）。</summary>
     public string? AgentVersion { get; set; }
     public string? Os { get; set; }

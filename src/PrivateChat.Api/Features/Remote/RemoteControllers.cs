@@ -29,7 +29,7 @@ public sealed class DevicesController(RemoteService remote) : ControllerBase
     [HttpGet]
     public Task<List<DeviceDto>> List(CancellationToken ct) => remote.ListDevicesAsync(User.UserId(), User.Role(), ct);
 
-    /// <summary>改名、白名单、无人值守 PIN（主人或管理员）。</summary>
+    /// <summary>改名、白名单、免同意名单、无人值守 PIN（主人或管理员）。</summary>
     [HttpPatch("{id:guid}")]
     public Task<DeviceDto> Update(Guid id, UpdateDeviceRequest req, CancellationToken ct)
         => remote.UpdateDeviceAsync(User.UserId(), User.Role(), id, req, ct);
@@ -133,7 +133,9 @@ public sealed class RemoteRelayController(AppDbContext db, RemoteRelay relay) : 
         if (allowed && relayRole == RelayRole.Controller)
         {
             var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == session.ControllerUserId, HttpContext.RequestAborted);
-            allowed = user is { DisabledAt: null } && RemoteService.CanControl(device!, user.Id, user.Role);
+            allowed = user is { DisabledAt: null } && RemoteService.CanControl(device!, user.Id, user.Role)
+                // 凭免同意名单进来的：人已经不在名单里了，也不能再连回来
+                && (session.Consent != RemoteConsentType.Trusted || RemoteService.TrustedOf(device!).Contains(user.Id));
         }
         if (!allowed)
         {

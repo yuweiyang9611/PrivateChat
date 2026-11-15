@@ -524,6 +524,135 @@ public class RemoteTests
     }
 
     [PgFact]
+    public async Task People_on_the_trusted_list_start_immediately_without_consent_or_pin()
+    {
+        await using var x = await SetupAsync();
+        var agent = await RegisterAsync(x, x.BobClient);
+        await using var hub = await OnlineAsync(x, agent);
+        await x.BobClient.PatchJsonAsync($"/api/devices/{agent.DeviceId}", new { allowedControllers = new[] { x.Carol.Id, x.AdminId } });
+
+        // 默认谁都不在免同意名单里：照旧等电脑前的人点同意
+        var before = Assert.Single(await DevicesAsync(x.Admin));
+        Assert.False(before.Trusted);
+        Assert.Empty(before.TrustedControllers!);
+        var asked = await StartAsync(x.Admin, agent.DeviceId);
+        Assert.Equal((RemoteSessionState.Pending, RemoteConsentType.Prompt), (asked.State, asked.Consent));
+        Assert.False((await hub.WaitAsync<AgentSessionRequest>(AgentHubEvents.SessionRequested, 1)).Active);
+        await x.Admin.PostAsync($"/api/remote/sessions/{asked.Id}/end", null);
+
+        // 主人把管理员和自己勾上
+        var updated = await (await x.BobClient.PatchJsonAsync($"/api/devices/{agent.DeviceId}", new { trustedControllers = new[] { x.AdminId, x.Bob.Id } })).ReadAsync<DeviceDto>();
+        Assert.Equal([x.AdminId, x.Bob.Id], updated.TrustedControllers);
+        Assert.True(updated.Trusted);
+        Assert.True(Assert.Single(await DevicesAsync(x.Admin)).Trusted);
+        var carolSees = Assert.Single(await DevicesAsync(x.CarolClient));
+        Assert.False(carolSees.Trusted);
+        Assert.Null(carolSees.TrustedControllers); // 名单只给能管理的人看
+
+        // 名单里的人：不带 PIN、没人点同意，直接开始，数据面马上能连
+        var session = await StartAsync(x.Admin, agent.DeviceId, "View");
+        Assert.Equal((RemoteSessionState.Active, RemoteConsentType.Trusted), (session.State, session.Consent));
+        Assert.NotNull(session.AcceptedAt);
+        // 已经装出去的 Agent 不认识 Trusted：按"无人值守、已开始"告诉它（它只看要不要弹窗）
+        var request = await hub.WaitAsync<AgentSessionRequest>(AgentHubEvents.SessionRequested, 2);
+        Assert.True(request.Active);
+        Assert.Equal(RemoteConsentType.Unattended, request.Consent);
+        using (var ws = await ConnectControllerWsAsync(x.App, "admin@example.com", session.Id))
+            Assert.False(await ReceivePeerAsync(ws));
+        // Agent 重连时补发的也一样（新连接顶掉旧的，后面这台电脑就靠它在线）
+        await using var reconnected = await OnlineAsync(x, agent);
+        var missed = await reconnected.WaitAsync<AgentSessionRequest>(AgentHubEvents.SessionRequested);
+        Assert.Equal((session.Id, true, RemoteConsentType.Unattended), (missed.SessionId, missed.Active, missed.Consent));
+        // 审计里记的是"免同意名单"，和 PIN 分得开
+        var listed = (await (await x.BobClient.GetAsync("/api/remote/sessions")).ReadAsync<RemoteSessionPageDto>()).Items.First(s => s.Id == session.Id);
+        Assert.Equal(RemoteConsentType.Trusted, listed.Consent);
+        await x.Admin.PostAsync($"/api/remote/sessions/{session.Id}/end", null);
+
+        // 主人远程自己的电脑也直接开始；在远程名单里但没被勾上的人照旧等同意
+        var own = await StartAsync(x.BobClient, agent.DeviceId);
+        Assert.Equal((RemoteSessionState.Active, RemoteConsentType.Trusted), (own.State, own.Consent));
+        await x.BobClient.PostAsync($"/api/remote/sessions/{own.Id}/end", null);
+        var carols = await StartAsync(x.CarolClient, agent.DeviceId);
+        Assert.Equal((RemoteSessionState.Pending, RemoteConsentType.Prompt), (carols.State, carols.Consent));
+    }
+
+    [PgFact]
+    public async Task Trusted_list_only_takes_the_owner_and_allowed_adults_and_follows_the_allowed_list()
+    {
+        await using var x = await SetupAsync();
+        var agent = await RegisterAsync(x, x.BobClient); // 默认远程名单：除主人外的管理员
+        await using var hub = await OnlineAsync(x, agent);
+        var url = $"/api/devices/{agent.DeviceId}";
+
+        // 不在远程名单里的人、孩子：勾不上
+        Assert.Equal(HttpStatusCode.BadRequest, (await x.BobClient.PatchJsonAsync(url, new { trustedControllers = new[] { x.Carol.Id } })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await x.BobClient.PatchJsonAsync(url, new { trustedControllers = new[] { x.Kid.Id } })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await x.BobClient.PatchJsonAsync(url, new { trustedControllers = new[] { Guid.NewGuid() } })).StatusCode);
+        Assert.Empty(Assert.Single(await DevicesAsync(x.BobClient)).TrustedControllers!);
+
+        // 同一次保存里先加进远程名单、再勾免同意
+        var both = await (await x.BobClient.PatchJsonAsync(url, new { allowedControllers = new[] { x.Carol.Id, x.AdminId }, trustedControllers = new[] { x.Carol.Id, x.Carol.Id } })).ReadAsync<DeviceDto>();
+        Assert.Equal([x.Carol.Id], both.TrustedControllers);
+
+        // 只有主人或管理员能改：Carol 能远程，但不能给自己（或别人）开免同意
+        Assert.Equal(HttpStatusCode.Forbidden, (await x.CarolClient.PatchJsonAsync(url, new { trustedControllers = new[] { x.Carol.Id, x.AdminId } })).StatusCode);
+        var byAdmin = await (await x.Admin.PatchJsonAsync(url, new { trustedControllers = new[] { x.Carol.Id, x.AdminId } })).ReadAsync<DeviceDto>();
+        Assert.Equal([x.Carol.Id, x.AdminId], byAdmin.TrustedControllers);
+
+        // 被移出远程名单（这次没提免同意名单）：也从免同意名单里出去；再加回远程名单不会自动回来
+        var removed = await (await x.BobClient.PatchJsonAsync(url, new { allowedControllers = new[] { x.AdminId } })).ReadAsync<DeviceDto>();
+        Assert.Equal([x.AdminId], removed.TrustedControllers);
+        await x.BobClient.PatchJsonAsync(url, new { allowedControllers = new[] { x.Carol.Id, x.AdminId } });
+        var carols = await StartAsync(x.CarolClient, agent.DeviceId);
+        Assert.Equal((RemoteSessionState.Pending, RemoteConsentType.Prompt), (carols.State, carols.Consent));
+        await x.CarolClient.PostAsync($"/api/remote/sessions/{carols.Id}/end", null);
+
+        // 被降为孩子：名单里还留着名字也不算数
+        Assert.Equal(HttpStatusCode.OK, (await x.Admin.PatchJsonAsync($"/api/family/members/{x.Carol.Id}", new { role = "Child" })).StatusCode);
+        await x.App.WithDbAsync(db => db.Devices.Where(d => d.Id == agent.DeviceId)
+            .ExecuteUpdateAsync(s => s.SetProperty(d => d.TrustedControllers, $"[\"{x.Carol.Id}\"]")));
+        Assert.Equal(HttpStatusCode.Forbidden, (await x.CarolClient.PostJsonAsync("/api/remote/sessions", new { targetDeviceId = agent.DeviceId, mode = "View" })).StatusCode);
+    }
+
+    [PgFact]
+    public async Task Leaving_the_trusted_list_ends_sessions_started_through_it_but_pin_changes_do_not()
+    {
+        await using var x = await SetupAsync();
+        var agent = await RegisterAsync(x, x.BobClient);
+        await using var hub = await OnlineAsync(x, agent);
+        var url = $"/api/devices/{agent.DeviceId}";
+        await x.BobClient.PatchJsonAsync(url, new { allowedControllers = new[] { x.Carol.Id, x.AdminId }, trustedControllers = new[] { x.Carol.Id }, pin = "246810" });
+
+        var session = await StartAsync(x.CarolClient, agent.DeviceId);
+        Assert.Equal((RemoteSessionState.Active, RemoteConsentType.Trusted), (session.State, session.Consent));
+        using (var ws = await ConnectControllerWsAsync(x.App, "carol", session.Id))
+        {
+            Assert.False(await ReceivePeerAsync(ws));
+            // 改 PIN、改名字、把别人加进免同意名单：和她这次会话无关
+            await x.BobClient.PatchJsonAsync(url, new { pin = "135791", name = "书房电脑", trustedControllers = new[] { x.Carol.Id, x.AdminId } });
+            Assert.Equal(RemoteSessionState.Active, (await (await x.CarolClient.GetAsync($"/api/remote/sessions/{session.Id}")).ReadAsync<RemoteSessionDto>()).State);
+
+            // 把她移出免同意名单（还在远程名单里）：正在进行的这次立即结束
+            await x.BobClient.PatchJsonAsync(url, new { trustedControllers = new[] { x.AdminId } });
+            Assert.Equal((WebSocketCloseStatus)RelayCloseCodes.Ended, (await ReceiveAsync(ws)).Close);
+        }
+        Assert.Equal("stopped", (await (await x.CarolClient.GetAsync($"/api/remote/sessions/{session.Id}")).ReadAsync<RemoteSessionDto>()).EndReason);
+        Assert.Equal(session.Id, (await hub.WaitAsync<AgentSessionEnded>(AgentHubEvents.SessionEnded)).SessionId);
+
+        // 之后她再发起：回到等同意
+        var asked = await StartAsync(x.CarolClient, agent.DeviceId);
+        Assert.Equal((RemoteSessionState.Pending, RemoteConsentType.Prompt), (asked.State, asked.Consent));
+        await x.CarolClient.PostAsync($"/api/remote/sessions/{asked.Id}/end", null);
+
+        // 中继每次连接都再看一遍（就算会话因为别的原因还没结束）：人不在免同意名单里了就连不回来
+        await x.BobClient.PatchJsonAsync(url, new { trustedControllers = new[] { x.Carol.Id } });
+        var again = await StartAsync(x.CarolClient, agent.DeviceId);
+        Assert.Equal(RemoteConsentType.Trusted, again.Consent);
+        await x.App.WithDbAsync(db => db.Devices.Where(d => d.Id == agent.DeviceId).ExecuteUpdateAsync(s => s.SetProperty(d => d.TrustedControllers, "[]")));
+        Assert.Contains("403", (await Assert.ThrowsAnyAsync<Exception>(() => ConnectControllerWsAsync(x.App, "carol", again.Id))).Message);
+    }
+
+    [PgFact]
     public async Task A_reconnecting_agent_is_told_about_sessions_it_missed()
     {
         await using var x = await SetupAsync();
