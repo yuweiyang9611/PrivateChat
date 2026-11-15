@@ -81,6 +81,8 @@ builder.Services.AddAuthentication(AuthSchemes.Smart)
         o.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
         o.ExpireTimeSpan = TimeSpan.FromDays(30);
         o.SlidingExpiration = true;
+        // 停用、改角色要马上生效，不能等 Cookie 过期
+        o.Events.OnValidatePrincipal = LocalCookieEvents.ValidatePrincipalAsync;
         o.Events.OnRedirectToLogin = c => { c.Response.StatusCode = 401; return Task.CompletedTask; };
         o.Events.OnRedirectToAccessDenied = c => { c.Response.StatusCode = 403; return Task.CompletedTask; };
     });

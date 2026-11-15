@@ -5,6 +5,7 @@ import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import DesktopLayout from '@/layouts/DesktopLayout.vue'
 import MobileLayout from '@/layouts/MobileLayout.vue'
 import LocalLoginPage from '@/features/auth/LocalLoginPage.vue'
+import AccessDeniedPage from '@/features/auth/AccessDeniedPage.vue'
 import UpdatePrompt from '@/components/UpdatePrompt.vue'
 import CallHost from '@/features/calls/CallHost.vue'
 import { useSessionStore } from '@/stores/session'
@@ -48,6 +49,8 @@ onMounted(() => {
 <template>
   <el-config-provider :locale="zhCn">
     <div v-if="session.loading" class="flex min-h-dvh items-center justify-center opacity-60">{{ $t('session.loading') }}</div>
+    <!-- 过了 Cloudflare Access 但邮箱不是家庭成员：说明原因，不显示密码登录页（那是局域网 / 本地模式用的） -->
+    <AccessDeniedPage v-else-if="session.accessDenied" />
     <LocalLoginPage v-else-if="!session.user" />
     <component :is="layout" v-else />
     <!-- 来电弹窗与通话界面：在任何页面都能接、能挂 -->

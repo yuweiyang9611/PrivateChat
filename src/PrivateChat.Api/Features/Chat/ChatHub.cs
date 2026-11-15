@@ -41,22 +41,42 @@ public static class ChatEvents
 public sealed class PresenceTracker
 {
     private readonly Dictionary<Guid, HashSet<string>> _connections = new();
+    /// <summary>每条连接怎么掐断（HubCallerContext.Abort）。</summary>
+    private readonly Dictionary<string, Action> _aborts = new();
     private readonly Lock _lock = new();
 
-    public bool Connected(Guid userId, string connectionId)
+    public bool Connected(Guid userId, string connectionId, Action? abort = null)
     {
         lock (_lock)
         {
             if (!_connections.TryGetValue(userId, out var set)) _connections[userId] = set = [];
             set.Add(connectionId);
+            if (abort is not null) _aborts[connectionId] = abort;
             return set.Count == 1;
         }
+    }
+
+    /// <summary>
+    /// 掐断该用户的所有连接（被停用、改了角色）：连接上的身份是连上那一刻的，不断开就一直沿用。
+    /// 客户端会自动重连，重连时按库里现在的状态重新认证——被停用的连不上，改了角色的拿到新角色。
+    /// </summary>
+    public void Kick(Guid userId)
+    {
+        List<Action> aborts;
+        lock (_lock)
+        {
+            aborts = _connections.TryGetValue(userId, out var set)
+                ? set.Select(id => _aborts.GetValueOrDefault(id)).OfType<Action>().ToList()
+                : [];
+        }
+        foreach (var abort in aborts) abort();
     }
 
     public bool Disconnected(Guid userId, string connectionId)
     {
         lock (_lock)
         {
+            _aborts.Remove(connectionId);
             if (!_connections.TryGetValue(userId, out var set)) return false;
             set.Remove(connectionId);
             if (set.Count > 0) return false;
@@ -84,7 +104,7 @@ public sealed class ChatHub(AppDbContext db, MessageService messages, PresenceTr
         var convs = await db.ConversationMembers.Where(m => m.UserId == userId).Select(m => m.ConversationId).ToListAsync();
         foreach (var c in convs) await Groups.AddToGroupAsync(Context.ConnectionId, ChatEvents.ConversationGroup(c));
 
-        if (presence.Connected(userId, Context.ConnectionId))
+        if (presence.Connected(userId, Context.ConnectionId, Context.Abort))
             await Clients.Others.SendAsync(ChatEvents.Presence, new { userId, online = true, lastSeenAt = (DateTimeOffset?)null });
         await base.OnConnectedAsync();
     }

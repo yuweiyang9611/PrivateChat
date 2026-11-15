@@ -478,6 +478,8 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 
 1. **Cloudflare Access（外门）**：在 Zero Trust 里给 `chat.example.com` 建一个 Access 应用，策略 = 允许家庭成员邮箱列表，登录方式用一次性邮箱验证码（One-time PIN），有条件再加 Google / GitHub 等。会话时长设为最长的 30 天，家人一个月只需验证一次。非家庭成员连应用的登录页都看不到。
 2. **应用身份（内门）**：Access 放行的每个请求都带 `Cf-Access-Jwt-Assertion` 头。api 用 Access 的 JWKS（`https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`）校验签名、`aud`（应用的 AUD Tag）和过期时间，取出邮箱；邮箱在成员表里则直接登录，在 `invites` 表里则自动建号，`ADMIN_EMAIL` 对应的邮箱自动成为 Admin。应用不存密码、不做登录页，SignalR、tus、媒体标签全部靠同源 Cookie（`CF_Authorization`）通过门禁。
+   - 过了外门但内门不认的邮箱（Access 策略比成员名单宽、还没邀请、已被停用）：api 回 401，正文带 `code: access_not_member` 和邮箱，前端显示"这个邮箱还不是家庭成员"说明页（再试一次 / 换一个邮箱登录），**不**显示局域网用的密码登录页。令牌本身校验不过则是 `code: access_invalid`。
+   - 带 Access 头的请求一律按 Access 身份认，密码登录接口在这条路上直接拒绝（403），不给公网留一个试密码的口子。
 
 **Agent 与非浏览器客户端**
 
@@ -492,6 +494,8 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 **角色与防护**
 
 - 角色：Admin（家长：成员管理、存储、远程策略）、Member、Child（不可远程、不可发外链、可见范围受限）。
+- 成员管理在"家庭"页：管理员邀请邮箱（同一邮箱再邀请是续期 / 改角色，不重复）、撤销没用过的邀请、改名字和角色、停用 / 恢复成员。自己的角色和停用不能自己改，保证至少有一个管理员。
+- 停用和改角色立即生效，不等重新登录：三种认证方式每个请求都以库里的成员状态为准（Access 按邮箱查、设备令牌按设备查、局域网 Cookie 每次请求核对并在角色变化时换发）；同时掐断该成员已建立的 SignalR 连接，页面重连时拿到新角色或被退回登录页 / "不是家庭成员"页。
 - 分享链接 `/s/{token}` 默认只对家庭成员有效。若要分享给家庭外的人，在 Access 里为 `chat.example.com/s` 单独建一个 Bypass 应用，由 ≥128 bit 的随机 token + 可选密码 + 过期时间兜底。
 - 其余：CSP、`X-Frame-Options`、上传 MIME 嗅探校验、文件路径只用 id 不用原名；WAF、速率限制、Bot 过滤由 Cloudflare 边缘托管，api 读 `CF-Connecting-IP` 作为真实来源 IP。
 - 磁盘加密交给宿主（BitLocker / LUKS），备份用 restic 加密。
@@ -858,7 +862,7 @@ Auth      GET  /api/auth/me（凭 Cf-Access-Jwt-Assertion 自动登录 / 建号�
           GET  /api/auth/reauth?returnUrl=（Access 过期后的重新验证跳板，只接受站内地址）
           POST /api/auth/device/code · /device/poll · /device/confirm      设备码登录
 Family    GET/PUT /api/family ; GET /api/family/members ; PATCH /api/family/members/{id}
-          POST /api/family/invites ; POST /api/family/join
+          GET/POST /api/family/invites ; DELETE /api/family/invites/{id}（撤销还没用的邀请） ; POST /api/family/join
 Chat      GET/POST /api/conversations ; GET /api/conversations/{id}/messages?beforeSeq=&afterSeq=&limit=
           PUT/DELETE /api/messages/{id} ; POST /api/messages/{id}/reactions
           POST /api/conversations/{id}/read                                  （发送走 SignalR）

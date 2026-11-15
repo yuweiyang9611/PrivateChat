@@ -22,9 +22,16 @@ const ACCESS = 'CloudflareAccess'
 
 export type LogoutResult = 'ok' | 'offline' | 'failed'
 
+/** 过了 Cloudflare Access 却进不了应用：邮箱不是家庭成员（没被邀请 / 已停用），或服务器校验不了 Access 身份 */
+export interface AccessDenied {
+  reason: 'not-member' | 'invalid'
+  email: string | null
+}
+
 /**
  * 当前登录用户。
  * 正常路径：身份来自 Cloudflare Access，/api/auth/me 自动登录 / 建号。
+ * 过了 Access 但邮箱不是家庭成员：/api/auth/me 返回带原因的 401，显示说明页（不是密码登录页）。
  * 备用路径（局域网直连 / 本地开发，没有 Access 头）：/api/auth/me 返回 401，显示密码登录页。
  * 离线冷启动：先用上次确认过的身份进入应用（读本地缓存），联网后再向服务器确认。
  */
@@ -34,6 +41,8 @@ export const useSessionStore = defineStore('session', () => {
   const error = ref<string | null>(null)
   /** 已确认未登录（401），需要显示本地登录页 */
   const unauthenticated = ref(false)
+  /** 经 Cloudflare Access 进来但进不了应用的原因；有值时显示说明页，不显示密码登录页 */
+  const accessDenied = ref<AccessDenied | null>(null)
   /** 当前身份来自本地缓存，还没和服务器确认过（离线启动） */
   const unverified = ref(false)
   /** 本页上一次确认过的用户：同一页里换人登录时，内存里还留着上一位的消息 */
@@ -42,15 +51,19 @@ export const useSessionStore = defineStore('session', () => {
   const isAdmin = computed(() => user.value?.role === 'Admin')
   const isChild = computed(() => user.value?.role === 'Child')
 
+  // 某个接口回了 401：向服务器问清原因再决定（被停用 / 不是成员 → 说明页；Access 会话没带上 → 重新验证；
+  // 局域网模式 Cookie 失效 → 密码登录页）。同时到的多个 401 只问一次
+  let rechecking: Promise<void> | null = null
   setUnauthorizedHandler(() => {
-    // Access 模式下 401 说明 Access 会话没带上：去边缘重新验证，而不是显示密码登录页
-    if (user.value?.authScheme === ACCESS && reauthenticate()) return
-    signedOut()
+    rechecking ??= verify(user.value).finally(() => {
+      rechecking = null
+    })
   })
 
   function signedOut(): void {
     user.value = null
     unauthenticated.value = true
+    accessDenied.value = null
     unverified.value = false
     forgetUser()
     void stopConnection()
@@ -92,6 +105,7 @@ export const useSessionStore = defineStore('session', () => {
     lastAccepted = u.id
     user.value = u
     unauthenticated.value = false
+    accessDenied.value = null
     unverified.value = false
     error.value = null
     void startConnection()
@@ -117,14 +131,21 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   async function verify(cached: UserDto | null): Promise<void> {
-    const { probe, user: fresh } = await fetchMe()
+    const { probe, user: fresh, email } = await fetchMe()
     switch (probe) {
       case 'ok':
         await accept(fresh!)
         break
       case 'unauthorized':
+        // Access 模式下没有正文的 401 说明 Access 会话没带上：去边缘重新验证，而不是显示密码登录页
         if (cached?.authScheme === ACCESS && reauthenticate()) break
         signedOut()
+        break
+      case 'not-member':
+      case 'access-invalid':
+        // 过了 Cloudflare Access 但进不了应用：说明原因。密码登录页是局域网 / 本地模式用的，这条路上登录不了
+        signedOut()
+        accessDenied.value = { reason: probe === 'not-member' ? 'not-member' : 'invalid', email: email ?? null }
         break
       case 'access-expired':
         if (reauthenticate()) break
@@ -139,9 +160,13 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
-  // 离线启动后连上了服务器：顺手确认一次身份（拿到最新资料，或发现会话已失效）
+  // 离线启动后连上了服务器：顺手确认一次身份（拿到最新资料，或发现会话已失效）。
+  // 断线后重新连上也确认一次：管理员改了我的角色或停用了我时，服务器会掐断连接，重连后这里拿到新角色（或发现已进不来）
+  let connectedBefore = false
   watch(connectionState, (s) => {
-    if (s === HubConnectionState.Connected && unverified.value && user.value) void verify(user.value)
+    if (s !== HubConnectionState.Connected || !user.value) return
+    if (unverified.value || connectedBefore) void verify(user.value)
+    connectedBefore = true
   })
 
   async function localLogin(usernameOrEmail: string, password: string): Promise<string | null> {
@@ -191,5 +216,5 @@ export const useSessionStore = defineStore('session', () => {
     return 'ok'
   }
 
-  return { user, loading, error, unauthenticated, unverified, isAdmin, isChild, load, localLogin, logout }
+  return { user, loading, error, unauthenticated, accessDenied, unverified, isAdmin, isChild, load, localLogin, logout }
 })

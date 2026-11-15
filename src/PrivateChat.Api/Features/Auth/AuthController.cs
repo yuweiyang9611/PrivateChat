@@ -79,6 +79,11 @@ public sealed class AuthController(AppDbContext db, DeviceTokenService deviceTok
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
     public async Task<ActionResult<UserDto>> LocalLogin([FromBody] LocalLoginRequest req, CancellationToken ct)
     {
+        // 经 Cloudflare 进来的请求一律按 Access 身份认（Smart 方案），这里签发的 Cookie 在那条路上根本不会被采用；
+        // 留着只会给过了 Access 的人（或拿着服务令牌的程序）一个从公网试密码的口子
+        if (Request.Headers.ContainsKey(AuthSchemes.AccessHeader))
+            return StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails { Title = "通过 Cloudflare 访问时不能用密码登录" });
+
         var key = req.UsernameOrEmail.Trim().ToLowerInvariant();
         var user = await db.Users.FirstOrDefaultAsync(u => (u.Email == key || u.Username == key) && u.DisabledAt == null, ct);
         if (user?.PasswordHash is null) return Unauthorized(new ProblemDetails { Title = "用户名或密码错误" });

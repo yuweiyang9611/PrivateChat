@@ -113,9 +113,9 @@ async function recover(): Promise<void> {
   if (!wanted) return
   const { probe } = await fetchMe()
   if (!wanted) return
-  if (probe === 'unauthorized') {
+  if (probe === 'unauthorized' || probe === 'not-member' || probe === 'access-invalid') {
     wanted = false
-    handleAuthLoss(probe)
+    handleAuthLoss('unauthorized')
     return
   }
   if (probe === 'access-expired') {

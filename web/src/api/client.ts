@@ -28,7 +28,7 @@ export function reauthenticate(): boolean {
   return true
 }
 
-/** 401 时的处理（由 session store 注册：Access 模式重新验证，局域网 / 本地模式回到密码登录页） */
+/** 401 时的处理（由 session store 注册：向服务器问清原因，再决定重新验证、显示"不是家庭成员"还是回到密码登录页） */
 let unauthorizedHandler: (() => void) | null = null
 export function setUnauthorizedHandler(h: (() => void) | null): void {
   unauthorizedHandler = h
@@ -66,15 +66,29 @@ export const api = createClient<paths>({
 
 api.use(authGuard)
 
-export type AuthProbe = 'ok' | 'unauthorized' | 'access-expired' | 'offline' | 'unreachable'
+export type AuthProbe = 'ok' | 'unauthorized' | 'not-member' | 'access-invalid' | 'access-expired' | 'offline' | 'unreachable'
+
+/** 经 Cloudflare Access 进来的 401 正文里的 code（后端 AccessProblemCodes）；局域网 / 本地模式的 401 没有正文 */
+async function accessRejection(res: Response): Promise<{ probe: AuthProbe; email?: string }> {
+  try {
+    const body = (await res.json()) as { code?: unknown; email?: unknown }
+    if (body.code === 'access_not_member') return { probe: 'not-member', email: typeof body.email === 'string' ? body.email : undefined }
+    if (body.code === 'access_invalid') return { probe: 'access-invalid' }
+  } catch {
+    // 没有正文：局域网 / 本地模式没登录
+  }
+  return { probe: 'unauthorized' }
+}
 
 /**
  * 查询当前身份并区分失败原因：
  * - offline：浏览器离线；unreachable：联网但服务器 / 隧道不通（或返回 5xx）；
- * - access-expired：被 Access 重定向；unauthorized：服务器明确 401。
+ * - access-expired：被 Access 重定向；unauthorized：服务器明确 401（局域网 / 本地模式没登录）；
+ * - not-member：过了 Access，但这个邮箱不是家庭成员、没被邀请或已停用（带 email）；
+ * - access-invalid：带了 Access 身份，但服务器校验不过（多半是配置问题）。
  * 不走 api 客户端，不触发 authGuard，由调用方决定怎么处理。
  */
-export async function fetchMe(): Promise<{ probe: AuthProbe; user?: UserDto }> {
+export async function fetchMe(): Promise<{ probe: AuthProbe; user?: UserDto; email?: string }> {
   if (!isOnline()) return { probe: 'offline' }
   let res: Response
   try {
@@ -88,7 +102,7 @@ export async function fetchMe(): Promise<{ probe: AuthProbe; user?: UserDto }> {
     return { probe: isOnline() ? 'unreachable' : 'offline' }
   }
   if (res.type === 'opaqueredirect') return { probe: 'access-expired' }
-  if (res.status === 401) return { probe: 'unauthorized' }
+  if (res.status === 401) return accessRejection(res)
   if (!res.ok) return { probe: 'unreachable' }
   try {
     return { probe: 'ok', user: (await res.json()) as UserDto }
