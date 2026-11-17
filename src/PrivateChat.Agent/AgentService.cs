@@ -36,6 +36,10 @@ public sealed class AgentService
     /// <summary>最近结束的会话：迟到的"开始"通知（同意之后对方立刻挂了、重连补发）不再开红条。</summary>
     private readonly Queue<Guid> _endedOrder = new();
     private readonly HashSet<Guid> _ended = [];
+    /// <summary>上一次记进日志的连接问题，和它之后又重复了几次。</summary>
+    private string? _lastProblem;
+    private int _sameProblem;
+    private string? _transportLogged;
 
     public AgentService(AgentOptions options, IAgentUi ui)
     {
@@ -97,6 +101,7 @@ public sealed class AgentService
             {
                 // 托盘菜单"重新设置"
                 _ui.ShowDeviceCode(null, null);
+                _ui.ShowConnectionProblem(null, null);
                 await StopRunnerAsync();
                 setupError = "";
             }
@@ -114,8 +119,41 @@ public sealed class AgentService
 
     private ServerInfo ServerFromConfig() => new(_config.ServerUrl, _config.AccessClientId, _config.AccessClientSecret, _config.DeviceToken);
 
+    /// <summary>
+    /// 连不上服务器：认出原因（加密握手失败的真正原因在异常的里层），写进日志。
+    /// 每 10 秒重试一次，同一个原因只在第一次记全，之后每 30 次（约 5 分钟）再记一次，免得把日志刷满。
+    /// </summary>
+    private ConnectionProblem Diagnose(string what, Exception ex)
+    {
+        var server = new Uri(_config.ServerUrl);
+        var problem = ConnectionDiagnosis.Describe(ex, server, TlsObserver.Take(), bundledTls: AgentTransport.ModeFor(server) == TlsMode.Bundled);
+        var signature = problem.Summary + problem.Technical;
+        if (signature != _lastProblem)
+        {
+            _lastProblem = signature;
+            _sameProblem = 0;
+        }
+        else if (++_sameProblem % 30 != 0)
+        {
+            return problem;
+        }
+        AgentLog.Warn($"{what}：{problem.Summary}。{problem.Advice}");
+        AgentLog.Warn($"  详细：{problem.Technical}");
+        return problem;
+    }
+
+    /// <summary>用哪一种加密连服务器：第一次用到、或者换了服务器时记一笔。</summary>
+    private void LogTransport()
+    {
+        var text = $"{_config.ServerUrl}：{AgentTransport.Describe(new Uri(_config.ServerUrl))}";
+        if (text == _transportLogged) return;
+        _transportLogged = text;
+        AgentLog.Info($"连接方式 {text}");
+    }
+
     private async Task RegisterAsync(CancellationToken ct)
     {
+        LogTransport();
         using var api = new ServerApi(ServerFromConfig());
         while (true)
         {
@@ -127,15 +165,19 @@ public sealed class AgentService
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
-                AgentLog.Warn($"申请设备码失败：{ex.Message}");
-                _ui.SetState(AgentState.Registering, "连不上服务器，10 秒后重试");
+                var problem = Diagnose("申请设备码失败", ex);
+                _ui.ShowConnectionProblem(problem, _config.ServerUrl);
+                _ui.SetState(AgentState.Registering, $"连不上服务器：{problem.Summary}（10 秒后重试）");
                 await Task.Delay(TimeSpan.FromSeconds(10), ct);
                 continue;
             }
+            _lastProblem = null;
+            _ui.ShowConnectionProblem(null, null);
             AgentLog.Info("已申请设备码，等待在网页上确认");
             _ui.ShowDeviceCode(code.Code, _config.ServerUrl);
             _ui.SetState(AgentState.Registering, "等待在网页上输入设备码");
             var deadline = DateTime.UtcNow.AddSeconds(code.ExpiresInSeconds - 5);
+            var pollFailing = false;
             while (DateTime.UtcNow < deadline)
             {
                 await Task.Delay(TimeSpan.FromSeconds(2), ct);
@@ -146,8 +188,17 @@ public sealed class AgentService
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
-                    AgentLog.Warn($"查询设备码状态失败：{ex.Message}");
+                    // 设备码窗口开着：原因写在窗口下面那行状态里
+                    var problem = Diagnose("查询设备码状态失败", ex);
+                    _ui.SetState(AgentState.Registering, $"连不上服务器：{problem.Summary}，正在重试");
+                    pollFailing = true;
                     continue;
+                }
+                if (pollFailing)
+                {
+                    pollFailing = false;
+                    _lastProblem = null;
+                    _ui.SetState(AgentState.Registering, "等待在网页上输入设备码");
                 }
                 if (poll is null || poll.Status == "expired") break;
                 if (poll is { Status: "approved", DeviceToken: { } token })
@@ -180,8 +231,12 @@ public sealed class AgentService
     {
         _server = ServerFromConfig();
         var server = _server;
+        LogTransport();
+        var serverUri = new Uri(server.Url);
+        // 系统没有 TLS 1.3 时：SignalR 的 HTTP 请求和 WebSocket 都经程序自带的 TLS 1.3（地址改成 http://，见 AgentTransport）
+        using var invoker = AgentTransport.CreateInvoker(serverUri);
         await using var hub = new HubConnectionBuilder()
-            .WithUrl(server.Url.TrimEnd('/') + "/hubs/agent", o =>
+            .WithUrl(AgentTransport.Address(new Uri(server.Url.TrimEnd('/') + "/hubs/agent")), o =>
             {
                 if (server.AccessClientId.Length > 0)
                 {
@@ -189,6 +244,38 @@ public sealed class AgentService
                     o.Headers["CF-Access-Client-Secret"] = server.AccessClientSecret;
                 }
                 o.AccessTokenProvider = () => Task.FromResult<string?>(server.DeviceToken);
+                if (invoker is not null)
+                {
+                    o.HttpMessageHandlerFactory = _ => AgentTransport.CreateHandler(serverUri);
+                    // 自己建 WebSocket：SignalR 默认的做法会走系统 TLS。请求头和令牌照它原来的样子带上
+                    o.WebSocketFactory = async (context, cancel) =>
+                    {
+                        var socket = new System.Net.WebSockets.ClientWebSocket();
+                        try
+                        {
+                            foreach (var (name, value) in context.Options.Headers) socket.Options.SetRequestHeader(name, value);
+                            if (context.Options.AccessTokenProvider is { } provider && await provider() is { Length: > 0 } token)
+                                socket.Options.SetRequestHeader("Authorization", $"Bearer {token}");
+                            await socket.ConnectAsync(context.Uri, invoker, cancel);
+                            return socket;
+                        }
+                        catch
+                        {
+                            socket.Dispose();
+                            throw;
+                        }
+                    };
+                }
+                else
+                {
+                    // 校验结果不变，只多记一下没通过校验的证书（连不上时好说清楚原因）
+                    o.HttpMessageHandlerFactory = handler =>
+                    {
+                        if (handler is HttpClientHandler h) h.ServerCertificateCustomValidationCallback = (_, cert, chain, errors) => TlsObserver.Validate(null, cert, chain, errors);
+                        return handler;
+                    };
+                    o.WebSocketConfiguration = ws => ws.RemoteCertificateValidationCallback = TlsObserver.Validate;
+                }
             })
             .AddJsonProtocol(o => o.PayloadSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()))
             .WithAutomaticReconnect(new RetryPolicy())
@@ -229,11 +316,13 @@ public sealed class AgentService
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
-                AgentLog.Warn($"连接服务器失败：{ex.Message}");
-                _ui.SetState(AgentState.Connecting, "连不上服务器，稍后自动重试");
+                // 已经添加过的电脑：断网、服务器重启都会到这里，不弹窗，原因写在托盘上
+                var problem = Diagnose("连接服务器失败", ex);
+                _ui.SetState(AgentState.Connecting, $"连不上服务器：{problem.Summary}");
                 await Task.Delay(TimeSpan.FromSeconds(10), ct);
             }
         }
+        _lastProblem = null;
         AgentLog.Info("已连接服务器，等待远程请求");
         _ui.SetState(AgentState.Online, "在线");
         await ReportAsync(hub);

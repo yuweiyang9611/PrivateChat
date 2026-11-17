@@ -28,6 +28,7 @@ public sealed class SessionRunner : IAsyncDisposable
 
     private readonly AgentSessionRequest _request;
     private readonly ServerInfo _server;
+    private readonly HttpMessageInvoker? _invoker;
     private readonly Func<IFrameSource> _sourceFactory;
     private readonly InputController _input;
     private readonly IAgentUi _ui;
@@ -64,6 +65,7 @@ public sealed class SessionRunner : IAsyncDisposable
     {
         _request = request;
         _server = server;
+        _invoker = AgentTransport.CreateInvoker(new Uri(server.Url));
         _sourceFactory = sourceFactory;
         _input = input;
         _ui = ui;
@@ -102,7 +104,8 @@ public sealed class SessionRunner : IAsyncDisposable
                 _server.Apply(socket.Options);
                 try
                 {
-                    await socket.ConnectAsync(_server.WebSocketUri($"/ws/remote/{Id}/agent"), ct);
+                    // 系统没有 TLS 1.3 时经程序自带的 TLS 1.3 连（_invoker 不为空）
+                    await socket.ConnectVia(_server.WebSocketUri($"/ws/remote/{Id}/agent"), _invoker, ct);
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {

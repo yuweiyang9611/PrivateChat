@@ -4,7 +4,9 @@
 // 覆盖：下载安装包、设备码添加（管理员替爸爸添加）、主人实时看到在线 / 被远程提醒、远程控制（自动同意）、
 // 画面像素、键鼠 / 滚轮 / 文字 / 特殊键 / 剪贴板、画质与切换显示器、结束与记录、只看模式不注入、拒绝、
 // 免同意名单（勾上后不经同意直接连、移出后立即结束）、移除电脑。
-// 前提：compose 栈已启动，装有 Edge；用法：cd web && node e2e/remote.cjs
+// 加 --agent-tls13：被控端不直连 compose 栈，而是经本机一个只收 TLS 1.3 的入口（e2e/tls13-proxy.cjs），
+// 并强制用程序自带的 TLS 1.3（Windows 10 上的做法）——同一套用例再跑一遍，另外断言三条连接都是 TLS 1.3。
+// 前提：compose 栈已启动，装有 Edge；用法：cd web && node e2e/remote.cjs [--agent-tls13]
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
@@ -15,6 +17,9 @@ const BASE = process.env.E2E_BASE || 'http://localhost:8080'
 const ROOT = path.resolve(__dirname, '../..')
 const COMPOSE = `docker compose -f "${path.resolve(ROOT, 'deploy/docker-compose.yml')}"`
 const AGENT = path.resolve(ROOT, 'src/PrivateChat.Agent/bin/Debug/net11.0-windows/PrivateChat.Agent.exe')
+const TLS13 = process.argv.includes('--agent-tls13')
+/** --agent-tls13 时：本机的 TLS 1.3 入口（被控端连它，它转给 compose 栈） */
+let tls = null
 const results = []
 function check(name, ok, detail) {
   results.push({ name, ok: !!ok })
@@ -45,10 +50,13 @@ async function login(page, who) {
 function startAgent(dir, consent, source = 'pattern') {
   fs.mkdirSync(dir, { recursive: true })
   const inputLog = path.join(dir, 'input.jsonl')
-  const args = ['--headless', '--server', BASE, '--data-dir', dir, '--name', 'E2E 测试电脑', '--consent', consent]
+  const args = ['--headless', '--server', tls ? tls.url : BASE, '--data-dir', dir, '--name', 'E2E 测试电脑', '--consent', consent]
   if (source === 'pattern') args.push('--source', 'pattern', '--dry-input', inputLog)
   else args.push('--dry-input', inputLog) // 真实屏幕也不注入真实键鼠
-  const proc = spawn(AGENT, args, { env: { ...process.env, PRIVATECHAT_AGENT_TEST: '1' } })
+  const env = { ...process.env, PRIVATECHAT_AGENT_TEST: '1' }
+  // 强制走程序自带的 TLS 1.3，只信任测试入口那张临时证书
+  if (tls) Object.assign(env, { PRIVATECHAT_AGENT_TLS: 'bundled', PRIVATECHAT_AGENT_TEST_CA: tls.cert })
+  const proc = spawn(AGENT, args, { env })
   const agent = { proc, out: '', inputLog }
   proc.stdout.on('data', (d) => { agent.out += d.toString() })
   proc.stderr.on('data', (d) => { agent.out += d.toString() })
@@ -90,6 +98,7 @@ async function moveOnCanvas(page, fx, fy) {
   let agent = null
   const cleanup = () => {
     try { agent?.proc.kill() } catch { /* 已退出 */ }
+    try { tls?.close() } catch { /* 已关 */ }
     // 数据目录里有（已吊销的）设备令牌：测完删掉
     for (const d of [dir, dir + '-real']) try { fs.rmSync(d, { recursive: true, force: true }) } catch { /* 进程还占着 */ }
   }
@@ -103,6 +112,7 @@ async function moveOnCanvas(page, fx, fy) {
   check('web 镜像里带着远程协助程序的安装包', head.ok && Number(head.headers.get('content-length')) > 10e6 && /attachment/.test(head.headers.get('content-disposition') ?? ''),
     { status: head.status, size: head.headers.get('content-length') })
 
+  if (TLS13) tls = await require('./tls13-proxy.cjs').start(BASE)
   agent = startAgent(dir, 'accept')
   const code = (await until(() => agent.out.match(/DEVICE-CODE: (\d{8})/)?.[1]))
   check('Agent 第一次运行申请到 8 位设备码', !!code, agent.out.slice(-300))
@@ -156,6 +166,20 @@ async function moveOnCanvas(page, fx, fy) {
   check('爸爸收到"正在被远程"的提醒', await bob.locator('.el-notification', { hasText: '正在控制你的电脑' }).waitFor({ timeout: 10000 }).then(() => true, () => false))
   check('爸爸的设备卡片上显示谁在远程', await bobCard.locator('[data-testid=device-session]', { hasText: '控制' }).waitFor({ timeout: 10000 }).then(() => true, () => false))
   check('Agent 显示红条', agent.out.includes('红条：正在被 admin 远程控制'))
+  if (tls) {
+    check('被控端用的是程序自带的 TLS 1.3（不是系统的）', /连接方式 https:\/\/localhost:\d+：程序自带的 TLS 1\.3（BouncyCastle \d+\.\d+/.test(agent.out), agent.out.match(/连接方式[^\r\n]*/)?.[0])
+    const all = [...tls.seen.requests, ...tls.seen.upgrades]
+    const paths = {
+      code: tls.seen.requests.some((r) => r.path === '/api/auth/device/code'),
+      negotiate: tls.seen.requests.some((r) => r.path === '/hubs/agent/negotiate'),
+      consent: tls.seen.requests.some((r) => /^\/api\/remote\/sessions\/[^/]+\/consent$/.test(r.path)),
+      hub: tls.seen.upgrades.some((u) => u.path === '/hubs/agent'),
+      video: tls.seen.upgrades.some((u) => u.path.startsWith('/ws/remote/')),
+    }
+    check('申请设备码、长连接、同意、远程画面通道都经过 TLS 入口，而且全是 TLS 1.3',
+      Object.values(paths).every(Boolean) && all.length > 0 && all.every((x) => x.tls === 'TLSv1.3'),
+      { ...paths, versions: [...new Set(all.map((x) => x.tls))], hosts: [...new Set(all.map((x) => x.host))] })
+  }
   const stats = await until(async () => {
     const t = await admin.locator('[data-testid=remote-stats]').textContent()
     const fps = Number(t.match(/(\d+) fps/)?.[1] ?? 0)

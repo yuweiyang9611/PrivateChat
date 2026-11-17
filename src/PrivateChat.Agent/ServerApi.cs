@@ -50,7 +50,12 @@ public sealed class ServerApi(ServerInfo server) : IDisposable
 {
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
 
-    private readonly HttpClient _http = new() { BaseAddress = new Uri(server.Url.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(20) };
+    // 系统有 TLS 1.3 时和默认的 HttpClient 一样（只多记一下没通过校验的证书）；没有时走程序自带的 TLS 1.3
+    private readonly HttpClient _http = new(AgentTransport.CreateHandler(new Uri(server.Url)))
+    {
+        BaseAddress = AgentTransport.Address(new Uri(server.Url.TrimEnd('/') + "/")),
+        Timeout = TimeSpan.FromSeconds(20),
+    };
 
     private HttpRequestMessage Request(HttpMethod method, string path, object? body = null, bool withToken = true)
     {
@@ -94,14 +99,10 @@ public sealed class ServerApi(ServerInfo server) : IDisposable
     private static async Task EnsureAsync(HttpResponseMessage res)
     {
         if (res.IsSuccessStatusCode) return;
-        var body = await res.Content.ReadAsStringAsync();
-        throw new ServerException(res.StatusCode, body.Length > 300 ? body[..300] : body);
+        // 正文可能是一整页 HTML（登录页、网关的报错页）：压成一行，日志和说明窗口里才看得清
+        var body = string.Join(' ', (await res.Content.ReadAsStringAsync()).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        throw new ServerException(res.StatusCode, body.Length > 200 ? body[..200] : body);
     }
 
     public void Dispose() => _http.Dispose();
-}
-
-public sealed class ServerException(HttpStatusCode status, string body) : Exception($"服务器返回 {(int)status}：{body}")
-{
-    public HttpStatusCode Status { get; } = status;
 }

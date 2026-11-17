@@ -459,6 +459,13 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 - 画质档位：流畅 = 最大 1280×800、20 fps、1.5 Mbps；清晰 = 最大 1920×1200、15 fps、4 Mbps。可选显示器（`SelectMonitor`），每块按虚拟桌面坐标换算输入。
 - 注入：`SendInput`（鼠标绝对坐标按虚拟桌面 0..65535 归一化，键盘用扫描码 + 扩展键标志，滚轮 120 一格）。
 - 锁屏 / UAC 提示在安全桌面上：每秒检查输入桌面，不是普通桌面就发 `Status(SecureDesktop)`，控制端显示原因，不推黑屏。
+- 网络：.NET 的 HttpClient / SignalR / ClientWebSocket，跟随系统代理。TLS 默认用 Windows 自带的 Schannel，但 **Windows 10 及更早没有 TLS 1.3**（Windows 11 / Server 2022 才有）：Cloudflare 区域的"最低 TLS 版本"设成 1.3 时，这些电脑用系统 TLS 在申请设备码这一步就连不上（浏览器自带 TLS，网页照常能开）。
+- 所以系统没有 TLS 1.3 时，Agent 改用**程序自带的 TLS 1.3**（`AgentTransport`，BouncyCastle），不要求服务器降到 TLS 1.2；Windows 11 照旧用系统的。环境变量 `PRIVATECHAT_AGENT_TLS=bundled|system` 可以强制（排查、测试用）。
+  - 只做最少的事：只说 TLS 1.3（服务器不收就连不上，不回退到 1.2）、不带客户端证书；**证书链和域名仍然交给 Windows / .NET 校验**（`X509Chain` + 系统受信任根证书、必须是服务器身份验证用途、`MatchesHostname`），和系统 TLS 同一套规则。
+  - 接法：.NET 对 `https://` 一定会自己套一层系统 TLS，所以这一路把地址改写成 `http://` / `ws://`，在 `SocketsHttpHandler.ConnectCallback` 里自己建连接（直连，或经系统代理 `CONNECT`）并握手，再把加密流交给 .NET；每个处理器只给一台服务器用，不跟随重定向。REST、SignalR（协商请求 + 自建 WebSocket）、远程画面的 WebSocket 三条连接都走它。BouncyCastle 的流是阻塞式的，包了一层让读和写各走各的（WebSocket 要一边等着读一边写）。
+  - 为什么选 BouncyCastle：纯托管代码（没有内存破坏这一类漏洞，也不用自己写原生互操作），官方 NuGet 包、MIT 许可、一直在维护；2.x 系列的已知漏洞只有 2024 年的 3 个中危（证书解析耗 CPU、Ed25519 死循环、TLS 1.2 RSA 密钥交换的计时侧信道），都在 2.3.1 修复，其中没有影响 TLS 1.3 客户端握手的。备选的 rustls 核心更受推崇，但要随程序带原生 DLL、自己写一层非托管互操作——它 2026-10 的安全公告正是这一层的内存生命周期问题；OpenSSL 没有官方的 Windows 二进制。版本在 `Directory.Packages.props` 里固定，升级前看发布说明和安全公告。
+  - 测试：`web/e2e/remote.cjs --agent-tls13` 让 Agent 经本机一个只收 TLS 1.3 的入口（`e2e/tls13-proxy.cjs`，临时自签证书，Agent 靠只在测试模式生效的 `PRIVATECHAT_AGENT_TEST_CA` 信任它）把整套远程用例再跑一遍，并断言三条连接都是 TLS 1.3。
+- 连不上时说人话（`ConnectionDiagnosis`）：.NET 对握手失败只在最外层说一句"The SSL connection could not be established"，原因在异常链里层。Agent 把整条链认一遍，给出一句原因 + 该怎么办：系统不支持 TLS 1.3（强制用系统 TLS 时）、服务器不接受 TLS 1.3（用自带 TLS 时）、证书是别的网站的（要先登录的 Wi-Fi）、证书不受信任（HTTPS 扫描，带颁发者）、电脑时间不对、域名解析失败、系统代理没放行、服务令牌失效（403 / 回来的是登录页）等。添加到家庭时连不上会弹出说明窗口（可复制给管理员的详细信息：异常链、系统版本、是否走代理、证书），已添加的电脑只把原因写在托盘上；同一个原因在日志里只记一次全的，之后约 5 分钟一次。
 - 自动化测试：`--headless --source pattern --dry-input FILE --consent accept`（测试画面、键鼠写日志，accept 需要 `PRIVATECHAT_AGENT_TEST=1`）；`--selftest` 编 60 帧写出 Annex B 供 ffprobe 检查。
 - v1 明确接受的限制：无法操作 UAC 提示和锁屏、发不了 Ctrl+Alt+Del（需要 SYSTEM 服务 + 桌面切换）、注入不到管理员权限的窗口（UIPI）、无音频、Windows N 版要装媒体功能包。
 - v2：桌面复制（DXGI Desktop Duplication）+ 硬件编码（异步 MFT），SYSTEM 服务 + 用户会话助手进程解决 UAC / 锁屏 / Ctrl+Alt+Del。

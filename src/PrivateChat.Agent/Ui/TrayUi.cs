@@ -21,11 +21,14 @@ public sealed class TrayUi : IAgentUi, IDisposable
     private readonly NotifyIcon _tray;
     private readonly ToolStripMenuItem _status = new("正在启动") { Enabled = false };
     private readonly ToolStripMenuItem _showCode = new("显示设备码") { Visible = false };
+    private readonly ToolStripMenuItem _showProblem = new("为什么连不上…") { Visible = false };
     private readonly ToolStripMenuItem _disconnect = new("断开远程") { Visible = false };
     private readonly ToolStripMenuItem _autostart = new("开机自动启动");
     private readonly Dictionary<AgentState, Icon> _icons = [];
     private readonly HotkeyWindow _hotkey;
     private DeviceCodeForm? _codeForm;
+    private ProblemForm? _problemForm;
+    private ConnectionProblem? _problem;
     private BannerForm? _banner;
     private AgentState _state = AgentState.Connecting;
 
@@ -51,6 +54,7 @@ public sealed class TrayUi : IAgentUi, IDisposable
 
         var menu = new ContextMenuStrip { Font = BodyFont };
         _showCode.Click += (_, _) => _codeForm?.ShowAndActivate();
+        _showProblem.Click += (_, _) => _problemForm?.ShowAndActivate();
         _disconnect.Click += (_, _) => DisconnectRequested?.Invoke();
         _autostart.Checked = SafeAutostart();
         _autostart.Click += (_, _) =>
@@ -75,12 +79,13 @@ public sealed class TrayUi : IAgentUi, IDisposable
         logs.Click += (_, _) => Process.Start(new ProcessStartInfo("explorer.exe", $"\"{_dataDir}\"") { UseShellExecute = true });
         var exit = new ToolStripMenuItem("退出");
         exit.Click += (_, _) => ExitRequested?.Invoke();
-        menu.Items.AddRange([_status, new ToolStripSeparator(), _showCode, _disconnect, _autostart, setup, logs, new ToolStripSeparator(), exit]);
+        menu.Items.AddRange([_status, new ToolStripSeparator(), _showCode, _showProblem, _disconnect, _autostart, setup, logs, new ToolStripSeparator(), exit]);
 
         _tray = new NotifyIcon { Icon = _icons[AgentState.Connecting], Text = "PrivateChat 远程协助", ContextMenuStrip = menu, Visible = true };
         _tray.DoubleClick += (_, _) =>
         {
-            if (_state == AgentState.Registering) _codeForm?.ShowAndActivate();
+            if (_problemForm is not null) _problemForm.ShowAndActivate();
+            else if (_state == AgentState.Registering) _codeForm?.ShowAndActivate();
         };
 
         _hotkey = new HotkeyWindow(() => DisconnectRequested?.Invoke());
@@ -170,7 +175,7 @@ public sealed class TrayUi : IAgentUi, IDisposable
         var text = state switch
         {
             AgentState.NeedsSetup => "未设置",
-            AgentState.Registering => "等待添加到家庭",
+            AgentState.Registering => _problem is null ? "等待添加到家庭" : $"连不上服务器：{_problem.Summary}",
             AgentState.Connecting => detail,
             AgentState.Online => "在线，可以接受远程协助",
             _ => detail,
@@ -180,6 +185,29 @@ public sealed class TrayUi : IAgentUi, IDisposable
         _tray.Text = tip.Length > 63 ? tip[..63] : tip;
         _disconnect.Visible = state == AgentState.InSession;
         _codeForm?.SetStatus(state == AgentState.Registering ? detail : "");
+    });
+
+    public void ShowConnectionProblem(ConnectionProblem? problem, string? serverUrl) => Ui(() =>
+    {
+        var changed = problem?.Summary != _problem?.Summary;
+        _problem = problem;
+        if (problem is null)
+        {
+            _problemForm?.Dispose();
+            _problemForm = null;
+            _showProblem.Visible = false;
+            return;
+        }
+        if (_problemForm is null || _problemForm.IsDisposed)
+        {
+            _problemForm = new ProblemForm(_dataDir);
+            _problemForm.ResetRequested += () => SetupRequested?.Invoke();
+            changed = true;
+        }
+        _problemForm.Set(problem, serverUrl ?? "");
+        _showProblem.Visible = true;
+        // 每 10 秒重试一次：只在原因第一次出现（或变了）时弹到前面，之后悄悄更新，不打扰
+        if (changed) _problemForm.ShowAndActivate();
     });
 
     public Task<bool?> AskConsentAsync(AgentSessionRequest request, CancellationToken ct)
@@ -394,6 +422,95 @@ public sealed class TrayUi : IAgentUi, IDisposable
         }
 
         // 关掉只是藏起来，托盘菜单"显示设备码"还能打开
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                Hide();
+            }
+            base.OnFormClosing(e);
+        }
+    }
+
+    /// <summary>添加到家庭时连不上服务器：一句原因、该怎么办、给管理员看的详细信息（能复制）。程序在后台一直重试，连上了这个窗口自己关。</summary>
+    private sealed class ProblemForm : Form
+    {
+        private readonly Label _summary = TrayUi.Text("", new Font("Microsoft YaHei UI", 12f, FontStyle.Bold), Danger);
+        private readonly Label _advice = TrayUi.Text("");
+        private readonly Label _server = TrayUi.Text("", color: Color.Gray);
+        private readonly TextBox _technical = new()
+        {
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Vertical,
+            Font = new Font("Microsoft YaHei UI", 9f),
+            ForeColor = Color.DimGray,
+            BackColor = Color.FromArgb(0xF5, 0xF5, 0xF5),
+            BorderStyle = BorderStyle.FixedSingle,
+            Size = new Size(460, 96),
+            Margin = new Padding(0, 0, 0, 10),
+            TabStop = false,
+        };
+        private string _report = "";
+        public event Action? ResetRequested;
+
+        public ProblemForm(string dataDir)
+        {
+            Text = "PrivateChat 远程协助 · 连不上服务器";
+            Font = BodyFont;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = MinimizeBox = false;
+            StartPosition = FormStartPosition.CenterScreen;
+            AutoSize = true;
+            AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            Padding = new Padding(24);
+            BackColor = Color.White;
+
+            var col = Column();
+            col.Controls.Add(TrayUi.Text("这台电脑连不上家里的服务器", TitleFont));
+            col.Controls.Add(_summary);
+            col.Controls.Add(_advice);
+            col.Controls.Add(_server);
+            col.Controls.Add(TrayUi.Text("给管理员看的详细信息：", color: Color.Gray));
+            col.Controls.Add(_technical);
+            col.Controls.Add(TrayUi.Text("程序每 10 秒自动重试一次，连上之后这个窗口会自己关掉。", color: Color.Gray));
+            var copy = Button("复制详细信息", primary: true);
+            copy.Click += (_, _) =>
+            {
+                try { Clipboard.SetText(_report); }
+                catch (System.Runtime.InteropServices.ExternalException) { } // 别的程序正占着剪贴板
+            };
+            var reset = Button("重新设置");
+            reset.Click += (_, _) => ResetRequested?.Invoke();
+            var logs = Button("打开日志目录");
+            logs.Click += (_, _) => Process.Start(new ProcessStartInfo("explorer.exe", $"\"{dataDir}\"") { UseShellExecute = true });
+            col.Controls.Add(Buttons(copy, reset, logs));
+            Controls.Add(col);
+        }
+
+        public void Set(ConnectionProblem problem, string server)
+        {
+            _summary.Text = problem.Summary;
+            _advice.Text = problem.Advice;
+            _server.Text = server.Length > 0 ? $"服务器：{server}" : "";
+            _technical.Text = problem.Technical;
+            _report = string.Join(Environment.NewLine,
+                $"PrivateChat 远程协助 {AgentService.Version} 连不上服务器 {server}",
+                $"原因：{problem.Summary}",
+                problem.Advice,
+                $"详细：{problem.Technical}",
+                $"时间：{DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        }
+
+        public void ShowAndActivate()
+        {
+            Show();
+            WindowState = FormWindowState.Normal;
+            Activate();
+        }
+
+        // 关掉只是藏起来，托盘菜单"为什么连不上…"还能打开
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             if (e.CloseReason == CloseReason.UserClosing)

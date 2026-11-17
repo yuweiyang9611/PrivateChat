@@ -14,6 +14,9 @@ namespace PrivateChat.Agent;
 ///     --dry-input FILE     键鼠不注入系统，写到文件里
 ///     --consent accept|decline|ignore   自动回复远程请求（accept 需要环境变量 PRIVATECHAT_AGENT_TEST=1）
 /// PrivateChat.Agent.exe --selftest [out.h264] [--screen]   编码器自检
+/// 环境变量：
+///     PRIVATECHAT_AGENT_TLS=bundled|system   强制用程序自带的 TLS 1.3 / 系统的 TLS（默认：系统没有 TLS 1.3 时用自带的）
+///     PRIVATECHAT_AGENT_TEST_CA=FILE.pem     自带的 TLS 只信任这个根证书（只在 PRIVATECHAT_AGENT_TEST=1 时生效，自动化测试用）
 /// </summary>
 internal static class Program
 {

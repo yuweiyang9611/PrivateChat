@@ -17,6 +17,12 @@ public interface IAgentUi
 
     void SetState(AgentState state, string detail);
 
+    /// <summary>
+    /// 添加到家庭时连不上服务器：把原因和该怎么办告诉电脑前的人（null 收起——连上了，或用户要重新设置）。
+    /// 以前这时候什么窗口都没有，托盘里只写着"等待添加到家庭"，原因只在日志里。
+    /// </summary>
+    void ShowConnectionProblem(ConnectionProblem? problem, string? serverUrl);
+
     /// <summary>"XX 请求远程控制"：true 同意、false 拒绝、null 没回答（超时或请求被取消，ct 触发）。</summary>
     Task<bool?> AskConsentAsync(AgentSessionRequest request, CancellationToken ct);
 
@@ -61,6 +67,13 @@ public sealed class HeadlessUi(string dataDir, string? serverUrl, string consent
     {
         AgentLog.Info($"状态：{state} {detail}");
         File.WriteAllText(Path.Combine(dataDir, "state.txt"), state.ToString());
+    }
+
+    public void ShowConnectionProblem(ConnectionProblem? problem, string? server)
+    {
+        var path = Path.Combine(dataDir, "problem.txt");
+        if (problem is null) File.Delete(path);
+        else File.WriteAllLines(path, [problem.Summary, problem.Advice, problem.Technical]);
     }
 
     public Task<bool?> AskConsentAsync(AgentSessionRequest request, CancellationToken ct)

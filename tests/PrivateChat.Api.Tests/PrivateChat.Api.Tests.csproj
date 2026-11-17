@@ -18,6 +18,12 @@
     <ProjectReference Include="..\..\src\PrivateChat.Api\PrivateChat.Api.csproj" />
   </ItemGroup>
 
+  <!-- 被控端程序是 net11.0-windows 的 WinForms 程序，这个测试项目引用不了它。
+       其中"连不上服务器是什么原因"那一块是纯逻辑、只用到基础类库：直接把源文件编进来测。 -->
+  <ItemGroup>
+    <Compile Include="..\..\src\PrivateChat.Agent\ConnectionDiagnosis.cs" Link="Agent\ConnectionDiagnosis.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <Using Include="Xunit" />
   </ItemGroup>

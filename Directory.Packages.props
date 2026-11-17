@@ -5,6 +5,8 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageVersion Include="AspNetCore.HealthChecks.NpgSql" Version="9.0.0" />
+    <!-- 被控端程序自带的 TLS 1.3（Windows 10 没有系统级的 TLS 1.3）。安全相关的依赖：版本固定，升级前看发布说明和安全公告 -->
+    <PackageVersion Include="BouncyCastle.Cryptography" Version="2.7.0" />
     <PackageVersion Include="EFCore.NamingConventions" Version="10.0.1" />
     <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="11.0.0" />
     <PackageVersion Include="Microsoft.AspNetCore.SignalR.Client" Version="11.0.0" />
