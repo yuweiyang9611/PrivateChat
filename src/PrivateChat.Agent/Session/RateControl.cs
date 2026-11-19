@@ -1,6 +1,32 @@
 namespace PrivateChat.Agent.Session;
 
 /// <summary>
+/// 采集线程和声音线程眼里的"现在能发多少"。两条线路各有一个实现：
+/// 中继用 <see cref="NetworkEstimator"/>（靠每帧的确认），快速线路用 <see cref="RealtimeRateController"/>（靠接收端每秒的汇报）。
+/// </summary>
+public interface IRateController
+{
+    int TargetKbps { get; }
+    int MaxKbps { get; }
+    /// <summary>最近量到的往返时间。</summary>
+    int LastRttMs { get; }
+    /// <summary>线路本来的往返时间（还没量到是 0）。</summary>
+    int MinRttMs { get; }
+    /// <summary>发出去还没确认的帧数（不逐帧确认的线路恒为 0）。</summary>
+    int InFlight { get; }
+    void SetMax(int maxKbps);
+    void OnSent(uint ts, int bytes, long nowMs);
+    void OnSentUntracked(int bytes, long nowMs);
+    void Tick(long nowMs);
+    bool CanSend(long nowMs, int frameMs);
+    bool Stalled(long nowMs);
+    int ChangeBudget(long nowMs, bool sustained, int frameMs);
+    int Credit(long nowMs);
+    bool Idle(long nowMs);
+    void ForgetInFlight();
+}
+
+/// <summary>
 /// 按网络状况定码率，只靠控制端的回应（每帧画面的 FrameAck、探测包的 Pong）。弱网下不卡的关键在这里：
 /// - 码率预算：发出去的每个字节都按"目标码率"记账（<see cref="OnSent"/>），账上欠得多了就先不采新画面（<see cref="CanSend"/>）。
 ///   偶尔编出一个大帧，后果是接下来少发几帧，而不是在路上越堆越多、延迟越来越大。
@@ -14,7 +40,7 @@ namespace PrivateChat.Agent.Session;
 /// - 升：只有真的把码率用起来过（发过够大的帧）而且没有多等，才每秒往上试一步；画面一直不动时不升——没有证据。
 /// 线程：采集线程调 OnSent / CanSend / Tick，接收循环调 OnAck / OnProbe，声音线程调 OnSentUntracked。
 /// </summary>
-public sealed class NetworkEstimator
+public sealed class NetworkEstimator : IRateController
 {
     /// <summary>画面突然大变时，这一帧最多可以用掉这么多毫秒的码率（大了传得久，小了太糊）。</summary>
     public const int BurstMs = 350;

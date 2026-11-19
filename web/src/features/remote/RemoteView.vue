@@ -6,7 +6,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, Close, EditPen, FullScreen, Headset } from '@element-plus/icons-vue'
 import { useFamilyStore } from '@/stores/family'
 import { useRemoteStore } from '@/stores/remote'
-import { RemoteClient, webCodecsSupported, type AudioState, type LinkState, type RemoteStats } from './RemoteClient'
+import { RemoteClient, webCodecsSupported, type AudioState, type LineState, type LinkState, type RemoteStats } from './RemoteClient'
+import { realtimeSupported } from './RemoteRealtime'
 import { audioSupported } from './RemoteAudio'
 import { encode, Features, MAX_TEXT_BYTES, modifiersOf, normalizePoint, Quality, scanCodeOf, SpecialKey, StatusCode, utf8Length, WheelAccumulator, type MonitorInfo, type QualityPreset } from './protocol'
 import { formatKbps } from './format'
@@ -37,6 +38,13 @@ const features = ref(0)
 const SOUND_KEY = 'remote.sound'
 const sound = ref(loadSound())
 const audioState = ref<AudioState>('off')
+/**
+ * 画面和声音走哪条线路：快速（经 Cloudflare Realtime，不绕回家里的服务器）还是标准（经服务器中继）。
+ * 记在这台设备上，默认快速；快速线路接不上会自己回到标准。
+ */
+const LINE_KEY = 'remote.transport'
+const fast = ref(loadFast())
+const line = ref<LineState>('relay')
 /** 已经排上去播放的声音（采样点数、最近的峰值）：端到端测试靠它确认真的解出了声音 */
 const audioInfo = ref({ scheduled: 0, peak: 0 })
 const fullscreen = ref(false)
@@ -68,13 +76,24 @@ const soundTitle = computed(() => {
   if (!audioSupported() || audioState.value === 'unsupported') return t('remote.viewer.soundUnsupported')
   return ''
 })
+/** 对方的程序和这个浏览器都能走快速线路（服务器没配 Cloudflare Realtime 时对方不会声明支持） */
+const canFast = computed(() => (features.value & Features.Realtime) !== 0 && realtimeSupported())
 /** 对方电脑按网速把码率调到了档位上限的四成以下：告诉用户画面糊是因为网络 */
 const slow = computed(() => !!stats.value && stats.value.max > 0 && stats.value.target > 0 && stats.value.target < stats.value.max * 0.4)
 const oldAgent = computed(() => !!video.value && (features.value & Features.AdaptiveBitrate) === 0)
 const statsText = computed(() => {
   if (!video.value || !stats.value) return ''
-  return `${video.value.width}×${video.value.height} · ${stats.value.decoded} fps · ${formatKbps(stats.value.kbps)} · ${stats.value.rtt} ms`
+  const text = `${video.value.width}×${video.value.height} · ${stats.value.decoded} fps · ${formatKbps(stats.value.kbps)} · ${stats.value.rtt} ms`
+  return line.value === 'realtime' ? `${text} · ${t('remote.viewer.lineFastActive')}` : text
 })
+
+function loadFast(): boolean {
+  try {
+    return localStorage.getItem(LINE_KEY) !== 'relay'
+  } catch {
+    return true
+  }
+}
 
 function loadSound(): boolean {
   try {
@@ -129,6 +148,7 @@ watch(() => props.id, (id, old) => {
   video.value = null
   features.value = 0
   audioState.value = 'off'
+  line.value = 'relay'
   monitors.value = []
   stats.value = null
   blocked.value = null
@@ -152,6 +172,7 @@ function startClient(): void {
   if (!canvas.value) return
   audioState.value = 'off'
   audioInfo.value = { scheduled: 0, peak: 0 }
+  line.value = 'relay'
   const c = new RemoteClient(props.id, canvas.value, {
     state: (s) => (link.value = s),
     config: (v) => {
@@ -181,8 +202,15 @@ function startClient(): void {
     },
     unsupported: () => (unsupported.value = true),
     audio: (s) => (audioState.value = s),
+    line: (s, reason) => {
+      line.value = s
+      // 快速线路接不上、中途断了：画面已经自己回到标准线路，告诉用户一声
+      if (reason) toast('warning', t('remote.viewer.lineFallback', { reason }))
+    },
   })
   client = c
+  // 想走快速线路的话，等对方的程序报上来支持就自动去接
+  c.setTransport(fast.value)
   c.connect()
   void nextTick(() => stage.value?.focus())
 }
@@ -238,6 +266,17 @@ async function again(): Promise<void> {
 function setQuality(q: QualityPreset): void {
   quality.value = q
   client?.setQuality(q)
+}
+
+function setFast(value: boolean): void {
+  fast.value = value
+  try {
+    localStorage.setItem(LINE_KEY, value ? 'realtime' : 'relay')
+  } catch {
+    // 无痕窗口等存不了：这次会话里照样生效
+  }
+  client?.setTransport(value)
+  stage.value?.focus()
 }
 
 function selectMonitor(index: number): void {
@@ -463,7 +502,7 @@ watch(textOpen, (open) => {
       <div class="min-w-0 flex-1 truncate text-sm">
         <span class="font-medium">{{ session?.deviceName }}</span>
         <span v-if="session && !control" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #3a3530">{{ t('remote.viewer.viewOnly') }}</span>
-        <span v-if="statsText" class="ml-2 text-xs text-gray-400" data-testid="remote-stats">{{ statsText }}</span>
+        <span v-if="statsText" class="ml-2 text-xs text-gray-400" :data-line="line" data-testid="remote-stats">{{ statsText }}</span>
         <span v-if="slow" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #5c4514; color: #ffd98a" :title="t('remote.viewer.slowTitle', { target: formatKbps(stats!.target), max: formatKbps(stats!.max) })" data-testid="remote-slow">{{ t('remote.viewer.slow') }}</span>
         <span v-else-if="oldAgent" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #3a3530" :title="t('remote.viewer.oldAgentTitle')" data-testid="remote-old-agent">{{ t('remote.viewer.oldAgent') }}</span>
       </div>
@@ -471,6 +510,10 @@ watch(textOpen, (open) => {
         <el-radio-group :model-value="quality" size="small" @update:model-value="(q) => setQuality(q as QualityPreset)">
           <el-radio-button :value="Quality.Smooth" data-testid="remote-quality-smooth">{{ t('remote.viewer.smooth') }}</el-radio-button>
           <el-radio-button :value="Quality.Sharp" data-testid="remote-quality-sharp">{{ t('remote.viewer.sharp') }}</el-radio-button>
+        </el-radio-group>
+        <el-radio-group v-if="canFast" :model-value="fast" size="small" :title="t('remote.viewer.lineTitle')" @update:model-value="(v) => setFast(v as boolean)">
+          <el-radio-button :value="true" data-testid="remote-line-fast">{{ line === 'connecting' ? t('remote.viewer.lineConnecting') : t('remote.viewer.lineFast') }}</el-radio-button>
+          <el-radio-button :value="false" data-testid="remote-line-standard">{{ t('remote.viewer.lineStandard') }}</el-radio-button>
         </el-radio-group>
         <el-button v-if="video" size="small" :icon="Headset" :type="sound && canSound ? 'primary' : 'default'" :disabled="!canSound" :title="soundTitle" :data-audio="audioState" :data-scheduled="audioInfo.scheduled" :data-peak="audioInfo.peak.toFixed(3)" data-testid="remote-sound" @click="toggleSound">{{ soundLabel }}</el-button>
         <!-- 全屏时弹层要留在全屏元素里面，不能挂到 body 上 -->

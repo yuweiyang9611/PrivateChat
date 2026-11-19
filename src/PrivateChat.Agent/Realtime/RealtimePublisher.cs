@@ -72,6 +72,9 @@ public sealed class RealtimePublisher : IDisposable
 
     public bool Connected => _up;
 
+    private volatile int _state = (int)RealtimeLinkState.Connecting;
+    public RealtimeLinkState State => (RealtimeLinkState)_state;
+
     /// <summary>应对面的要求重发过多少个包（库重发的加上这里补发的）。</summary>
     public long Resent => _video.RetransmissionMetrics.PacketsRetransmitted + Interlocked.Read(ref _resentHere);
 
@@ -159,22 +162,28 @@ public sealed class RealtimePublisher : IDisposable
             case RTCPeerConnectionState.connected:
                 _up = true;
                 _connected.TrySetResult();
-                StateChanged?.Invoke(RealtimeLinkState.Connected);
+                Changed(RealtimeLinkState.Connected);
                 break;
             case RTCPeerConnectionState.disconnected:
-                StateChanged?.Invoke(RealtimeLinkState.Disconnected);
+                Changed(RealtimeLinkState.Disconnected);
                 break;
             case RTCPeerConnectionState.failed:
                 _up = false;
                 _connected.TrySetException(new InvalidOperationException("连接没建起来（ICE 或 DTLS 失败）"));
-                StateChanged?.Invoke(RealtimeLinkState.Failed);
+                Changed(RealtimeLinkState.Failed);
                 break;
             case RTCPeerConnectionState.closed:
                 _up = false;
                 _connected.TrySetException(new InvalidOperationException("连接已关闭"));
-                StateChanged?.Invoke(RealtimeLinkState.Closed);
+                Changed(RealtimeLinkState.Closed);
                 break;
         }
+    }
+
+    private void Changed(RealtimeLinkState state)
+    {
+        _state = (int)state;
+        StateChanged?.Invoke(state);
     }
 
     private void OnReport(System.Net.IPEndPoint remote, SDPMediaTypesEnum media, RTCPCompoundPacket report)

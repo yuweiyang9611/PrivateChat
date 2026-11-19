@@ -19,7 +19,9 @@ namespace PrivateChat.Agent;
 /// PrivateChat.Agent.exe --selftest [out.h264] [--screen]   编码器自检
 /// 环境变量：
 ///     PRIVATECHAT_AGENT_AUTOUPDATE=off        不自动升级（默认：服务器上的安装包比自己新就自动换，见 Updater）
+///     PRIVATECHAT_AGENT_REALTIME=off          不用快速线路（画面和声音只走服务器中继；默认：服务器配了 Cloudflare Realtime 就可以用，由控制端决定）
 ///     PRIVATECHAT_AGENT_TLS=bundled|system   强制用程序自带的 TLS 1.3 / 系统的 TLS（默认：系统没有 TLS 1.3 时用自带的）
+///     PRIVATECHAT_AGENT_TEST_RTP_DROP=0.02   快速线路上故意丢掉这个比例的画面包（只在 PRIVATECHAT_AGENT_TEST=1 时生效，自动化测试用）
 ///     PRIVATECHAT_AGENT_TEST_CA=FILE.pem     自带的 TLS 只信任这个根证书（只在 PRIVATECHAT_AGENT_TEST=1 时生效，自动化测试用）
 /// </summary>
 internal static class Program

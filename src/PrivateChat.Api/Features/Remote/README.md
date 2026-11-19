@@ -16,8 +16,11 @@
 
 Agent 和网页通过同一个中继传送画面、反馈和系统声音。Agent 的 `NetworkEstimator` 根据画面确认和探测包往返时间调整发送预算，`QualityPlanner` 根据画面变化选择 H.264 编码质量。网页开启声音后，Agent 从 Windows 默认播放设备采集并发送 Opus，关闭后释放设备。中继按原有转发规则处理这些帧。
 
+快速线路（被控端 0.8.0 起）：画面和声音可以不经中继，经 Cloudflare Realtime 从被控端到网页（键鼠等控制帧仍走中继）。`RemoteRealtimeService` 做信令：被控端 `…/realtime/publish` 交 offer 换 answer，网页 `…/realtime/pull` 拿 offer、`…/realtime/renegotiate` 交 answer，两边都先 `GET …/realtime` 问能不能用和 ICE 服务器。复用通话的 `CloudflareRealtimeClient`，Cloudflare 那边的会话和轨道记在内存里的 `RemoteRealtimeStore`，会话结束时经 `CallCleanupQueue` 关掉。被控端那一半在 `src/PrivateChat.Agent/Realtime`（`RealtimePublisher`、`H264Rtp`）和 `Session/RealtimeRateControl.cs`，网页那一半在 `web/src/features/remote/RemoteRealtime.ts`。设计见 docs/DESIGN.md 4.8 的"快速线路"。
+
 **验证入口**
 
 - `tests/PrivateChat.Api.Tests/Integration/RemoteTests.cs` 使用 PostgreSQL 和测试服务器的 WebSocket 验证会话与中继。`RemoteRateControlTests.cs` 覆盖弱网、慢解码、画质恢复和音量处理。
 - `web/e2e/remote.cjs` 使用 Edge 和本机无界面 Agent 验证测试画面、键鼠事件和 440 Hz 测试音，包含静音和恢复播放。
+- `RemoteTests` 里的 `Fast_line_*` 用 `FakeRealtime` 验证快速线路的接口、权限和清理；`H264RtpTests`、`RealtimeRateControlTests` 覆盖 RTP 分片和码率控制。`node e2e/remote.cjs --realtime` 用假 SFU（Edge）跑快速线路的完整流程。
 - 在 Windows 上启动测试 Compose 栈后，从 `web` 目录运行 `node e2e/remote-weak.cjs`，可测量三种模拟线路的实际帧率、延迟和最长画面停顿。`npm run e2e` 也会运行这组测试。

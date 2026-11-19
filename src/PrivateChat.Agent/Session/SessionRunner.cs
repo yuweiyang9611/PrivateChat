@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading.Channels;
 using PrivateChat.Agent.Audio;
 using PrivateChat.Agent.Input;
+using PrivateChat.Agent.Realtime;
 using PrivateChat.Agent.Ui;
 using PrivateChat.Agent.Video;
 using PrivateChat.Contracts.Remote;
@@ -21,6 +22,8 @@ namespace PrivateChat.Agent.Session;
 /// - 静止画面不编码（按 64×64 的块比较）。
 /// - 声音：控制端要求时（SetAudio）采这台电脑正在播放的声音，Opus 编码后和画面走同一条连接。
 /// - 断线（网络切换）30 秒内自动重连；服务端以 4001 关闭表示会话结束。
+/// - 快速线路：控制端要求时（SetTransport）把画面和声音改经 Cloudflare Realtime 发（<see cref="RealtimePublisher"/>），
+///   不再绕回家里的服务器；键鼠、剪贴板这些仍走上面那条连接。接不通、中途断了、控制端收不到，都自动回到中继。
 /// </summary>
 public sealed class SessionRunner : IAsyncDisposable
 {
@@ -42,6 +45,26 @@ public sealed class SessionRunner : IAsyncDisposable
     /// <summary>编码器不接受"按质量"时的老办法：变化停止后再补这么多帧，让固定码率的编码器把画质补上来。</summary>
     private const int FallbackRefineFrames = 8;
     private static readonly TimeSpan ReconnectWindow = TimeSpan.FromSeconds(30);
+
+    /// <summary>设成 off 就不用快速线路（画面和声音只走中继）。</summary>
+    public const string RealtimeSwitchVariable = "PRIVATECHAT_AGENT_REALTIME";
+    /// <summary>自动化测试用（只在 PRIVATECHAT_AGENT_TEST=1 时生效）：快速线路上故意丢掉这个比例的画面包，看重发管不管用。</summary>
+    public const string TestRtpDropVariable = "PRIVATECHAT_AGENT_TEST_RTP_DROP";
+    /// <summary>快速线路：发布之后这么久还没连上 Cloudflare 就算了。</summary>
+    private static readonly TimeSpan LineConnectTimeout = TimeSpan.FromSeconds(8);
+    /// <summary>接通之后控制端这么久还没说收到画面：它那边没接上，回中继。</summary>
+    private const int LineConfirmMs = 12_000;
+    /// <summary>控制端这么久没有汇报接收情况：它那边多半收不到了，回中继。</summary>
+    private const int LineSilenceMs = 10_000;
+    /// <summary>快速线路的连接断开这么久没恢复：回中继。</summary>
+    private const int LineDisconnectMs = 5_000;
+    /// <summary>
+    /// 快速线路上每条轨道至少隔这么久发一个包：Cloudflare 会回收 30 秒没有数据的轨道，
+    /// 而屏幕不动时本来一帧都不发、没声音时也不发声音包。
+    /// </summary>
+    private const int LineKeepAliveMs = 2_000;
+    /// <summary>只有一个 TOC 字节的 Opus 包（CELT 全频带、20 ms、双声道、没有数据）：解出来是静音，用来保活声音轨道。</summary>
+    private static readonly byte[] OpusSilence = [0xFC];
 
     private readonly AgentSessionRequest _request;
     private ServerInfo _server;
@@ -78,6 +101,31 @@ public sealed class SessionRunner : IAsyncDisposable
     private string? _clipboardText;
     /// <summary>正在写的剪贴板：之后的键鼠要等它写完（Ctrl+V 紧跟在剪贴板帧后面，不等就会粘出旧内容）。</summary>
     private Task _clipboardWrite = Task.CompletedTask;
+
+    /// <summary>服务器能用快速线路、这台电脑也没关掉它：在 VideoConfig 里告诉控制端，由它决定用不用。</summary>
+    private volatile bool _realtimeOffered;
+    private volatile bool _resendConfig;
+    /// <summary>已经接通的快速线路；null 表示画面和声音只走中继。</summary>
+    private volatile Line? _line;
+    private readonly Lock _lineGate = new();
+    private bool _lineStarting;
+    /// <summary>每次要接、要停都加一：进行到一半的那次据此知道自己作废了。</summary>
+    private int _lineAttempt;
+    /// <summary>第几次接通（发给控制端，它据此知道要重新拉流）。</summary>
+    private int _lineGeneration;
+    private long _lastLineKeyAt = -10_000;
+
+    private sealed class Line(RealtimePublisher publisher, RealtimeRateController rate, long readyAt)
+    {
+        public RealtimePublisher Publisher { get; } = publisher;
+        public RealtimeRateController Rate { get; } = rate;
+        public long ReadyAt { get; } = readyAt;
+        /// <summary>
+        /// 控制端说它已经在这条线路上收到画面了。在这之前画面两条线路都发、声音只走中继（控制端从中继切过去的那一两秒不黑屏、不重音）；
+        /// 之后画面和声音只走这条线路。
+        /// </summary>
+        public volatile bool Confirmed;
+    }
 
     private sealed class Connection(ClientWebSocket socket)
     {
@@ -123,6 +171,7 @@ public sealed class SessionRunner : IAsyncDisposable
         var ct = _cts.Token;
         var lastUp = DateTime.UtcNow;
         var delay = 500;
+        var probed = false;
         try
         {
             while (!ct.IsCancellationRequested)
@@ -170,6 +219,11 @@ public sealed class SessionRunner : IAsyncDisposable
                 AgentLog.Info($"远程数据通道已连接：{Id}{(_server.IsDirect ? "（局域网直连）" : "")}");
                 var connection = new Connection(socket);
                 _connection = connection;
+                if (!probed)
+                {
+                    probed = true;
+                    _ = ProbeRealtimeAsync(ct);
+                }
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 var sender = SendLoopAsync(connection, linked.Token);
                 var stats = StatsLoopAsync(linked.Token);
@@ -269,6 +323,8 @@ public sealed class SessionRunner : IAsyncDisposable
         // 控制端被新标签页替换时，中继会直接通知新对端已连接。
         _audioOn = false;
         _input.ReleaseAll();
+        // 快速线路是上一个控制端要的：先回到中继，新来的想用会再说
+        StopRealtime(null);
         if (connected)
         {
             _announce = true;
@@ -323,6 +379,25 @@ public sealed class SessionRunner : IAsyncDisposable
                 if (_audioOn != a.On) AgentLog.Info(a.On ? "控制端要听这台电脑的声音，开始采集" : "控制端关了声音");
                 _audioOn = a.On;
                 return;
+            case ControlFrame.SetTransport t:
+                if (t.Transport == RemoteTransport.Realtime) StartRealtime();
+                else
+                {
+                    if (_line is not null) AgentLog.Info("控制端要求改回中继");
+                    StopRealtime(RemoteTransportState.Relay);
+                }
+                return;
+            case ControlFrame.ReceiverReport r:
+                if (_line is { } reported)
+                {
+                    if (!reported.Confirmed && r.Fps > 0)
+                    {
+                        reported.Confirmed = true;
+                        AgentLog.Info("控制端已经在快速线路上收到画面，画面和声音不再经中继");
+                    }
+                    reported.Rate.OnReceiverReport(r.LossPermille, r.ReceivedKbps, r.JitterBufferMs, r.RttMs, _clock.ElapsedMilliseconds);
+                }
+                return;
         }
 
         // 以下都是输入：只看模式下不执行（中继已经丢掉一遍，这里再防一道）
@@ -370,6 +445,189 @@ public sealed class SessionRunner : IAsyncDisposable
         }
     }
 
+    // ---- 快速线路：画面和声音经 Cloudflare Realtime，不经服务器中继 ----
+
+    /// <summary>问一次服务器这次远程能不能走快速线路；能的话补发一次 VideoConfig 告诉控制端。</summary>
+    private async Task ProbeRealtimeAsync(CancellationToken ct)
+    {
+        if (Environment.GetEnvironmentVariable(RealtimeSwitchVariable)?.Trim().ToLowerInvariant() is "off" or "0" or "false")
+        {
+            AgentLog.Info($"快速线路已用环境变量 {RealtimeSwitchVariable} 关闭，画面只走中继");
+            return;
+        }
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            using var api = new ServerApi(_server);
+            if (await api.GetRealtimeAsync(Id, timeout.Token) is not { Available: true }) return;
+            _realtimeOffered = true;
+            _resendConfig = true;
+        }
+        catch (Exception ex)
+        {
+            if (!ct.IsCancellationRequested) AgentLog.Warn($"问不到服务器有没有快速线路，这次只走中继：{ex.Message}");
+        }
+    }
+
+    private void StartRealtime()
+    {
+        int attempt;
+        lock (_lineGate)
+        {
+            if (_line is not null)
+            {
+                // 已经接通了（控制端可能没收到上一条通知）：再说一遍
+                Send(RemoteFrames.Transport(RemoteTransportState.Realtime, _lineGeneration));
+                return;
+            }
+            if (_lineStarting) return;
+            if (!_realtimeOffered)
+            {
+                Send(RemoteFrames.Transport(RemoteTransportState.RealtimeFailed, _lineGeneration, "服务器没有开快速线路"));
+                return;
+            }
+            _lineStarting = true;
+            attempt = ++_lineAttempt;
+        }
+        AgentLog.Info("控制端要走快速线路，开始接通");
+        _ = Task.Run(() => OpenRealtimeAsync(attempt));
+    }
+
+    private async Task OpenRealtimeAsync(int attempt)
+    {
+        RealtimePublisher? publisher = null;
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(20));
+            using var api = new ServerApi(_server);
+            var info = await api.GetRealtimeAsync(Id, timeout.Token);
+            if (info is not { Available: true }) throw new InvalidOperationException("服务器没有开快速线路");
+
+            publisher = new RealtimePublisher(info.IceServers);
+            if (TestDropRate() is > 0 and var drop) publisher.DropForTest = _ => Random.Shared.NextDouble() < drop;
+            var offer = await publisher.CreateOfferAsync();
+            var answer = await api.PublishRealtimeAsync(Id, new RemoteRealtimePublishRequest(offer, publisher.Tracks), timeout.Token);
+            publisher.SetAnswer(answer.Answer);
+            await publisher.WaitConnectedAsync(LineConnectTimeout, timeout.Token);
+
+            // 码率从中继那边估到的起步（至少是起步码率），之后按这条线路自己的情况调
+            var line = new Line(publisher, new RealtimeRateController(MinKbps, _net.MaxKbps, Math.Max(StartKbps, _net.TargetKbps)), _clock.ElapsedMilliseconds);
+            int generation;
+            lock (_lineGate)
+            {
+                if (attempt != _lineAttempt || !_peer)
+                {
+                    // 等的这会儿控制端走了、或者改主意了：这条连接不要了（finally 里收掉）
+                    if (attempt == _lineAttempt) _lineStarting = false;
+                    return;
+                }
+                publisher.KeyFrameRequested += OnLineKeyRequest;
+                publisher.ReceptionReported += r =>
+                {
+                    if (r.Video) line.Rate.OnUpstreamLoss(r.FractionLost, _clock.ElapsedMilliseconds);
+                };
+                publisher.StateChanged += state => OnLineState(line, state);
+                _lineStarting = false;
+                generation = _lineGeneration = (_lineGeneration + 1) & 0xFF;
+                _line = line;
+            }
+            publisher = null; // 归 _line 管了
+            Send(RemoteFrames.Transport(RemoteTransportState.Realtime, generation));
+            AgentLog.Info("快速线路已接通（经 Cloudflare Realtime），等控制端接上");
+            // 登记事件之前连接可能已经断了
+            if (line.Publisher.State is RealtimeLinkState.Failed or RealtimeLinkState.Closed) FailRealtime(line, "连接断开");
+        }
+        catch (Exception ex)
+        {
+            bool mine;
+            lock (_lineGate)
+            {
+                mine = attempt == _lineAttempt;
+                if (mine) _lineStarting = false;
+            }
+            if (!mine || _cts.IsCancellationRequested) return;
+            var reason = ex is OperationCanceledException ? "超时" : ex.Message;
+            if (reason.Length > 120) reason = reason[..120];
+            AgentLog.Warn($"快速线路没接通，画面继续走中继：{reason}");
+            Send(RemoteFrames.Transport(RemoteTransportState.RealtimeFailed, _lineGeneration, reason));
+        }
+        finally
+        {
+            publisher?.Dispose();
+        }
+    }
+
+    private static double TestDropRate()
+        => Environment.GetEnvironmentVariable("PRIVATECHAT_AGENT_TEST") == "1"
+            && double.TryParse(Environment.GetEnvironmentVariable(TestRtpDropVariable), System.Globalization.CultureInfo.InvariantCulture, out var rate) ? rate : 0;
+
+    /// <summary>
+    /// 不走快速线路了，画面和声音回到中继（采集线程发现线路变了会从关键帧开始）。
+    /// only 不为空时只在当前线路就是它时才停；state 不为空时告诉控制端。
+    /// </summary>
+    private void StopRealtime(RemoteTransportState? state, string reason = "", Line? only = null)
+    {
+        Line? line;
+        int generation;
+        lock (_lineGate)
+        {
+            if (only is not null && !ReferenceEquals(_line, only)) return;
+            _lineAttempt++; // 正在接的那次作废
+            _lineStarting = false;
+            line = _line;
+            _line = null;
+            generation = _lineGeneration;
+        }
+        // 关连接要一点时间，而且可能就是在它自己的回调里走到这儿的：换个线程关
+        if (line is not null) _ = Task.Run(line.Publisher.Dispose);
+        if (state is { } s) Send(RemoteFrames.Transport(s, generation, reason));
+    }
+
+    private void FailRealtime(Line line, string reason)
+    {
+        if (!ReferenceEquals(_line, line)) return;
+        AgentLog.Warn($"快速线路不能用了，画面改回中继：{reason}");
+        StopRealtime(RemoteTransportState.RealtimeFailed, reason, line);
+    }
+
+    private void OnLineState(Line line, RealtimeLinkState state)
+    {
+        switch (state)
+        {
+            case RealtimeLinkState.Failed or RealtimeLinkState.Closed:
+                FailRealtime(line, "连接断开");
+                break;
+            case RealtimeLinkState.Disconnected:
+                // 网络抖一下可能自己恢复：等几秒还没好再回中继
+                _ = Task.Delay(LineDisconnectMs, _cts.Token).ContinueWith(_ =>
+                {
+                    if (line.Publisher.State != RealtimeLinkState.Connected) FailRealtime(line, "连接断开超过 5 秒");
+                }, TaskContinuationOptions.OnlyOnRanToCompletion);
+                break;
+        }
+    }
+
+    private void OnLineKeyRequest()
+    {
+        // 对面会连着要好几次：半秒内只出一个关键帧
+        var now = _clock.ElapsedMilliseconds;
+        if (now - Interlocked.Read(ref _lastLineKeyAt) < 500) return;
+        Interlocked.Exchange(ref _lastLineKeyAt, now);
+        _keyRequested = true;
+    }
+
+    /// <summary>每半秒看一次快速线路还好不好：控制端一直没接上、或者很久没回报了，就回中继。</summary>
+    private void CheckRealtime()
+    {
+        if (_line is not { } line) return;
+        var now = _clock.ElapsedMilliseconds;
+        line.Rate.SetUpstreamRtt(line.Publisher.RoundTripMs);
+        if (!line.Confirmed && now - line.ReadyAt > LineConfirmMs) FailRealtime(line, "控制端没有接上快速线路");
+        else if (line.Confirmed && now - line.Rate.LastReportAt > LineSilenceMs) FailRealtime(line, "控制端很久没有回报接收情况");
+    }
+
     // ---- 统计、探测、剪贴板 ----
 
     private async Task StatsLoopAsync(CancellationToken ct)
@@ -381,6 +639,7 @@ public sealed class SessionRunner : IAsyncDisposable
         var bytesBefore = Interlocked.Read(ref _bytesSent);
         var tick = 0;
         var lastTarget = 0;
+        Line? lastLine = null;
         try
         {
             while (!ct.IsCancellationRequested)
@@ -394,6 +653,7 @@ public sealed class SessionRunner : IAsyncDisposable
                     foreach (var (sequence, sentAt) in _pings)
                         if (now - sentAt > 30_000) _pings.TryRemove(sequence, out _);
                     Ping();
+                    CheckRealtime();
                 }
                 if (++tick % 2 != 0) continue;
 
@@ -404,16 +664,24 @@ public sealed class SessionRunner : IAsyncDisposable
                 var bytes = Interlocked.Read(ref _bytesSent);
                 var seconds = Math.Max(0.001, (wall - wallBefore).TotalSeconds);
                 var cpuPercent = (int)((cpu - cpuBefore).TotalSeconds / seconds / Environment.ProcessorCount * 100);
-                var target = _net.TargetKbps;
+                // 画面走哪条线路，码率和往返时间就报哪条的
+                var line = _line is { Confirmed: true } confirmed ? confirmed : null;
+                IRateController net = line is not null ? line.Rate : _net;
+                if (!ReferenceEquals(line, lastLine))
+                {
+                    lastLine = line;
+                    lastTarget = 0;
+                }
+                var target = net.TargetKbps;
                 if (_peer)
                 {
                     // 往返时间：探测包量到的线路延迟；老版本网页不回探测包，就用最近一帧画面从发出到确认的时间
-                    var rtt = _lineRttMs > 0 ? _lineRttMs : _net.LastRttMs;
-                    Send(RemoteFrames.Stats(new StatsFrame((int)Math.Round((frames - framesBefore) / seconds), (int)((bytes - bytesBefore) * 8 / 1000 / seconds), cpuPercent, rtt, target, _net.MaxKbps)));
+                    var rtt = line is not null ? line.Rate.LastRttMs : _lineRttMs > 0 ? _lineRttMs : _net.LastRttMs;
+                    Send(RemoteFrames.Stats(new StatsFrame((int)Math.Round((frames - framesBefore) / seconds), (int)((bytes - bytesBefore) * 8 / 1000 / seconds), cpuPercent, rtt, target, net.MaxKbps)));
                     // 码率明显变了记一笔：事后看日志能知道当时网络怎么样
                     if (lastTarget == 0 || Math.Abs(target - lastTarget) > lastTarget / 3)
                     {
-                        AgentLog.Info($"网络：目标码率 {target} kbps（上限 {_net.MaxKbps}），线路往返 {_net.MinRttMs} ms");
+                        AgentLog.Info($"网络：目标码率 {target} kbps（上限 {net.MaxKbps}），线路往返 {net.MinRttMs} ms{(line is not null ? "（快速线路）" : "")}");
                         lastTarget = target;
                     }
                 }
@@ -465,6 +733,10 @@ public sealed class SessionRunner : IAsyncDisposable
         long? slowSince = null;
         long? fastSince = null;
         var secure = false;
+        Line? lastLine = null;
+        IRateController? lastNet = null;
+        var lastQuality = 0;
+        var nv12Valid = false;
         IReadOnlyList<ScreenInfo> announced = [];
         // 系统计时器默认 15.6 ms 一跳，Sleep(几毫秒) 会睡到下一跳：20 fps 实际只有 16。会话期间调到 1 ms
         var fineTimer = timeBeginPeriod(1) == 0;
@@ -508,20 +780,53 @@ public sealed class SessionRunner : IAsyncDisposable
                         if (!s) _keyRequested = true;
                     }
                 }
-                if (secure) continue;
+                if (secure)
+                {
+                    // 锁屏期间不采集。快速线路上隔一阵把锁屏前的那一帧再编一次发出去（内容没变，很小），不然轨道会被 Cloudflare 回收
+                    if (_line is { } held && encoder is not null && nv12Valid && now - lastSentAt >= LineKeepAliveMs)
+                    {
+                        var again = Math.Max((uint)now, lastTimestamp + 1);
+                        if (encoder.Encode(nv12, TimeSpan.FromMilliseconds(again)) is { } same)
+                        {
+                            lastTimestamp = again;
+                            held.Publisher.SendVideo(again, same.Data);
+                        }
+                        lastSentAt = now;
+                    }
+                    continue;
+                }
 
-                _net.Tick(now);
-                if (_net.Stalled(now))
+                // 快速线路接通后先两条线路都发画面；控制端确认在那边收到了，就只走快速线路，码率也改由它那套来定
+                var line = _line;
+                var lineOnly = line is { Confirmed: true };
+                IRateController net = lineOnly ? line!.Rate : _net;
+                if (!ReferenceEquals(line, lastLine))
+                {
+                    // 线路变了：新线路那头的解码器是空的，回到中继时那边也早就不同步了，都从关键帧开始
+                    lastLine = line;
+                    _keyRequested = true;
+                    if (line is null) _net.ForgetInFlight();
+                }
+                if (!ReferenceEquals(net, lastNet))
+                {
+                    // 码率改由另一条线路的那一套来定：之前那条线路"一直很慢"的结论不作数了，分辨率从头判断
+                    lastNet = net;
+                    weak = false;
+                    slowSince = fastSince = null;
+                }
+
+                net.Tick(now);
+                if (net.Stalled(now))
                 {
                     // 最早那帧十秒都没确认：控制端多半丢了它，从关键帧重新开始
-                    _net.ForgetInFlight();
+                    net.ForgetInFlight();
                     _keyRequested = true;
                 }
                 // 码率预算用完了、或者前面的帧还堵在路上：先不采，等一等（延迟不累积）
-                if (!_net.CanSend(now, frameMs)) continue;
+                if (!net.CanSend(now, frameMs)) continue;
 
                 // 网络持续很慢：流畅档降一档分辨率（见 WeakSize）
-                var target = _net.TargetKbps;
+                var target = net.TargetKbps;
                 slowSince = target < WeakBelowKbps ? slowSince ?? now : null;
                 fastSince = target > WeakAboveKbps ? fastSince ?? now : null;
                 if (!weak && slowSince is { } slow && now - slow >= 5000) weak = true;
@@ -540,10 +845,13 @@ public sealed class SessionRunner : IAsyncDisposable
                     planner = new QualityPlanner(width, height, preset.Ceiling);
                     changed = new bool[FrameTiles.Count(width, height)];
                     _net.SetMax(preset.MaxKbps);
-                    _net.ForgetInFlight();
+                    line?.Rate.SetMax(preset.MaxKbps);
+                    net.ForgetInFlight();
                     _current = screen;
                     hasPrevious = false;
-                    Send(RemoteFrames.VideoConfig(new VideoConfigFrame(RemoteVideoCodec.H264, width, height, preset.Fps, screen.Index, RemoteFeatures.Audio | RemoteFeatures.AdaptiveBitrate)));
+                    nv12Valid = false;
+                    _resendConfig = false;
+                    Send(RemoteFrames.VideoConfig(new VideoConfigFrame(RemoteVideoCodec.H264, width, height, preset.Fps, screen.Index, Features())));
                     if (_announce || !screens.SequenceEqual(announced))
                     {
                         Send(RemoteFrames.Monitors([.. screens.Select(s => new MonitorInfo(s.Index, s.Bounds.Width, s.Bounds.Height, s.IsPrimary))]));
@@ -554,6 +862,12 @@ public sealed class SessionRunner : IAsyncDisposable
                     AgentLog.Info($"编码 {width}x{height} {preset.Fps} fps，码率上限 {preset.MaxKbps} kbps，显示器 {screen.Index}" +
                         (shrink ? "（网络慢，降了分辨率）" : "") + (encoder.QualityMode ? "" : "（这台电脑的编码器不支持按质量，用固定码率）"));
                 }
+                else if (_resendConfig)
+                {
+                    // 刚问到服务器有快速线路：补发一次配置，控制端才知道可以切过去
+                    _resendConfig = false;
+                    Send(RemoteFrames.VideoConfig(new VideoConfigFrame(RemoteVideoCodec.H264, width, height, preset.Fps, screen.Index, Features())));
+                }
 
                 var frame = source.Capture(screen, width, height);
                 var length = frame.Stride * frame.Height;
@@ -562,26 +876,34 @@ public sealed class SessionRunner : IAsyncDisposable
                 var sustained = now - lastChangeAt < 300;
                 var refining = false;
                 var quality = 0;
+                // 快速线路上屏幕不动也要隔一阵发一帧（内容没变，编出来很小），不然 Cloudflare 会把这条轨道回收掉
+                var keepAlive = line is not null && now - lastSentAt >= LineKeepAliveMs;
+                var learn = true;
                 if (encoder.QualityMode)
                 {
                     if (key || changedTiles > 0)
                     {
-                        quality = planner.Plan(changed, changedTiles, key, sustained, _net.ChangeBudget(now, sustained && !key, frameMs), _net.Credit(now));
+                        quality = planner.Plan(changed, changedTiles, key, sustained, net.ChangeBudget(now, sustained && !key, frameMs), net.Credit(now));
                     }
-                    else
+                    else if (now - lastChangeAt >= 150 && net.InFlight == 0
+                        && planner.Refine(net.Credit(now), force: net.Idle(now) && now - lastSentAt >= 1000) is { } to)
                     {
                         // 画面停了：等前面的帧都确认了（线路是空的）再补清晰，一步一步来
-                        if (now - lastChangeAt < 150 || _net.InFlight > 0) continue;
-                        if (planner.Refine(_net.Credit(now), force: _net.Idle(now) && now - lastSentAt >= 1000) is not { } to) continue;
                         quality = to;
                         refining = true;
                     }
+                    else if (keepAlive)
+                    {
+                        quality = lastQuality;
+                        learn = false;
+                    }
+                    else continue;
                 }
                 else
                 {
-                    if (changedTiles == 0 && fallbackRefine <= 0 && !key) continue;
-                    fallbackRefine = changedTiles > 0 ? FallbackRefineFrames : fallbackRefine - 1;
-                    encoder.SetBitrate(Math.Clamp(_net.TargetKbps, MinKbps, preset.MaxKbps));
+                    if (changedTiles == 0 && fallbackRefine <= 0 && !key && !keepAlive) continue;
+                    fallbackRefine = changedTiles > 0 ? FallbackRefineFrames : Math.Max(0, fallbackRefine - 1);
+                    encoder.SetBitrate(Math.Clamp(net.TargetKbps, MinKbps, preset.MaxKbps));
                 }
                 if (changedTiles > 0)
                 {
@@ -594,32 +916,36 @@ public sealed class SessionRunner : IAsyncDisposable
                 var size = width * height * 3 / 2;
                 if (nv12.Length < size) nv12 = new byte[size];
                 Nv12.FromBgra(frame.Bgra, frame.Stride, width, height, nv12);
+                nv12Valid = true;
                 if (key)
                 {
                     _keyRequested = false;
                     encoder.RequestKeyFrame();
                 }
                 encoder.SetQuality(quality);
+                lastQuality = quality;
                 // 时间戳也是这一帧的编号：控制端按它确认，必须一帧比一帧大
                 var ts = Math.Max((uint)_clock.ElapsedMilliseconds, lastTimestamp + 1);
                 if (encoder.Encode(nv12, TimeSpan.FromMilliseconds(ts)) is not { } encoded) continue;
                 lastTimestamp = ts;
-                var payload = RemoteFrames.VideoFrame(ts, encoded.IsKey, encoded.Data);
-                if (encoder.QualityMode)
+                // 两条线路都按"中继上这一帧的大小"记账（6 字节帧头 + 数据），画质规划学到的东西换线路后还能用
+                var bytes = 6 + encoded.Data.Length;
+                if (encoder.QualityMode && learn)
                 {
-                    if (refining) planner.LearnRefine(quality, payload.Length);
-                    else planner.Learn(quality, changed, changedTiles, key || encoded.IsKey, sustained, payload.Length);
+                    if (refining) planner.LearnRefine(quality, bytes);
+                    else planner.Learn(quality, changed, changedTiles, key || encoded.IsKey, sustained, bytes);
                 }
-                if (!Send(payload))
+                line?.Publisher.SendVideo(ts, encoded.Data);
+                if (!lineOnly && !Send(RemoteFrames.VideoFrame(ts, encoded.IsKey, encoded.Data)))
                 {
                     // 发送队列满了（网络发不动）：这一帧丢了，后面的 P 帧解不出来，下一帧从关键帧开始
                     _keyRequested = true;
                     continue;
                 }
-                _net.OnSent(ts, payload.Length, now);
+                net.OnSent(ts, bytes, now);
                 lastSentAt = now;
                 Interlocked.Increment(ref _framesSent);
-                Interlocked.Add(ref _bytesSent, payload.Length);
+                Interlocked.Add(ref _bytesSent, bytes);
             }
         }
         catch (Exception ex)
@@ -637,10 +963,23 @@ public sealed class SessionRunner : IAsyncDisposable
         }
     }
 
+    private RemoteFeatures Features()
+        => RemoteFeatures.Audio | RemoteFeatures.AdaptiveBitrate | (_realtimeOffered ? RemoteFeatures.Realtime : RemoteFeatures.None);
+
     // ---- 声音（独立线程：采集是同步调用，10 ms 取一次）----
 
     private void AudioLoop()
     {
+        long lastLineAudioAt = -10_000;
+        // 快速线路上的声音轨道也要保活：没开声音、或者电脑上很久没声音时，隔一阵发一个静音包
+        void KeepLineAudioAlive()
+        {
+            var now = _clock.ElapsedMilliseconds;
+            if (_line is not { } line || now - lastLineAudioAt < LineKeepAliveMs) return;
+            lastLineAudioAt = now;
+            line.Publisher.SendAudio((uint)now, OpusSilence);
+        }
+
         IAudioSource? source = null;
         OpusPacketizer? opus = null;
         var leveler = new AudioLeveler();
@@ -656,6 +995,7 @@ public sealed class SessionRunner : IAsyncDisposable
         {
             while (!_cts.IsCancellationRequested)
             {
+                KeepLineAudioAlive();
                 if (!_audioOn || !_peer || _connection is null)
                 {
                     source?.Dispose();
@@ -703,14 +1043,27 @@ public sealed class SessionRunner : IAsyncDisposable
                         timestamp = timestamp == 0 || now - timestamp > 500 ? now : timestamp + AudioFormat.FrameMs;
                         leveler.Process(frame, peak);
                         opus ??= new OpusPacketizer(64000);
+                        // 控制端确认接上快速线路之后声音只走它；之前只走中继（两边同时放会听到两遍）
+                        var line = _line is { Confirmed: true } confirmed ? confirmed : null;
+                        IRateController net = line is not null ? line.Rate : _net;
                         // 网络慢的时候声音也省一点
-                        opus.Bitrate = _net.TargetKbps >= 800 ? 64000 : 32000;
+                        opus.Bitrate = net.TargetKbps >= 800 ? 64000 : 32000;
                         var written = opus.Encode(frame, packet);
-                        var payload = RemoteFrames.Audio((uint)timestamp, RemoteAudioCodec.Opus, AudioFormat.Channels, packet.AsSpan(0, written));
-                        if (Send(payload))
+                        if (line is not null)
                         {
-                            _net.OnSentUntracked(payload.Length, now);
-                            Interlocked.Add(ref _bytesSent, payload.Length);
+                            line.Publisher.SendAudio((uint)timestamp, packet.AsSpan(0, written).ToArray());
+                            lastLineAudioAt = now;
+                            net.OnSentUntracked(written, now);
+                            Interlocked.Add(ref _bytesSent, written);
+                        }
+                        else
+                        {
+                            var payload = RemoteFrames.Audio((uint)timestamp, RemoteAudioCodec.Opus, AudioFormat.Channels, packet.AsSpan(0, written));
+                            if (Send(payload))
+                            {
+                                net.OnSentUntracked(payload.Length, now);
+                                Interlocked.Add(ref _bytesSent, payload.Length);
+                            }
                         }
                     }
                     filled -= AudioFormat.FrameSamples;
@@ -734,6 +1087,7 @@ public sealed class SessionRunner : IAsyncDisposable
     {
         await _cts.CancelAsync();
         _input.ReleaseAll();
+        StopRealtime(null);
         if (_connection?.Socket is { State: WebSocketState.Open } socket)
         {
             try

@@ -10,7 +10,11 @@
 // 脚本先把 api 按直连地址重建，同一套用例再跑一遍，另外检查：先经公网拿到指纹再改成直连、直连端口只放行被控端、
 // 记下的指纹不对时不连（改走公网后拿到对的再换回来）、会话中途"离开家"（掐断直连）画面接着走公网、回到家又换回直连。
 // 被控端连的是脚本在直连端口前面放的一个 TCP 中转（TLS 原样透传），掐断它就是"离开家"。
-// 前提：compose 栈已启动，装有 Edge；用法：cd web && node e2e/remote.cjs [--agent-tls13] [--agent-direct]
+// 加 --realtime：快速线路——画面和声音经 Cloudflare Realtime（这里是本机的假 SFU，e2e/fake-sfu.cjs，用 Edge 起），不经我们的中继。
+// 脚本先把 api 指到假 SFU 上重建；网页默认选标准线路（原有用例照旧在中继上跑），中间插一段专门测快速线路：
+// 切过去之后画面 / 声音 / 键鼠、中继上不再有画面帧、故意丢包靠重发补上、掐断后自动回到标准线路再自动接回、手动切回。
+// 不加 --realtime 时被控端用 PRIVATECHAT_AGENT_REALTIME=off 关掉快速线路：api 配着真的 Cloudflare 也不会去连。
+// 前提：compose 栈已启动，装有 Edge；用法：cd web && node e2e/remote.cjs [--agent-tls13] [--agent-direct] [--realtime]
 // 对着另一套 compose 栈跑：E2E_BASE（网页地址）、E2E_COMPOSE（docker compose 命令，带 -p / -f）、E2E_DIRECT_PORT（api 直连端口发布在本机的端口）
 const fs = require('fs')
 const os = require('os')
@@ -24,6 +28,17 @@ const COMPOSE = process.env.E2E_COMPOSE || `docker compose -f "${path.resolve(RO
 const AGENT = path.resolve(ROOT, 'src/PrivateChat.Agent/bin/Debug/net11.0-windows/PrivateChat.Agent.exe')
 const TLS13 = process.argv.includes('--agent-tls13')
 const DIRECT = process.argv.includes('--agent-direct')
+const REALTIME = process.argv.includes('--realtime')
+/** --realtime 时：假 SFU 监听的端口，和让 api 连它的环境变量（和 calls.cjs 用的是同一组） */
+const SFU_PORT = Number(process.env.E2E_SFU_PORT || 8788)
+const FAKE_SFU_ENV = {
+  CF_REALTIME_BASE_URL: `http://host.docker.internal:${SFU_PORT}/v1`,
+  CF_REALTIME_APP_ID: 'e2e-app',
+  CF_REALTIME_APP_SECRET: 'e2e-secret',
+  CF_TURN_KEY_ID: 'e2e-turn',
+  CF_TURN_KEY_API_TOKEN: 'e2e-turn-token',
+}
+let sfu = null
 /** --agent-direct 时：api 直连端口在本机发布的端口，和被控端实际去连的中转端口 */
 const DIRECT_PORT = Number(process.env.E2E_DIRECT_PORT || 8443)
 const RELAY_PORT = Number(process.env.E2E_DIRECT_RELAY_PORT || DIRECT_PORT + 1)
@@ -109,7 +124,7 @@ function directRequest(method, pathname, headers = {}) {
 
 /** 按给定的直连地址重建 api 容器（空 = 不开直连），等它能用 */
 async function recreateApi(directUrl) {
-  const env = { ...process.env, REMOTE_AGENT_DIRECT_URL: directUrl, REMOTE_AGENT_DIRECT_BIND: `127.0.0.1:${DIRECT_PORT}` }
+  const env = { ...process.env, ...(REALTIME ? FAKE_SFU_ENV : {}), REMOTE_AGENT_DIRECT_URL: directUrl, REMOTE_AGENT_DIRECT_BIND: `127.0.0.1:${DIRECT_PORT}` }
   execSync(`${COMPOSE} up -d --no-deps api`, { env, stdio: 'ignore' })
   return until(async () => (await fetch(BASE + '/healthz').catch(() => null))?.ok, 90000, 500)
 }
@@ -122,6 +137,9 @@ function startAgent(dir, consent, source = 'pattern') {
   if (source === 'pattern') args.push('--source', 'pattern', '--dry-input', inputLog)
   else args.push('--dry-input', inputLog) // 真实屏幕也不注入真实键鼠
   const env = { ...process.env, PRIVATECHAT_AGENT_TEST: '1' }
+  // 快速线路：只在 --realtime 时开；开的时候故意丢 2% 的画面包，看重发管不管用
+  if (REALTIME) env.PRIVATECHAT_AGENT_TEST_RTP_DROP = '0.02'
+  else env.PRIVATECHAT_AGENT_REALTIME = 'off'
   // 强制走程序自带的 TLS 1.3，只信任测试入口那张临时证书
   if (tls) Object.assign(env, { PRIVATECHAT_AGENT_TLS: 'bundled', PRIVATECHAT_AGENT_TEST_CA: tls.cert })
   const proc = spawn(AGENT, args, { env })
@@ -169,13 +187,14 @@ async function moveOnCanvas(page, fx, fy) {
   const cleanup = () => {
     try { agent?.proc.kill() } catch { /* 已退出 */ }
     try { tls?.close() } catch { /* 已关 */ }
+    try { void sfu?.close() } catch { /* 已关 */ }
     // 数据目录里有（已吊销的）设备令牌：测完删掉
     for (const d of [dir, dir + '-real']) try { fs.rmSync(d, { recursive: true, force: true }) } catch { /* 进程还占着 */ }
   }
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) process.on(signal, () => { cleanup(); process.exit(1) })
   // 测完把 api 还原成原来的配置（按 shell 里 / .env 的 REMOTE_AGENT_DIRECT_URL）
   const restoreApi = async () => {
-    if (!DIRECT) return
+    if (!DIRECT && !REALTIME) return
     await relay?.close()
     execSync(`${COMPOSE} up -d --no-deps api`, { stdio: 'ignore' })
   }
@@ -189,6 +208,10 @@ async function moveOnCanvas(page, fx, fy) {
     { status: head.status, size: head.headers.get('content-length') })
 
   if (TLS13) tls = await require('./tls13-proxy.cjs').start(BASE)
+  if (REALTIME) {
+    sfu = await require('./fake-sfu.cjs').startFakeSfu({ port: SFU_PORT, channel: 'msedge' })
+    if (!DIRECT) check('api 改连本机的假 SFU（当作 Cloudflare Realtime），能用', !!(await recreateApi('')), FAKE_SFU_ENV.CF_REALTIME_BASE_URL)
+  }
   if (DIRECT) {
     relay = startRelay(RELAY_PORT, DIRECT_PORT)
     await relay.open()
@@ -202,7 +225,23 @@ async function moveOnCanvas(page, fx, fy) {
   const opts = { viewport: { width: 1280, height: 900 }, locale: 'zh-CN', timezoneId: 'Asia/Shanghai' }
   const adminCtx = await browser.newContext(opts)
   const bobCtx = await browser.newContext(opts)
+  // 网页默认走快速线路；这里先都选成标准线路，原有用例在中继上跑，快速线路那一段自己点过去
+  const standardLine = (ctx) => ctx.addInitScript(() => {
+    try { if (!localStorage.getItem('remote.transport')) localStorage.setItem('remote.transport', 'relay') } catch { /* about:blank 上没有 localStorage */ }
+  })
+  await standardLine(adminCtx)
+  await standardLine(bobCtx)
   const admin = await adminCtx.newPage()
+  // 管理员这个页面的中继连接上收到了多少画面帧（0x02）、声音帧（0x08）：用来确认切到快速线路之后它们不再经中继
+  const relayed = { video: 0, audio: 0 }
+  admin.on('websocket', (ws) => {
+    if (!ws.url().endsWith('/controller')) return
+    ws.on('framereceived', ({ payload }) => {
+      if (!Buffer.isBuffer(payload)) return
+      if (payload[0] === 0x02) relayed.video++
+      if (payload[0] === 0x08) relayed.audio++
+    })
+  })
   const bob = await bobCtx.newPage()
   for (const [who, p] of [['admin', admin], ['bob', bob]]) p.on('pageerror', (e) => console.log(`  [${who} pageerror]`, String(e).slice(0, 200)))
   await login(admin, 'admin@example.com')
@@ -321,8 +360,97 @@ async function moveOnCanvas(page, fx, fy) {
   const netLog = agent.out.match(/网络：目标码率 (\d+) kbps（上限 (\d+)），线路往返 (\d+) ms/)
   check('被控端在按网络状况定码率（本机直连：往返很短，码率没有被压到最低）', !!netLog && Number(netLog[1]) >= 300 && Number(netLog[2]) === 2500 && Number(netLog[3]) < 200, netLog?.[0])
 
+  const lineSwitch = admin.locator('[data-testid=remote-line-fast]')
+  if (!REALTIME) {
+    check('被控端关掉了快速线路：网页上不出现线路开关', (await lineSwitch.count()) === 0 && agent.out.includes('快速线路已用环境变量'))
+  } else {
+    // ---- 快速线路：画面和声音经（假的）Cloudflare Realtime，不经我们的中继 ----
+    const statsLine = admin.locator('[data-testid=remote-stats]')
+    const lineNow = () => statsLine.getAttribute('data-line')
+    const fpsNow = async () => Number((await statsLine.textContent().catch(() => '')).match(/(\d+) fps/)?.[1] ?? 0)
+    check('对方的程序支持快速线路时出现线路开关；选的是标准线路时画面仍走中继',
+      await lineSwitch.waitFor({ timeout: 10000 }).then(() => true, () => false) && (await lineNow()) === 'relay' && !agent.out.includes('控制端要走快速线路'))
+
+    await lineSwitch.click()
+    const fast = await until(async () => (await lineNow()) === 'realtime', 25000)
+    check('切到快速线路：被控端发布、网页拉流，画面改从那边来', !!fast && agent.out.includes('快速线路已接通'),
+      { line: await lineNow(), agent: agent.out.match(/快速线路[^\r\n]*/g) })
+    const confirmed = await until(() => agent.out.includes('控制端已经在快速线路上收到画面'), 10000)
+    await sleep(1500) // 确认之前发出、还在路上的那几帧
+    const quietFrom = { ...relayed }
+    await sleep(2500)
+    check('控制端确认接上之后，中继上不再有画面帧和声音帧', !!confirmed && relayed.video === quietFrom.video && relayed.audio === quietFrom.audio,
+      { video: relayed.video - quietFrom.video, audio: relayed.audio - quietFrom.audio })
+    const fastColors = { tl: await pixel(admin, 0.25, 0.2), tr: await pixel(admin, 0.75, 0.2), bl: await pixel(admin, 0.25, 0.8), br: await pixel(admin, 0.75, 0.8) }
+    // 不看画布的像素尺寸：假 SFU 是把画面解出来重新编码再转发的，分辨率从小往大爬；真的 Cloudflare 原样转发
+    check('快速线路上的画面就是测试画面',
+      near(fastColors.tl, [255, 0, 0]) && near(fastColors.tr, [0, 255, 0]) && near(fastColors.bl, [0, 0, 255]) && near(fastColors.br, [255, 255, 255]),
+      { ...fastColors, size: await canvasSize(admin) })
+    const fastStats = await until(async () => ((await fpsNow()) >= 5 && (await statsLine.textContent()).includes('快速线路') ? statsLine.textContent() : null), 10000)
+    check('快速线路上持续出帧，工具栏标明走的是快速线路', !!fastStats, fastStats ?? (await statsLine.textContent()))
+    const heardFast = await until(async () => {
+      const a = await audioNow()
+      return a.state === 'playing' && a.peak > 0.05 ? a : null
+    }, 15000)
+    const playedAt = (await audioNow()).scheduled
+    await sleep(1500)
+    const playedLater = (await audioNow()).scheduled
+    check('快速线路上能听到对方电脑的声音（在放，不是静音）', !!heardFast && playedLater - playedAt > 24000, { heard: heardFast ?? (await audioNow()), played: playedLater - playedAt })
+    const inputsBefore = inputs(agent).length
+    await moveOnCanvas(admin, 0.3, 0.3)
+    await moveOnCanvas(admin, 0.6, 0.6)
+    const moved = await until(() => inputs(agent).length > inputsBefore, 5000)
+    check('走快速线路时键鼠照常（它们仍走中继）', !!moved)
+    const fastLog = await until(() => agent.out.match(/网络：目标码率 (\d+) kbps（上限 (\d+)），线路往返 \d+ ms（快速线路）/), 8000)
+    check('被控端改用快速线路自己的码率控制', !!fastLog && Number(fastLog[1]) >= 300 && Number(fastLog[2]) === 2500, fastLog?.[0])
+
+    // 假 SFU 那一头：被控端发来的画面在解；故意丢掉的 2% 的包靠重发补上了
+    const publisher = (await sfu.summary()).find((s) => s.published.length > 0 && s.state === 'connected')
+    const received = async () => (await sfu.stats(publisher.id)).inbound.find((t) => t.kind === 'video')
+    const sfuBefore = await received()
+    await sleep(3000)
+    const sfuAfter = await received()
+    // 重发管用的标志：对面要过包（NACK）、画面一直在解，而且没有因为缺包去要关键帧（PLI 没涨）。
+    // 不看分辨率：假 SFU 转码后发给网页的码率很低，被控端按"收到的比发出的少得多"降了码率，流畅档会跟着降一档分辨率
+    check('被控端发到 SFU 的画面一直在解；故意丢的包靠重发补上了，不用重新要关键帧',
+      sfuAfter.framesDecoded - sfuBefore.framesDecoded >= 20 && sfuAfter.nackCount > 0 && sfuAfter.pliCount === sfuBefore.pliCount && sfuAfter.frameWidth >= 960,
+      { decoded: sfuAfter.framesDecoded - sfuBefore.framesDecoded, nack: sfuAfter.nackCount, lost: sfuAfter.packetsLost, pli: [sfuBefore.pliCount, sfuAfter.pliCount], freezes: sfuAfter.freezeCount, size: `${sfuAfter.frameWidth}x${sfuAfter.frameHeight}` })
+
+    // 掐掉 SFU 上网页这一头的连接：网页收不到画面，自己回到标准线路并告诉用户；会话不断
+    const subscriber = (await sfu.summary()).find((s) => s.pulled > 0 && s.state === 'connected')
+    await sfu.drop(subscriber.id)
+    const fellBack = await until(async () => (await lineNow()) === 'relay', 20000)
+    const told = await admin.locator('.el-message', { hasText: '快速线路用不了' }).first().waitFor({ timeout: 5000 }).then(() => true, () => false)
+    const relayAgain = await until(async () => (await fpsNow()) >= 5, 10000)
+    const before = relayed.video
+    await sleep(1000)
+    check('快速线路断了：自动回到标准线路，提示一声，画面接着从中继来，会话不断',
+      !!fellBack && told && !!relayAgain && relayed.video > before && !(await admin.locator('[data-testid=remote-ended]').isVisible().catch(() => false)),
+      { fellBack: !!fellBack, told, relayFrames: relayed.video - before })
+    const backToFast = await until(async () => (await lineNow()) === 'realtime', 40000)
+    check('过一会儿自动重新接上快速线路', !!backToFast && (await until(async () => (await fpsNow()) >= 5, 10000)) !== null, { line: await lineNow() })
+
+    // 手动切回标准线路：被控端收掉快速线路，画面回到中继；后面的用例都在中继上跑
+    const mark = agent.out.length
+    await admin.locator('[data-testid=remote-line-standard]').click()
+    const standard = await until(async () => (await lineNow()) === 'relay' && agent.out.slice(mark).includes('控制端要求改回中继'), 10000)
+    const before2 = relayed.video
+    await sleep(1500)
+    check('手动切回标准线路：画面回到中继，不再去接快速线路',
+      !!standard && relayed.video > before2 && (await fpsNow()) >= 5 && !agent.out.slice(mark).includes('控制端要走快速线路'), { line: await lineNow(), relayFrames: relayed.video - before2 })
+    const soundBack = await until(async () => {
+      const a = await audioNow()
+      return a.state === 'playing' && a.peak > 0.1 ? a : null
+    }, 10000)
+    check('回到标准线路后声音也回到中继', !!soundBack, soundBack ?? (await audioNow()))
+    // 快速线路上因为码率低降过的分辨率，回到中继后按中继自己的情况重新判断
+    const fullSize = await until(async () => (await canvasSize(admin)) === '1280x720', 10000)
+    check('回到标准线路后画面是原来的 1280×720', !!fullSize, await canvasSize(admin))
+  }
+
   // 同一会话在另一个静音窗口接手，再回到原窗口。检查线上的声音帧，而非只看按钮。
   const mutedContext = await browser.newContext({ ...opts, storageState: await adminCtx.storageState() })
+  await standardLine(mutedContext)
   const muted = await mutedContext.newPage()
   await muted.addInitScript(() => localStorage.setItem('remote.sound', '0'))
   let audioPackets = 0
@@ -657,6 +785,7 @@ async function moveOnCanvas(page, fx, fy) {
 })().catch((e) => {
   console.error(e)
   for (const proc of agents) try { proc.kill() } catch { /* 已退出 */ }
-  if (DIRECT) try { execSync(`${COMPOSE} up -d --no-deps api`, { stdio: 'ignore' }) } catch { /* 还原不了就算了 */ }
+  if (DIRECT || REALTIME) try { execSync(`${COMPOSE} up -d --no-deps api`, { stdio: 'ignore' }) } catch { /* 还原不了就算了 */ }
+  try { void sfu?.close() } catch { /* 已关 */ }
   process.exit(1)
 })

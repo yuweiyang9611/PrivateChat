@@ -374,6 +374,170 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/remote/sessions/{id}/realtime": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["RemoteRealtimeInfo"];
+                        "application/json": components["schemas"]["RemoteRealtimeInfo"];
+                        "text/json": components["schemas"]["RemoteRealtimeInfo"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/remote/sessions/{id}/realtime/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["RemoteRealtimePublishRequest"];
+                    "text/json": components["schemas"]["RemoteRealtimePublishRequest"];
+                    "application/*+json": components["schemas"]["RemoteRealtimePublishRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["RemoteRealtimePublishResponse"];
+                        "application/json": components["schemas"]["RemoteRealtimePublishResponse"];
+                        "text/json": components["schemas"]["RemoteRealtimePublishResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/remote/sessions/{id}/realtime/pull": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["RemoteRealtimePullResponse"];
+                        "application/json": components["schemas"]["RemoteRealtimePullResponse"];
+                        "text/json": components["schemas"]["RemoteRealtimePullResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/remote/sessions/{id}/realtime/renegotiate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["RemoteRealtimeAnswerRequest"];
+                    "text/json": components["schemas"]["RemoteRealtimeAnswerRequest"];
+                    "application/*+json": components["schemas"]["RemoteRealtimeAnswerRequest"];
+                };
+            };
+            responses: {
+                /** @description No Content */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/push/vapid-public-key": {
         parameters: {
             query?: never;
@@ -4014,6 +4178,33 @@ export interface components {
         };
         /** @enum {unknown} */
         RemoteConsentType: "Prompt" | "Unattended" | "Trusted";
+        RemoteIceServer: {
+            urls: string[];
+            username?: null | string;
+            credential?: null | string;
+        };
+        RemoteRealtimeAnswerRequest: {
+            answer: string;
+        };
+        RemoteRealtimeInfo: {
+            available: boolean;
+            iceServers: components["schemas"]["RemoteIceServer"][];
+        };
+        RemoteRealtimePublishRequest: {
+            offer: string;
+            tracks: components["schemas"]["RemoteRealtimeTrack"][];
+        };
+        RemoteRealtimePublishResponse: {
+            answer: string;
+        };
+        RemoteRealtimePullResponse: {
+            offer: string;
+            tracks: components["schemas"]["RemoteRealtimeTrack"][];
+        };
+        RemoteRealtimeTrack: {
+            mid: string;
+            kind: string;
+        };
         RemoteSessionDto: {
             /** Format: uuid */
             id: string;

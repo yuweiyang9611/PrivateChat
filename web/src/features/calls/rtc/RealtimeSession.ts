@@ -65,7 +65,7 @@ function describe(d: RTCSessionDescription | null): SessionDescription {
 }
 
 /** 等 ICE 候选收集完再把 SDP 发出去（Cloudflare 的接口没有 trickle）；最多等 timeoutMs，不让慢的 STUN / TURN 拖住接通 */
-function gathered(pc: RTCPeerConnection, timeoutMs = 1000): Promise<void> {
+export function gathered(pc: RTCPeerConnection, timeoutMs = 1000): Promise<void> {
   if (pc.iceGatheringState === 'complete') return Promise.resolve()
   return new Promise((resolve) => {
     const done = (): void => {
