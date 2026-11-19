@@ -446,7 +446,8 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 **数据面**（帧格式定义在 `PrivateChat.Contracts`，浏览器那份在 `web/src/features/remote/protocol.ts`，详见附录 C）
 
 - WebSocket 二进制消息，一条一帧：1 字节类型 + 载荷。中继按消息转发、不解码不落盘，只看第一个字节：只看模式下丢掉控制端的输入帧（Agent 也再丢一遍）。对端连上 / 断开时中继给另一端发一条文本消息 `{"type":"peer","connected":…}`，Agent 据此开始 / 暂停采集。服务端 15 秒发一次 ping、30 秒收不到 pong 就断开（手机掉线、笔记本合盖没有 FIN，不设超时的话会话会一直挂着）。
-- 流控：每个视频帧带 Agent 的毫秒时间戳，控制端解码出来后回 `FrameAck`；未确认的超过 4 帧 Agent 就先不采，网络慢时自动降帧，延迟不累积（确认往返时间显示在控制端工具栏上）。中继"收一条发一条"，对端发不动时不再收，TCP 背压一路传回。
+- **弱网流控**。控制端解出画面后用 `FrameAck` 回传该帧的时间戳，收到 Agent 的 `Ping` 就立即回 `Pong`。Agent 分别估计线路往返时间和画面解码确认耗时，遇到持续排队就降低目标码率，线路恢复且画面需要时再逐步上调。画面和声音共用发送预算，预算用尽或有太多画面在途时暂停采集新画面。工具栏显示实际码率和往返时间，目标码率低于所选档位上限的四成时提示“网络较慢”。
+- **系统声音**。控制端从 `VideoConfig` 得知 Agent 支持声音，当浏览器能解码 Opus 且声音开关打开时发送 `SetAudio`。Agent 通过 WASAPI 环回采集 Windows 默认播放设备，以 48 kHz 双声道、每包 20 ms 编码 Opus，和画面走同一条 WebSocket。音频目标码率随网络调整为 32 或 64 kbps。持续静音时停止发包，关掉声音或控制端离线会释放采集设备。控制端用 `AudioDecoder` 解码、用 Web Audio 播放。开关默认打开，选择保存在本机浏览器里。浏览器限制自动播放时，点击声音按钮即可开始播放。
 - 控制端用 `VideoDecoder`（H.264，Annex B，codec 字符串取自关键帧里的 SPS，`optimizeForLatency`）解码到 canvas（object-fit: contain）；解码出错就丢掉解码器、请求关键帧。键盘按物理键位（`e.code` → 扫描码集合 1，0xE0xx 为扩展键；SendInput 按扫描码注入时 NumLock 是不带扩展的 0x45，Pause 发不了）发送，与两边的输入法、布局无关；中文等文字用"输入文字"框发 `Text` 帧（Agent 用 `KEYEVENTF_UNICODE`）。Mac 的 ⌘ 当 Ctrl 发。
 - 剪贴板：只在控制模式下同步，单次最多 1 MB（浏览器发送前截断在字符边界上）。控制端 Ctrl+V 时先把本机剪贴板的文字发过去再发按键，Agent 写好剪贴板之后才处理后面的键鼠（不然会粘出旧内容）；被控端会话开始后新复制的文字发回控制端（会话前剪贴板里已有的不发，可能是密码）。
 - 失焦、切到后台时控制端发 `ReleaseAll`；Agent 记住按下没松开的键和鼠标键，控制端断开、会话结束时全部松开。鼠标键按 `PointerEvent.buttons` 位图同步（同时按两个键也不会卡住一个）；点在画面外的黑边上不发点击；Mac 上按住 ⌘ 时的键浏览器不发 keyup，按下后立刻补松开。
@@ -455,9 +456,9 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 
 **Agent v1 实现**
 
-- 采集：GDI `BitBlt` / `StretchBlt`（HALFTONE 缩放）屏幕 DC 到 32 位 DIB，再把鼠标指针画进去；进程是 Per-Monitor V2 DPI 感知，全部物理像素。静止画面逐字节比较后不编码，变化停止后再补 8 帧让码率控制把画质补上来。
-- 编码：Media Foundation 软件 H.264 编码器（CLSID_CMSH264EncoderMFT，同步 MFT），NV12 输入（BT.709），Main profile、低延迟、无 B 帧、CBR、GOP 很长，关键帧在控制端连上、请求、切换显示器 / 画质时按需（`CODECAPI_AVEncVideoForceKeyFrame`），关键帧前总带 SPS / PPS。本机实测 1080p 每帧编码 2–3 ms，GDI 截屏（含缩放）约 30 ms。
-- 画质档位：流畅 = 最大 1280×800、20 fps、1.5 Mbps；清晰 = 最大 1920×1200、15 fps、4 Mbps。可选显示器（`SelectMonitor`），每块按虚拟桌面坐标换算输入。
+- GDI 用 `BitBlt` / `StretchBlt` 把屏幕按物理像素采到 32 位 DIB，使用 HALFTONE 缩放并画入鼠标指针。Agent 将画面分块比较，根据变化面积、最近几帧的实际大小和剩余预算选择编码质量。大面积变化先发出操作结果，画面停下后再用空闲带宽逐步补清文字。
+- Media Foundation 软件 H.264 编码器（`CLSID_CMSH264EncoderMFT`，同步 MFT）接收 NV12（BT.709），使用 Main profile、低延迟、无 B 帧。优先按质量编码，编码器不支持时退回固定码率。控制端连上、请求刷新或切换显示器 / 画质时发送关键帧，关键帧前带 SPS / PPS。
+- 流畅档最高 1280×800、20 fps、2.5 Mbps。目标码率连续 5 秒低于 400 kbps 时，分辨率上限降到 960×600，连续 10 秒高于 900 kbps 后恢复。清晰档最高 1920×1200、15 fps、6 Mbps，弱网时保留所选分辨率。换显示器用 `SelectMonitor`，输入坐标按所选屏幕换算。
 - 注入：`SendInput`（鼠标绝对坐标按虚拟桌面 0..65535 归一化，键盘用扫描码 + 扩展键标志，滚轮 120 一格）。
 - 锁屏 / UAC 提示在安全桌面上：每秒检查输入桌面，不是普通桌面就发 `Status(SecureDesktop)`，控制端显示原因，不推黑屏。
 - 网络：.NET 的 HttpClient / SignalR / ClientWebSocket，跟随系统代理。TLS 默认用 Windows 自带的 Schannel，但 **Windows 10 及更早没有 TLS 1.3**（Windows 11 / Server 2022 才有）：Cloudflare 区域的"最低 TLS 版本"设成 1.3 时，这些电脑用系统 TLS 在申请设备码这一步就连不上（浏览器自带 TLS，网页照常能开）。
@@ -479,8 +480,9 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
   - 入口只给被控端：直连端口上只放行 `/healthz` 和带设备令牌（Bearer）的远程接口（`/hubs/agent`、`/ws/remote`、`/api/remote/*`），网页、密码登录、Cookie 一律 404；客户端自带的转发头（X-Forwarded-*）丢掉。没有 Access 那道门，所以只该发布在局域网地址上。
   - 选路：每次连服务器先用 3 秒试一下直连（`/healthz`，不经系统代理），通了就 REST、SignalR、远程画面三条连接全走直连，不通走公网。走公网时网络一变（回到家、连上家里 Wi-Fi）或每分钟再试一次，通了就断开重连到直连（正在被远程、正在问同意时不换）。走直连时 SignalR 只重试两次，多半是离开家了，交给外层重新选路改走公网；会话中途直连断了，数据通道马上改走公网重连，不占 30 秒的重连窗口；回复同意、挂断经直连失败也改走公网再发一次。托盘上写"在线（局域网直连）"，日志记走的哪条路。
   - 控制端（浏览器）不受影响：从 `family.lolic.xyz` 打开的网页那一半仍经 Cloudflare；被控端这一半走局域网，家里宽带少跑一份画面。
-- 自动化测试：`--headless --source pattern --dry-input FILE --consent accept`（测试画面、键鼠写日志，accept 需要 `PRIVATECHAT_AGENT_TEST=1`）；`--selftest` 编 60 帧写出 Annex B 供 ffprobe 检查。
-- v1 明确接受的限制：无法操作 UAC 提示和锁屏、发不了 Ctrl+Alt+Del（需要 SYSTEM 服务 + 桌面切换）、注入不到管理员权限的窗口（UIPI）、无音频、Windows N 版要装媒体功能包。
+- 自动化测试使用 `--headless --source pattern --dry-input FILE --consent accept`（测试画面、440 Hz 测试音、键鼠写日志，accept 需要 `PRIVATECHAT_AGENT_TEST=1`）。`web/e2e/remote.cjs` 检查浏览器解出的音频及开关效果。弱网测试 `web/e2e/remote-weak.cjs` 使用带采集时间码的画面，在 300 kbps、1 Mbps 及单程延迟 150 ms 的 8 Mbps 线路上统计实际帧率、端到端延迟和最长停顿。
+- Agent 的 `--selftest` 编 60 帧并写出 Annex B 文件供 ffprobe 检查，另外打印编码器逐帧调整质量和本机播放设备环回采集的探测结果。
+- 当前限制包括 UAC 提示、锁屏、Ctrl+Alt+Del 和管理员权限窗口的输入。Windows N 版需要安装媒体功能包。
 - v2：桌面复制（DXGI Desktop Duplication）+ 硬件编码（异步 MFT），SYSTEM 服务 + 用户会话助手进程解决 UAC / 锁屏 / Ctrl+Alt+Del。
 - v3（可选）：WebRTC P2P（SIPSorcery）+ Cloudflare TURN，公网延迟再降 50–100 ms。
 
@@ -962,13 +964,15 @@ Agent 的通道 `/hubs/agent`（只认设备令牌）：
 
 | 类型 | 方向 | 载荷 |
 |---|---|---|
-| 0x01 VideoConfig | A→C | codec(u8：1 = H.264), width(u16), height(u16), fps(u8), monitor(u8) |
+| 0x01 VideoConfig | A→C | codec(u8：1 = H.264), width(u16), height(u16), fps(u8), monitor(u8), features(u8，位 0 表示系统声音，位 1 表示自适应码率) |
 | 0x02 VideoFrame | A→C | timestampMs(u32), isKey(u8), Annex B 字节（关键帧带 SPS / PPS） |
 | 0x03 Cursor | A→C | 预留（v1 指针直接画进画面） |
 | 0x04 Monitors | A→C | count(u8), [index(u8), width(u16), height(u16), isPrimary(u8)]… |
 | 0x05 Clipboard | 双向 | UTF-8 文本（≤ 1 MB） |
-| 0x06 Stats | A→C | fps(u8), kbps(u16), cpu(u8), rttMs(u16)，每秒一次 |
+| 0x06 Stats | A→C | fps(u8), kbps(u16), cpu(u8), rttMs(u16), targetKbps(u16), maxKbps(u16)，每秒一次 |
 | 0x07 Status | A→C | code(u8：0 正常 / 1 安全桌面 / 2 截屏失败 / 3 不支持), UTF-8 说明 |
+| 0x08 Audio | A→C | timestampMs(u32，与视频同一时钟), codec(u8，1 = Opus), channels(u8), Opus 数据 |
+| 0x09 Ping | A→C | sequence(u32)，测量线路往返时间 |
 | 0x10 MouseMove | C→A | x(f32 0..1), y(f32 0..1)（相对当前显示器） |
 | 0x11 MouseButton | C→A | button(u8：0 左 / 1 中 / 2 右 / 3 后退 / 4 前进), down(u8) |
 | 0x12 Wheel | C→A | dx(i16), dy(i16)（120 = 一格，向上 / 向右为正） |
@@ -980,5 +984,9 @@ Agent 的通道 `/hubs/agent`（只认设备令牌）：
 | 0x18 Text | C→A | UTF-8 文字（输入法打好的字，Agent 用 Unicode 键输入） |
 | 0x19 FrameAck | C→A | timestampMs(u32)，解码出该帧后回 |
 | 0x1A ReleaseAll | C→A | 无（松开所有按着的键和鼠标键） |
+| 0x1B SetAudio | C→A | on(u8，1 开启系统声音，0 关闭) |
+| 0x1C Pong | C→A | sequence(u32)，原样回传 Ping 的序号 |
+
+控制端读取旧版 Agent 的 `VideoConfig` 和 `Stats` 时，把缺少的 `features`、`targetKbps`、`maxKbps` 按 0 处理。网页仍可显示画面，声音按钮会提示更新被控端。
 
 只看模式下中继和 Agent 都丢弃控制端的 0x10–0x13、0x17、0x18、0x05、0x1A。

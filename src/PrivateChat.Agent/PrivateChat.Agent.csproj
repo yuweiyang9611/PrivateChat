@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!-- 远程控制被控端（docs/DESIGN.md 4.8）：Windows 托盘程序，随用户登录启动。
-       截屏用 GDI，编码用 Windows 自带的 Media Foundation H.264 编码器，注入用 SendInput，不依赖外部程序。
+       截屏用 GDI，编码用 Windows 自带的 Media Foundation H.264 编码器，注入用 SendInput，声音用 WASAPI 环回采集 + Opus，不依赖外部程序。
        Linux 上（CI、Docker）也能编译：EnableWindowsTargeting。 -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -27,6 +27,7 @@
 
   <ItemGroup>
     <PackageReference Include="BouncyCastle.Cryptography" />
+    <PackageReference Include="Concentus" />
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" />
   </ItemGroup>
 

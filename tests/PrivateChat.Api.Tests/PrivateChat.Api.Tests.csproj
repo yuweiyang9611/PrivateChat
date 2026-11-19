@@ -27,6 +27,10 @@
        其中"连不上服务器是什么原因"那一块是纯逻辑、只用到基础类库：直接把源文件编进来测。 -->
   <ItemGroup>
     <Compile Include="..\..\src\PrivateChat.Agent\ConnectionDiagnosis.cs" Link="Agent\ConnectionDiagnosis.cs" />
+    <!-- 远程画面的码率控制和画质规划、声音的响度拉平：同样是纯计算 -->
+    <Compile Include="..\..\src\PrivateChat.Agent\Session\RateControl.cs" Link="Agent\RateControl.cs" />
+    <Compile Include="..\..\src\PrivateChat.Agent\Session\QualityPlanner.cs" Link="Agent\QualityPlanner.cs" />
+    <Compile Include="..\..\src\PrivateChat.Agent\Audio\AudioLeveler.cs" Link="Agent\AudioLeveler.cs" />
   </ItemGroup>
 
   <ItemGroup>

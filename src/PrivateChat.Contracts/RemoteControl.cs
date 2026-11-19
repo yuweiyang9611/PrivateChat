@@ -20,6 +20,8 @@ public enum RemoteFrameType : byte
     Clipboard = 0x05,   // 双向
     Stats = 0x06,
     Status = 0x07,
+    Audio = 0x08,       // 对方电脑正在播放的声音
+    Ping = 0x09,        // 量线路往返时间的探测包，控制端原样回 Pong
 
     // 控制端 → Agent
     MouseMove = 0x10,
@@ -33,9 +35,25 @@ public enum RemoteFrameType : byte
     Text = 0x18,
     FrameAck = 0x19,
     ReleaseAll = 0x1A,
+    SetAudio = 0x1B,
+    Pong = 0x1C,
 }
 
 public enum RemoteVideoCodec : byte { H264 = 1 }
+
+/// <summary>声音的编码：Opus，48 kHz，一帧 20 ms（浏览器用 WebCodecs 的 AudioDecoder 解）。</summary>
+public enum RemoteAudioCodec : byte { Opus = 1 }
+
+/// <summary>被控端支持的可选功能（VideoConfig 的最后一个字节；老版本没有这个字节，按 0 算）。</summary>
+[Flags]
+public enum RemoteFeatures : byte
+{
+    None = 0,
+    /// <summary>能传电脑上播放的声音（控制端发 SetAudio 打开）。</summary>
+    Audio = 1,
+    /// <summary>码率跟着网络自动调（Stats 里带目标码率；会发 Ping 量线路延迟）。</summary>
+    AdaptiveBitrate = 2,
+}
 
 public enum RemoteQualityPreset : byte { Smooth = 0, Sharp = 1 }
 
@@ -57,9 +75,10 @@ public enum RemoteConsentType { Prompt, Unattended, Trusted }
 
 public enum RemoteSessionState { Pending, Active, Ended }
 
-public sealed record VideoConfigFrame(RemoteVideoCodec Codec, int Width, int Height, int Fps, int Monitor);
+public sealed record VideoConfigFrame(RemoteVideoCodec Codec, int Width, int Height, int Fps, int Monitor, RemoteFeatures Features = RemoteFeatures.None);
 public sealed record MonitorInfo(int Index, int Width, int Height, bool IsPrimary);
-public sealed record StatsFrame(int Fps, int Kbps, int CpuPercent, int RttMs);
+/// <summary>TargetKbps：按网络状况定的码率上限；MaxKbps：当前画质档位的上限。两者差得多说明网络慢、已自动降画质。</summary>
+public sealed record StatsFrame(int Fps, int Kbps, int CpuPercent, int RttMs, int TargetKbps = 0, int MaxKbps = 0);
 
 /// <summary>控制端发来的一帧（解析后）。</summary>
 public abstract record ControlFrame
@@ -76,6 +95,8 @@ public abstract record ControlFrame
     public sealed record Clipboard(string Value) : ControlFrame;
     public sealed record FrameAck(uint TimestampMs) : ControlFrame;
     public sealed record ReleaseAll : ControlFrame;
+    public sealed record SetAudio(bool On) : ControlFrame;
+    public sealed record Pong(uint Sequence) : ControlFrame;
 }
 
 public static class RemoteFrames
@@ -90,13 +111,14 @@ public static class RemoteFrames
 
     public static byte[] VideoConfig(VideoConfigFrame f)
     {
-        var b = new byte[8];
+        var b = new byte[9];
         b[0] = (byte)RemoteFrameType.VideoConfig;
         b[1] = (byte)f.Codec;
         BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(2), (ushort)f.Width);
         BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(4), (ushort)f.Height);
         b[6] = (byte)f.Fps;
         b[7] = (byte)f.Monitor;
+        b[8] = (byte)f.Features;
         return b;
     }
 
@@ -129,12 +151,35 @@ public static class RemoteFrames
 
     public static byte[] Stats(StatsFrame f)
     {
-        var b = new byte[7];
+        var b = new byte[11];
         b[0] = (byte)RemoteFrameType.Stats;
         b[1] = (byte)Math.Clamp(f.Fps, 0, 255);
         BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(2), (ushort)Math.Clamp(f.Kbps, 0, ushort.MaxValue));
         b[4] = (byte)Math.Clamp(f.CpuPercent, 0, 100);
         BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(5), (ushort)Math.Clamp(f.RttMs, 0, ushort.MaxValue));
+        BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(7), (ushort)Math.Clamp(f.TargetKbps, 0, ushort.MaxValue));
+        BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(9), (ushort)Math.Clamp(f.MaxKbps, 0, ushort.MaxValue));
+        return b;
+    }
+
+    /// <summary>探测包：不带画面，控制端收到马上回 Pong，量到的就是线路本身的往返时间。</summary>
+    public static byte[] Ping(uint sequence)
+    {
+        var b = new byte[5];
+        b[0] = (byte)RemoteFrameType.Ping;
+        BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(1), sequence);
+        return b;
+    }
+
+    /// <summary>一个声音包：时间戳（毫秒，和视频帧同一个时钟）、编码、声道数、编码后的数据。</summary>
+    public static byte[] Audio(uint timestampMs, RemoteAudioCodec codec, int channels, ReadOnlySpan<byte> packet)
+    {
+        var b = new byte[7 + packet.Length];
+        b[0] = (byte)RemoteFrameType.Audio;
+        BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(1), timestampMs);
+        b[5] = (byte)codec;
+        b[6] = (byte)channels;
+        packet.CopyTo(b.AsSpan(7));
         return b;
     }
 
@@ -181,6 +226,8 @@ public static class RemoteFrames
             RemoteFrameType.Clipboard when p.Length <= MaxTextBytes => new ControlFrame.Clipboard(Encoding.UTF8.GetString(p)),
             RemoteFrameType.FrameAck when p.Length >= 4 => new ControlFrame.FrameAck(BinaryPrimitives.ReadUInt32LittleEndian(p)),
             RemoteFrameType.ReleaseAll => new ControlFrame.ReleaseAll(),
+            RemoteFrameType.SetAudio when p.Length >= 1 => new ControlFrame.SetAudio(p[0] != 0),
+            RemoteFrameType.Pong when p.Length >= 4 => new ControlFrame.Pong(BinaryPrimitives.ReadUInt32LittleEndian(p)),
             _ => null,
         };
     }
@@ -197,6 +244,16 @@ public static class RemoteFrames
 
     public static byte[] Key(ushort scanCode, bool down) =>
         [(byte)RemoteFrameType.Key, (byte)scanCode, (byte)(scanCode >> 8), down ? (byte)1 : (byte)0, 0];
+
+    public static byte[] Pong(uint sequence)
+    {
+        var b = new byte[5];
+        b[0] = (byte)RemoteFrameType.Pong;
+        BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(1), sequence);
+        return b;
+    }
+
+    public static byte[] SetAudio(bool on) => [(byte)RemoteFrameType.SetAudio, on ? (byte)1 : (byte)0];
 
     public static byte[] FrameAck(uint timestampMs)
     {

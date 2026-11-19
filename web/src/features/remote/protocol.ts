@@ -10,6 +10,8 @@ export const FrameType = {
   Clipboard: 0x05,
   Stats: 0x06,
   Status: 0x07,
+  Audio: 0x08,
+  Ping: 0x09,
   MouseMove: 0x10,
   MouseButton: 0x11,
   Wheel: 0x12,
@@ -21,7 +23,15 @@ export const FrameType = {
   Text: 0x18,
   FrameAck: 0x19,
   ReleaseAll: 0x1a,
+  SetAudio: 0x1b,
+  Pong: 0x1c,
 } as const
+
+/** 被控端支持的可选功能（VideoConfig 的最后一个字节；老版本没有，按 0 算） */
+export const Features = { Audio: 1, AdaptiveBitrate: 2 } as const
+
+/** 声音的编码：1 = Opus（48 kHz，一包 20 ms） */
+export const AudioCodec = { Opus: 1 } as const
 
 export const Quality = { Smooth: 0, Sharp: 1 } as const
 export type QualityPreset = (typeof Quality)[keyof typeof Quality]
@@ -34,11 +44,13 @@ export const StatusCode = { Ok: 0, SecureDesktop: 1, CaptureFailed: 2, Unsupport
 export interface MonitorInfo { index: number; width: number; height: number; primary: boolean }
 
 export type AgentFrame =
-  | { type: 'config'; codec: number; width: number; height: number; fps: number; monitor: number }
+  | { type: 'config'; codec: number; width: number; height: number; fps: number; monitor: number; features: number }
   | { type: 'video'; timestamp: number; key: boolean; data: Uint8Array }
   | { type: 'monitors'; monitors: MonitorInfo[] }
   | { type: 'clipboard'; text: string }
-  | { type: 'stats'; fps: number; kbps: number; cpu: number; rtt: number }
+  | { type: 'stats'; fps: number; kbps: number; cpu: number; rtt: number; target: number; max: number }
+  | { type: 'audio'; timestamp: number; codec: number; channels: number; data: Uint8Array }
+  | { type: 'ping'; sequence: number }
   | { type: 'status'; code: number; message: string }
 
 const utf8 = new TextDecoder()
@@ -52,7 +64,7 @@ export function parseAgentFrame(buffer: ArrayBuffer): AgentFrame | null {
   switch (b[0]) {
     case FrameType.VideoConfig:
       if (b.length < 8) return null
-      return { type: 'config', codec: b[1]!, width: v.getUint16(2, true), height: v.getUint16(4, true), fps: b[6]!, monitor: b[7]! }
+      return { type: 'config', codec: b[1]!, width: v.getUint16(2, true), height: v.getUint16(4, true), fps: b[6]!, monitor: b[7]!, features: b.length >= 9 ? b[8]! : 0 }
     case FrameType.VideoFrame:
       if (b.length < 6) return null
       return { type: 'video', timestamp: v.getUint32(1, true), key: b[5] !== 0, data: b.subarray(6) }
@@ -71,10 +83,20 @@ export function parseAgentFrame(buffer: ArrayBuffer): AgentFrame | null {
       return { type: 'clipboard', text: utf8.decode(b.subarray(1)) }
     case FrameType.Stats:
       if (b.length < 7) return null
-      return { type: 'stats', fps: b[1]!, kbps: v.getUint16(2, true), cpu: b[4]!, rtt: v.getUint16(5, true) }
+      // 目标码率、档位上限是 0.7.0 加的：老版本没有，按 0 算
+      return {
+        type: 'stats', fps: b[1]!, kbps: v.getUint16(2, true), cpu: b[4]!, rtt: v.getUint16(5, true),
+        target: b.length >= 11 ? v.getUint16(7, true) : 0, max: b.length >= 11 ? v.getUint16(9, true) : 0,
+      }
     case FrameType.Status:
       if (b.length < 2) return null
       return { type: 'status', code: b[1]!, message: utf8.decode(b.subarray(2)) }
+    case FrameType.Audio:
+      if (b.length < 8) return null
+      return { type: 'audio', timestamp: v.getUint32(1, true), codec: b[5]!, channels: b[6]!, data: b.subarray(7) }
+    case FrameType.Ping:
+      if (b.length < 5) return null
+      return { type: 'ping', sequence: v.getUint32(1, true) }
     default:
       return null
   }
@@ -136,6 +158,9 @@ export const encode = {
   clipboard: (value: string) => text(FrameType.Clipboard, value),
   frameAck: (timestamp: number) => frame(FrameType.FrameAck, 4, (v) => v.setUint32(1, timestamp >>> 0, true)),
   releaseAll: () => frame(FrameType.ReleaseAll, 0),
+  setAudio: (on: boolean) => frame(FrameType.SetAudio, 1, (_, b) => { b[1] = on ? 1 : 0 }),
+  /** 对探测包的回应：序号原样带回去，被控端据此量线路的往返时间 */
+  pong: (sequence: number) => frame(FrameType.Pong, 4, (v) => v.setUint32(1, sequence >>> 0, true)),
 }
 
 function clamp16(n: number): number {

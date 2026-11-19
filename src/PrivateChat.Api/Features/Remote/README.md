@@ -14,4 +14,10 @@
   系统没有 TLS 1.3（Windows 10 及更早）时它用程序自带的 TLS 1.3 连服务器（`AgentTransport`，BouncyCastle；证书仍由 Windows 校验），所以服务器可以只收 TLS 1.3。
 - `DirectEntrance` + `AgentDirectController`（`/api/remote/agent/direct`）：局域网直连入口。配了 `Remote:DirectUrl` 时 api 多听一个 HTTPS 端口（`Remote:DirectPort`，默认 8443，自签证书在 `KeyStore.DirectCertificate`），只放行被控端的接口；被控端经公网拿到地址和证书指纹（`PrivateChat.Contracts` 的 `CertificatePin`），在家时直连、只认这张证书，连不上就走公网。
 
-测试：`tests/.../Integration/RemoteTests.cs`（真实 PostgreSQL + 测试服务器上的 WebSocket），`web/e2e/remote.cjs`（Edge + 本机无界面 Agent，测试画面、键鼠写日志）。
+Agent 和网页通过同一个中继传送画面、反馈和系统声音。Agent 的 `NetworkEstimator` 根据画面确认和探测包往返时间调整发送预算，`QualityPlanner` 根据画面变化选择 H.264 编码质量。网页开启声音后，Agent 从 Windows 默认播放设备采集并发送 Opus，关闭后释放设备。中继按原有转发规则处理这些帧。
+
+**验证入口**
+
+- `tests/PrivateChat.Api.Tests/Integration/RemoteTests.cs` 使用 PostgreSQL 和测试服务器的 WebSocket 验证会话与中继。`RemoteRateControlTests.cs` 覆盖弱网、慢解码、画质恢复和音量处理。
+- `web/e2e/remote.cjs` 使用 Edge 和本机无界面 Agent 验证测试画面、键鼠事件和 440 Hz 测试音，包含静音和恢复播放。
+- 在 Windows 上启动测试 Compose 栈后，从 `web` 目录运行 `node e2e/remote-weak.cjs`，可测量三种模拟线路的实际帧率、延迟和最长画面停顿。`npm run e2e` 也会运行这组测试。

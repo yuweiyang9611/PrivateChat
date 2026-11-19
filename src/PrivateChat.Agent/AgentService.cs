@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Win32;
+using PrivateChat.Agent.Audio;
 using PrivateChat.Agent.Input;
 using PrivateChat.Agent.Session;
 using PrivateChat.Agent.Ui;
@@ -13,7 +14,7 @@ using PrivateChat.Contracts.Remote;
 namespace PrivateChat.Agent;
 
 /// <summary>启动参数（Program 解析命令行）。</summary>
-public sealed record AgentOptions(string DataDir, string DeviceName, bool UsePattern, string? DryInputPath, bool Headless);
+public sealed record AgentOptions(string DataDir, string DeviceName, bool UsePattern, string? DryInputPath, bool Headless, bool BusyPattern = false);
 
 /// <summary>
 /// Agent 的主流程：
@@ -40,6 +41,7 @@ public sealed class AgentService
     private AgentConfig _config;
     private ServerInfo? _server;
     private SessionRunner? _runner;
+    private (AgentState State, string Detail) _connectionState = (AgentState.Connecting, "正在连接");
     private CancellationTokenSource? _consent;
     private Guid? _consentFor;
     private CancellationTokenSource? _reset;
@@ -72,7 +74,10 @@ public sealed class AgentService
         ui.SetupRequested += () => _reset?.Cancel();
     }
 
-    private IFrameSource CreateSource() => _options.UsePattern ? new TestPatternSource() : new GdiScreenSource();
+    private IFrameSource CreateSource() => _options.BusyPattern ? new BusyPatternSource() : _options.UsePattern ? new TestPatternSource() : new GdiScreenSource();
+
+    /// <summary>电脑正在播放的声音；测试画面配测试音（一直响的 440 Hz），不碰声卡。</summary>
+    private IAudioSource CreateAudioSource() => _options.UsePattern ? new TestToneSource() : new WasapiLoopback();
 
     public async Task RunAsync(CancellationToken ct)
     {
@@ -114,6 +119,7 @@ public sealed class AgentService
                 if (await ConnectAsync(reset.Token) == Outcome.Revoked)
                 {
                     AgentLog.Warn("设备已被移除（或令牌失效），回到设备码登记");
+                    await StopRunnerAsync(revoked: true);
                     _config.DeviceTokenProtected = "";
                     _config.DirectUrl = _config.DirectPin = "";
                     _config.DeviceId = null;
@@ -467,7 +473,7 @@ public sealed class AgentService
     private async Task<Outcome> ConnectAsync(CancellationToken ct)
     {
         // 会话还在进行（直连断了、数据通道已经改走公网）：托盘照旧显示"正在被远程"
-        if (_runner is null) _ui.SetState(AgentState.Connecting, "正在连接");
+        await SetConnectionStateAsync(AgentState.Connecting, "正在连接");
         var (server, directProblem) = await ChooseRouteAsync(ct);
         _server = server;
         LogTransport(server, directProblem);
@@ -528,15 +534,11 @@ public sealed class AgentService
         hub.On<AgentSessionRequest>(AgentHubEvents.SessionRequested, r => { _ = OnRequestedAsync(r); });
         hub.On<AgentSessionEnded>(AgentHubEvents.SessionEnded, e => { _ = OnEndedAsync(e.SessionId, e.Reason); });
         hub.On(AgentHubEvents.Revoked, () => revoked.TrySetResult());
-        hub.Reconnecting += _ =>
+        hub.Reconnecting += _ => SetConnectionStateAsync(AgentState.Connecting, "网络断开，正在重新连接");
+        hub.Reconnected += async _ =>
         {
-            _ui.SetState(AgentState.Connecting, "网络断开，正在重新连接");
-            return Task.CompletedTask;
-        };
-        hub.Reconnected += _ =>
-        {
-            _ui.SetState(_runner is null ? AgentState.Online : AgentState.InSession, OnlineText);
-            return ReportAsync(hub);
+            await SetConnectionStateAsync(AgentState.Online, OnlineText);
+            await ReportAsync(hub);
         };
         hub.Closed += _ =>
         {
@@ -563,14 +565,14 @@ public sealed class AgentService
         {
             // 已经添加过的电脑：断网、服务器重启都会到这里，不弹窗，原因写在托盘上。10 秒后外层重新选路再连
             var problem = Diagnose("连接服务器失败", ex);
-            _ui.SetState(AgentState.Connecting, $"连不上服务器：{problem.Summary}");
+            await SetConnectionStateAsync(AgentState.Connecting, $"连不上服务器：{problem.Summary}");
             await Task.Delay(TimeSpan.FromSeconds(10), ct);
             return Outcome.Retry;
         }
         _lastProblem = null;
         AgentLog.Info(server.IsDirect ? "已连接服务器（局域网直连），等待远程请求" : "已连接服务器，等待远程请求");
         try { _updateSignal.Release(); } catch (SemaphoreFullException) { } // 顺便查一下有没有新版本
-        if (_runner is null) _ui.SetState(AgentState.Online, OnlineText);
+        await SetConnectionStateAsync(AgentState.Online, OnlineText);
         await ReportAsync(hub);
         EventHandler displayChanged = (_, _) => _ = ReportAsync(hub);
         if (!_options.Headless) SystemEvents.DisplaySettingsChanged += displayChanged;
@@ -592,8 +594,9 @@ public sealed class AgentService
             }
             // 走公网的长连接试了一分钟都没连上：正在进行的会话收掉（服务器那边早就结束了）。
             // 走直连的断了多半是离开了家：会话的数据通道自己会改走公网接着传，不跟着停
-            if (done == revoked.Task || !server.IsDirect) await StopRunnerAsync();
-            return done == revoked.Task ? Outcome.Revoked : Outcome.Retry;
+            if (done == revoked.Task) return Outcome.Revoked;
+            if (!server.IsDirect) await StopRunnerAsync();
+            return Outcome.Retry;
         }
         finally
         {
@@ -625,7 +628,7 @@ public sealed class AgentService
         await _gate.WaitAsync();
         try
         {
-            if (_updating || _ended.Contains(request.SessionId)) return;
+            if (_server is null || _updating || _ended.Contains(request.SessionId)) return;
             if (_runner is { } old && old.Id != request.SessionId) await StopRunnerCoreAsync(); // 服务端保证旧的已经结束
             if (request.Active)
             {
@@ -686,7 +689,8 @@ public sealed class AgentService
     {
         // 走局域网直连时，数据通道连不上就改走公网（比如会话中途离开了家）
         var server = _server!;
-        var runner = new SessionRunner(request, server, server.IsDirect ? ServerFromConfig() : null, CreateSource, _input, _ui);
+        var runner = new SessionRunner(request, server, server.IsDirect ? ServerFromConfig() : null,
+            CreateSource, CreateAudioSource, _input, _ui);
         _runner = runner;
         runner.Start();
         _ui.ShowBanner(request);
@@ -754,7 +758,7 @@ public sealed class AgentService
         }
     }
 
-    /// <summary>本机用户要断开（红条按钮、快捷键、托盘菜单）：先告诉服务端，再停。</summary>
+    /// <summary>本机用户要断开（红条按钮、快捷键、托盘菜单）：先停本地会话，再告诉服务端。</summary>
     public async Task DisconnectLocallyAsync()
     {
         Guid? id;
@@ -782,11 +786,33 @@ public sealed class AgentService
         }
     }
 
-    private async Task StopRunnerAsync()
+    private async Task SetConnectionStateAsync(AgentState state, string detail)
     {
         await _gate.WaitAsync();
         try
         {
+            _connectionState = (state, detail);
+            if (_runner is null) _ui.SetState(state, detail);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task StopRunnerAsync(bool revoked = false)
+    {
+        await _gate.WaitAsync();
+        try
+        {
+            _consent?.Cancel();
+            if (revoked)
+            {
+                _server = null;
+                if (_runner is { } runner) MarkEnded(runner.Id);
+                if (_consentFor is { } pending) MarkEnded(pending);
+                _connectionState = (AgentState.Registering, "设备已被移除，正在重新登记");
+            }
             await StopRunnerCoreAsync();
         }
         finally
@@ -800,7 +826,7 @@ public sealed class AgentService
         if (_runner is not { } runner) return;
         _runner = null;
         _ui.ShowBanner(null);
-        _ui.SetState(AgentState.Online, OnlineText);
+        _ui.SetState(_connectionState.State, _connectionState.Detail);
         await runner.DisposeAsync();
     }
 }

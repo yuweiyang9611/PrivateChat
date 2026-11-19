@@ -3,11 +3,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, Close, EditPen, FullScreen } from '@element-plus/icons-vue'
+import { ArrowDown, Close, EditPen, FullScreen, Headset } from '@element-plus/icons-vue'
 import { useFamilyStore } from '@/stores/family'
 import { useRemoteStore } from '@/stores/remote'
-import { RemoteClient, webCodecsSupported, type LinkState, type RemoteStats } from './RemoteClient'
-import { encode, MAX_TEXT_BYTES, modifiersOf, normalizePoint, Quality, scanCodeOf, SpecialKey, StatusCode, utf8Length, WheelAccumulator, type MonitorInfo, type QualityPreset } from './protocol'
+import { RemoteClient, webCodecsSupported, type AudioState, type LinkState, type RemoteStats } from './RemoteClient'
+import { audioSupported } from './RemoteAudio'
+import { encode, Features, MAX_TEXT_BYTES, modifiersOf, normalizePoint, Quality, scanCodeOf, SpecialKey, StatusCode, utf8Length, WheelAccumulator, type MonitorInfo, type QualityPreset } from './protocol'
 import { formatKbps } from './format'
 
 const props = defineProps<{ id: string }>()
@@ -30,6 +31,14 @@ const unsupported = ref(!webCodecsSupported())
 /** 这个窗口的控制连接被别的窗口 / 设备顶掉了（会话还在，在那边用着） */
 const replaced = ref(false)
 const quality = ref<QualityPreset>(Quality.Smooth)
+/** 对方的远程协助程序支持哪些可选功能（声音、码率自动调）；老版本是 0 */
+const features = ref(0)
+/** 要不要听对方电脑的声音：记在这台设备上，默认开 */
+const SOUND_KEY = 'remote.sound'
+const sound = ref(loadSound())
+const audioState = ref<AudioState>('off')
+/** 已经排上去播放的声音（采样点数、最近的峰值）：端到端测试靠它确认真的解出了声音 */
+const audioInfo = ref({ scheduled: 0, peak: 0 })
 const fullscreen = ref(false)
 const textOpen = ref(false)
 const textValue = ref('')
@@ -47,10 +56,33 @@ const endReason = computed(() => {
   const r = session.value?.endReason
   return r && ['declined', 'timeout', 'controller', 'agent', 'stopped', 'revoked', 'disconnected', 'replaced'].includes(r) ? t(`remote.reasons.${r}`) : t('remote.viewer.ended')
 })
+/** 对方的程序能传声音，这个浏览器也放得了 */
+const canSound = computed(() => (features.value & Features.Audio) !== 0 && audioSupported() && audioState.value !== 'unsupported')
+const soundLabel = computed(() => {
+  if (!canSound.value || !sound.value) return t('remote.viewer.soundOff')
+  return audioState.value === 'blocked' ? t('remote.viewer.soundBlocked') : t('remote.viewer.soundOn')
+})
+const soundTitle = computed(() => {
+  if (!video.value) return ''
+  if ((features.value & Features.Audio) === 0) return t('remote.viewer.soundNeedsUpdate')
+  if (!audioSupported() || audioState.value === 'unsupported') return t('remote.viewer.soundUnsupported')
+  return ''
+})
+/** 对方电脑按网速把码率调到了档位上限的四成以下：告诉用户画面糊是因为网络 */
+const slow = computed(() => !!stats.value && stats.value.max > 0 && stats.value.target > 0 && stats.value.target < stats.value.max * 0.4)
+const oldAgent = computed(() => !!video.value && (features.value & Features.AdaptiveBitrate) === 0)
 const statsText = computed(() => {
   if (!video.value || !stats.value) return ''
   return `${video.value.width}×${video.value.height} · ${stats.value.decoded} fps · ${formatKbps(stats.value.kbps)} · ${stats.value.rtt} ms`
 })
+
+function loadSound(): boolean {
+  try {
+    return localStorage.getItem(SOUND_KEY) !== '0'
+  } catch {
+    return true
+  }
+}
 
 /** 全屏时提示要放在全屏元素里面，否则看不见 */
 function toast(type: 'success' | 'warning' | 'error', message: string): void {
@@ -95,6 +127,8 @@ watch(() => props.id, (id, old) => {
   replaced.value = false
   link.value = 'connecting'
   video.value = null
+  features.value = 0
+  audioState.value = 'off'
   monitors.value = []
   stats.value = null
   blocked.value = null
@@ -116,11 +150,21 @@ watch([state, canvas], async ([s]) => {
 
 function startClient(): void {
   if (!canvas.value) return
+  audioState.value = 'off'
+  audioInfo.value = { scheduled: 0, peak: 0 }
   const c = new RemoteClient(props.id, canvas.value, {
     state: (s) => (link.value = s),
-    config: (v) => (video.value = v),
+    config: (v) => {
+      video.value = v
+      features.value = v.features
+      // 知道对方能传声音了：按这台设备上记的选择打开（只在状态要变的时候说）
+      if (sound.value && canSound.value && audioState.value === 'off') c.setAudio(true)
+    },
     monitors: (m) => (monitors.value = m),
-    stats: (s) => (stats.value = s),
+    stats: (s) => {
+      stats.value = s
+      audioInfo.value = c.audioProgress
+    },
     status: (code, message) => {
       if (code === StatusCode.Unsupported) toast('warning', message)
       else blocked.value = code === StatusCode.Ok ? null : { code, message }
@@ -131,10 +175,12 @@ function startClient(): void {
     ended: (why) => {
       if (client !== c) return
       client = null
+      sentButtons.clear()
       if (why === 'replaced') replaced.value = true
       void remote.get(props.id).catch(() => undefined)
     },
     unsupported: () => (unsupported.value = true),
+    audio: (s) => (audioState.value = s),
   })
   client = c
   c.connect()
@@ -196,6 +242,23 @@ function setQuality(q: QualityPreset): void {
 
 function selectMonitor(index: number): void {
   client?.selectMonitor(index)
+}
+
+function toggleSound(): void {
+  // 浏览器还不让出声（刷新页面后直接进来的）：这一下点击就是它要的"用户操作"，不是要关声音
+  if (sound.value && audioState.value === 'blocked') {
+    client?.resumeAudio()
+    return
+  }
+  sound.value = !sound.value
+  try {
+    localStorage.setItem(SOUND_KEY, sound.value ? '1' : '0')
+  } catch {
+    // 无痕窗口等存不了：这次会话里照样生效
+  }
+  client?.setAudio(sound.value && canSound.value)
+  client?.resumeAudio()
+  stage.value?.focus()
 }
 
 function special(command: string): void {
@@ -282,6 +345,7 @@ function onPointerMove(e: PointerEvent): void {
 }
 
 function onPointerDown(e: PointerEvent): void {
+  client?.resumeAudio()
   if (!control.value) return
   e.preventDefault()
   stage.value?.focus()
@@ -335,6 +399,7 @@ let pendingPaste: number | null = null
 let pasteTimer: number | undefined
 
 function onKeyDown(e: KeyboardEvent): void {
+  client?.resumeAudio()
   if (!control.value || e.isComposing) return
   const scan = scanOf(e)
   if (scan === undefined) return
@@ -399,12 +464,15 @@ watch(textOpen, (open) => {
         <span class="font-medium">{{ session?.deviceName }}</span>
         <span v-if="session && !control" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #3a3530">{{ t('remote.viewer.viewOnly') }}</span>
         <span v-if="statsText" class="ml-2 text-xs text-gray-400" data-testid="remote-stats">{{ statsText }}</span>
+        <span v-if="slow" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #5c4514; color: #ffd98a" :title="t('remote.viewer.slowTitle', { target: formatKbps(stats!.target), max: formatKbps(stats!.max) })" data-testid="remote-slow">{{ t('remote.viewer.slow') }}</span>
+        <span v-else-if="oldAgent" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #3a3530" :title="t('remote.viewer.oldAgentTitle')" data-testid="remote-old-agent">{{ t('remote.viewer.oldAgent') }}</span>
       </div>
       <template v-if="state === 'Active' && !replaced">
         <el-radio-group :model-value="quality" size="small" @update:model-value="(q) => setQuality(q as QualityPreset)">
           <el-radio-button :value="Quality.Smooth" data-testid="remote-quality-smooth">{{ t('remote.viewer.smooth') }}</el-radio-button>
           <el-radio-button :value="Quality.Sharp" data-testid="remote-quality-sharp">{{ t('remote.viewer.sharp') }}</el-radio-button>
         </el-radio-group>
+        <el-button v-if="video" size="small" :icon="Headset" :type="sound && canSound ? 'primary' : 'default'" :disabled="!canSound" :title="soundTitle" :data-audio="audioState" :data-scheduled="audioInfo.scheduled" :data-peak="audioInfo.peak.toFixed(3)" data-testid="remote-sound" @click="toggleSound">{{ soundLabel }}</el-button>
         <!-- 全屏时弹层要留在全屏元素里面，不能挂到 body 上 -->
         <el-select v-if="monitors.length > 1" :model-value="video?.monitor" size="small" class="!w-36" :teleported="false" data-testid="remote-monitor" @update:model-value="selectMonitor">
           <el-option v-for="m in monitors" :key="m.index" :value="m.index" :label="`${t('remote.viewer.monitor', { n: m.index + 1 })} ${m.width}×${m.height}`" />

@@ -8,6 +8,10 @@ public readonly record struct EncodedFrame(byte[] Data, bool IsKey);
 /// <summary>
 /// Windows 自带的软件 H.264 编码器（Media Foundation，CLSID_CMSH264EncoderMFT），同步 MFT：一帧进、一帧出。
 /// 低延迟模式、无 B 帧、GOP 很长（关键帧只在开头和按需时出现，见 <see cref="RequestKeyFrame"/>）。
+/// 两种码率控制：
+/// - 按质量（给了 quality）：每帧的质量由调用方定（<see cref="SetQuality"/>，可以逐帧改），帧有多大看画面内容。
+///   远程画面用这个——编码器自己的固定码率在画面突变时管不住，见 <see cref="PrivateChat.Agent.Session.QualityPlanner"/>。
+/// - 固定码率（没给 quality，或者这台电脑的编码器不接受按质量）：<see cref="SetBitrate"/> 可以中途改。
 /// 输出 Annex B；关键帧前总是带 SPS / PPS，方便控制端中途加入或解码器重置后直接开始。
 /// 只能在一个线程上用（采集循环）。
 /// </summary>
@@ -15,6 +19,7 @@ public sealed class H264Encoder : IDisposable
 {
     private const int ProfileMain = 77;
     private const int RateControlCbr = 0;
+    private const int RateControlQuality = 3;
 
     private readonly IMFTransform _mft;
     private readonly ICodecAPI? _codec;
@@ -29,7 +34,15 @@ public sealed class H264Encoder : IDisposable
     public int Height { get; }
     public int Fps { get; }
 
-    public H264Encoder(int width, int height, int fps, int bitrateKbps)
+    /// <summary>在按质量的模式下工作（false：这台电脑的编码器不接受，退回了固定码率）。</summary>
+    public bool QualityMode { get; }
+
+    private int _quality = -1;
+    private int _bitrateKbps;
+
+    /// <param name="bitrateKbps">固定码率模式的码率；按质量时只是写进媒体类型里的名义值。</param>
+    /// <param name="quality">给了就用按质量的模式，这是第一帧的质量（0–100）。</param>
+    public H264Encoder(int width, int height, int fps, int bitrateKbps, int? quality = null)
     {
         if (width <= 0 || height <= 0 || width % 2 != 0 || height % 2 != 0)
             throw new ArgumentException($"画面尺寸必须是正偶数：{width}x{height}");
@@ -53,8 +66,18 @@ public sealed class H264Encoder : IDisposable
             _codec = _mft as ICodecAPI;
             // 码率控制等要在设置媒体类型之前定下来
             TrySet(MF.LowLatency, ComVariant32.Bool(true));
-            TrySet(MF.AVEncCommonRateControlMode, ComVariant32.UInt(RateControlCbr));
-            TrySet(MF.AVEncCommonMeanBitRate, ComVariant32.UInt(bitrateKbps * 1000));
+            _bitrateKbps = bitrateKbps;
+            if (quality is { } q && TrySet(MF.AVEncCommonRateControlMode, ComVariant32.UInt(RateControlQuality))
+                && TrySet(MF.AVEncCommonQuality, ComVariant32.UInt(Math.Clamp(q, 0, 100))))
+            {
+                QualityMode = true;
+                _quality = Math.Clamp(q, 0, 100);
+            }
+            else
+            {
+                TrySet(MF.AVEncCommonRateControlMode, ComVariant32.UInt(RateControlCbr));
+                TrySet(MF.AVEncCommonMeanBitRate, ComVariant32.UInt(bitrateKbps * 1000));
+            }
             TrySet(MF.AVEncMPVDefaultBPictureCount, ComVariant32.UInt(0));
             TrySet(MF.AVEncMPVGOPSize, ComVariant32.UInt(fps * 600));
             TrySet(MF.AVEncCommonQualityVsSpeed, ComVariant32.UInt(33));
@@ -99,6 +122,24 @@ public sealed class H264Encoder : IDisposable
 
     /// <summary>下一帧编成关键帧（控制端刚连上、解码出错、切换了显示器之后）。</summary>
     public void RequestKeyFrame() => _keyRequested = true;
+
+    /// <summary>
+    /// 之后的帧用这个质量（0–100，实测每 3.5 对应量化参数差 1：0 ≈ QP 44，70 ≈ QP 24，100 ≈ QP 16）。
+    /// 质量是对整幅画面生效的：调高之后，没变的部分也会被重新编一遍。
+    /// </summary>
+    public void SetQuality(int quality)
+    {
+        quality = Math.Clamp(quality, 0, 100);
+        if (!QualityMode || quality == _quality) return;
+        if (TrySet(MF.AVEncCommonQuality, ComVariant32.UInt(quality))) _quality = quality;
+    }
+
+    /// <summary>固定码率模式下中途改码率（按质量的模式下没有作用）。</summary>
+    public void SetBitrate(int kbps)
+    {
+        if (QualityMode || kbps == _bitrateKbps) return;
+        if (TrySet(MF.AVEncCommonMeanBitRate, ComVariant32.UInt(kbps * 1000))) _bitrateKbps = kbps;
+    }
 
     /// <summary>编一帧 NV12（宽 × 高 × 1.5 字节）。同步编码器一般当场出一帧；偶尔没有输出时返回 null。</summary>
     public EncodedFrame? Encode(ReadOnlySpan<byte> nv12, TimeSpan timestamp)

@@ -2,7 +2,7 @@
 // Agent 用测试画面（四色象限 + 移动黑块，两块假显示器 1280×720 / 1920×1080），键鼠不注入系统、写到日志文件——
 // 不碰这台电脑的真实屏幕和鼠标键盘。E2E_REAL_SCREEN=1 时最后再用真实屏幕跑一遍（只检查尺寸和非黑屏，不截图）。
 // 覆盖：下载安装包、设备码添加（管理员替爸爸添加）、主人实时看到在线 / 被远程提醒、远程控制（自动同意）、
-// 画面像素、键鼠 / 滚轮 / 文字 / 特殊键 / 剪贴板、画质与切换显示器、结束与记录、只看模式不注入、拒绝、
+// 画面像素、声音（测试音）、键鼠 / 滚轮 / 文字 / 特殊键 / 剪贴板、画质与切换显示器、结束与记录、只看模式不注入、拒绝、
 // 免同意名单（勾上后不经同意直接连、移出后立即结束）、同意窗口没人点时取消 / 改用 PIN（窗口马上收起、PIN 立刻连上）、移除电脑。
 // 加 --agent-tls13：被控端不直连 compose 栈，而是经本机一个只收 TLS 1.3 的入口（e2e/tls13-proxy.cjs），
 // 并强制用程序自带的 TLS 1.3（Windows 10 上的做法）——同一套用例再跑一遍，另外断言三条连接都是 TLS 1.3。
@@ -279,8 +279,9 @@ async function moveOnCanvas(page, fx, fy) {
       hub: tls.seen.upgrades.some((u) => u.path === '/hubs/agent'),
       video: tls.seen.upgrades.some((u) => u.path.startsWith('/ws/remote/')),
     }
-    check('申请设备码、长连接、同意、远程画面通道都经过 TLS 入口，而且全是 TLS 1.3',
-      Object.values(paths).every(Boolean) && all.length > 0 && all.every((x) => x.tls === 'TLSv1.3'),
+    const expectedPaths = DIRECT ? paths.code && paths.negotiate && paths.hub && !paths.consent && !paths.video : Object.values(paths).every(Boolean)
+    check(DIRECT ? '经公网 TLS 1.3 登记，切换直连后同意和画面都走局域网' : '申请设备码、长连接、同意、远程画面通道都经过 TLS 入口，而且全是 TLS 1.3',
+      expectedPaths && all.length > 0 && all.every((x) => x.tls === 'TLSv1.3'),
       { ...paths, versions: [...new Set(all.map((x) => x.tls))], hosts: [...new Set(all.map((x) => x.host))] })
   }
   const stats = await until(async () => {
@@ -289,6 +290,64 @@ async function moveOnCanvas(page, fx, fy) {
     return fps >= 5 ? t : null
   }, 10000)
   check('持续出帧（解码帧率 ≥ 5，有往返延迟）', !!stats && / \d+ ms/.test(stats), stats)
+
+  // 声音：测试画面配的是一直响的 440 Hz 测试音（不碰声卡）；网页默认开着声音
+  const soundButton = admin.locator('[data-testid=remote-sound]')
+  const audioNow = async () => ({
+    state: await soundButton.getAttribute('data-audio'),
+    scheduled: Number(await soundButton.getAttribute('data-scheduled')),
+    peak: Number(await soundButton.getAttribute('data-peak')),
+    label: (await soundButton.textContent()).trim(),
+  })
+  const heard = await until(async () => {
+    const a = await audioNow()
+    return a.scheduled > 48000 && a.peak > 0.1 ? a : null
+  }, 15000)
+  check('能听到对方电脑的声音（Opus 解出来超过 1 秒，不是静音，正在播放）', !!heard && heard.state === 'playing' && heard.label === '声音：开', heard ?? (await audioNow()))
+  check('被控端应控制端的要求才开始采集声音', agent.out.includes('控制端要听这台电脑的声音') && agent.out.includes('声音采集已打开'))
+  await soundButton.click()
+  const off = await until(() => agent.out.includes('控制端关了声音'), 5000)
+  await sleep(1200)
+  const quiet1 = (await audioNow()).scheduled
+  await sleep(1500)
+  const quiet2 = await audioNow()
+  check('关掉声音：被控端停止采集，网页不再收到声音', !!off && quiet2.scheduled === quiet1 && quiet2.label === '声音：关' && quiet2.state === 'off', { off: !!off, quiet1, quiet2 })
+  await soundButton.click()
+  const again = await until(async () => {
+    const a = await audioNow()
+    return a.state === 'playing' && a.scheduled > 24000 ? a : null
+  }, 10000)
+  check('再打开又有声音', !!again, again ?? (await audioNow()))
+  const netLog = agent.out.match(/网络：目标码率 (\d+) kbps（上限 (\d+)），线路往返 (\d+) ms/)
+  check('被控端在按网络状况定码率（本机直连：往返很短，码率没有被压到最低）', !!netLog && Number(netLog[1]) >= 300 && Number(netLog[2]) === 2500 && Number(netLog[3]) < 200, netLog?.[0])
+
+  // 同一会话在另一个静音窗口接手，再回到原窗口。检查线上的声音帧，而非只看按钮。
+  const mutedContext = await browser.newContext({ ...opts, storageState: await adminCtx.storageState() })
+  const muted = await mutedContext.newPage()
+  await muted.addInitScript(() => localStorage.setItem('remote.sound', '0'))
+  let audioPackets = 0
+  let videoPackets = 0
+  muted.on('websocket', (ws) => {
+    if (!ws.url().endsWith('/controller')) return
+    ws.on('framereceived', ({ payload }) => {
+      if (!Buffer.isBuffer(payload)) return
+      if (payload[0] === 0x08) audioPackets++
+      if (payload[0] === 0x02) videoPackets++
+    })
+  })
+  await muted.goto(admin.url())
+  await admin.locator('[data-testid=remote-replaced]').waitFor()
+  await muted.locator('[data-testid=remote-sound][data-audio=off]').waitFor()
+  const beforeMute = audioPackets
+  const beforeVideo = videoPackets
+  await sleep(1200)
+  check('静音窗口接手后只收到画面，声音停止传输', videoPackets > beforeVideo && audioPackets === beforeMute,
+    { videoPackets: videoPackets - beforeVideo, audioPackets: audioPackets - beforeMute })
+  await admin.locator('[data-testid=remote-take-over]').click()
+  await muted.locator('[data-testid=remote-replaced]').waitFor()
+  const heardAfterTakeover = await until(async () => (await audioNow()).scheduled > 24000, 10000)
+  check('有声窗口重新接手后继续收到测试音', !!heardAfterTakeover)
+  await mutedContext.close()
 
   // 键鼠
   const before = inputs(agent).length
@@ -517,8 +576,14 @@ async function moveOnCanvas(page, fx, fy) {
     const stillOn = !(await admin.locator('[data-testid=remote-ended]').isVisible().catch(() => false)) && !agent.out.slice(mark).includes('远程会话结束')
     check('会话中途掐断直连：数据通道马上改走公网，画面接着出，会话不断', viaDirect && !!fellBack && !!stillStreaming && stillOn,
       { viaDirect, fellBackMs: fellBack, stats: stillStreaming, stillOn })
+    const afterFallback = (await audioNow()).scheduled
+    const audioResumed = await until(async () => (await audioNow()).scheduled > afterFallback + 24000, 10000)
+    check('直连切回公网后继续收到声音', !!audioResumed)
     const hubBack = await until(() => /连接方式 [^\r\n]*局域网直连不通/.test(agent.out.slice(mark)) && agent.out.slice(mark).includes('已连接服务器，等待远程请求'), 30000)
-    check('长连接也改走公网（会话期间没把会话停掉）', !!hubBack && !agent.out.slice(mark).includes('远程会话结束'), agent.out.slice(mark).match(/(连接方式|已连接服务器)[^\r\n]*/g))
+    const state = fs.readFileSync(path.join(dir, 'state.txt'), 'utf8')
+    check('长连接改走公网期间，本机始终显示正在被远程并保留断开入口',
+      !!hubBack && state === 'InSession' && !/远程会话结束|状态：(Connecting|Online)/.test(agent.out.slice(mark)),
+      { state, routes: agent.out.slice(mark).match(/(连接方式|已连接服务器)[^\r\n]*/g) })
     await admin.locator('[data-testid=remote-end]').click()
     await admin.locator('[data-testid=remote-ended]').waitFor({ timeout: 10000 })
     check('记录里这次会话是正常结束的（不是断线）', sql(`select end_reason from remote_sessions where id = '${awaySession}'`) === 'controller')
@@ -569,6 +634,9 @@ async function moveOnCanvas(page, fx, fy) {
       return size !== '0x0' && size !== '300x150' && lit > 100 ? { size, lit } : null
     }, 20000)
     check('真实屏幕：GDI 截屏 + 编码 + 解码出非黑画面', !!real, real ?? (await canvasSize(admin)))
+    // 真实的声音：环回采集这台电脑的播放设备（这会儿没有声音在播就采到静音，不发包；这里只确认设备打得开）
+    const loopback = await until(() => agent.out.match(/声音采集已打开[^\r\n]*/)?.[0] ?? (agent.out.includes('声音采集出错') ? 'error' : null), 8000)
+    check('真实声音：能打开这台电脑的播放设备做环回采集', !!loopback && loopback !== 'error', loopback ?? agent.out.split(/\r?\n/).filter((l) => l.includes('声音')).slice(-2))
     await admin.locator('[data-testid=remote-end]').click()
     await admin.goto(BASE + '/devices')
     await realCard.locator('[data-testid=device-more]').click()

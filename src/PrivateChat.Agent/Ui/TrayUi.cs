@@ -176,8 +176,7 @@ public sealed class TrayUi : IAgentUi, IDisposable
         {
             AgentState.NeedsSetup => "未设置",
             AgentState.Registering => _problem is null ? "等待添加到家庭" : $"连不上服务器：{_problem.Summary}",
-            AgentState.Connecting => detail,
-            AgentState.Online => "在线，可以接受远程协助",
+            AgentState.Online => $"{detail}，可以接受远程协助",
             _ => detail,
         };
         _status.Text = text;
@@ -547,8 +546,8 @@ public sealed class TrayUi : IAgentUi, IDisposable
             var col = Column();
             col.Controls.Add(TrayUi.Text(view ? $"{request.ControllerName} 想看看你的屏幕" : $"{request.ControllerName} 想远程控制这台电脑", TitleFont));
             col.Controls.Add(TrayUi.Text(view
-                ? "同意后对方能看到你的屏幕，但不能操作。"
-                : "同意后对方能看到你的屏幕，并用鼠标键盘帮你操作。"));
+                ? "同意后对方能看到你的屏幕、听到电脑播放的声音，但不能操作。"
+                : "同意后对方能看到你的屏幕、听到电脑播放的声音，并用鼠标键盘帮你操作。"));
             col.Controls.Add(TrayUi.Text("随时可以点屏幕顶部红条上的「断开」，或按 Ctrl+Alt+Shift+Q 结束。", color: Color.DimGray));
             col.Controls.Add(_countdown);
             var accept = Button("同意", primary: true);

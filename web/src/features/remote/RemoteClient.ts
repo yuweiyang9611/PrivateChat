@@ -1,4 +1,5 @@
 import { codecFromAnnexB, encode, parseAgentFrame, type MonitorInfo, type QualityPreset } from './protocol'
+import { RemoteAudio } from './RemoteAudio'
 
 /** 浏览器能不能解 H.264：要 WebCodecs（Chrome / Edge 94+、Safari 16.4+、Firefox 130+） */
 export function webCodecsSupported(): boolean {
@@ -7,11 +8,15 @@ export function webCodecsSupported(): boolean {
 
 export type LinkState = 'connecting' | 'waiting-agent' | 'streaming' | 'reconnecting' | 'closed'
 
-export interface RemoteStats { fps: number; kbps: number; cpu: number; rtt: number; decoded: number }
+/** target：被控端按网络状况定的码率上限；max：当前画质档位的上限（老版本被控端两个都是 0） */
+export interface RemoteStats { fps: number; kbps: number; cpu: number; rtt: number; decoded: number; target: number; max: number }
+
+/** 声音的状态：off 没开；playing 在放；blocked 浏览器要先点一下页面才让出声；unsupported 这个浏览器放不了 */
+export type AudioState = 'off' | 'playing' | 'blocked' | 'unsupported'
 
 export interface RemoteClientEvents {
   state: (s: LinkState) => void
-  config: (c: { width: number; height: number; fps: number; monitor: number }) => void
+  config: (c: { width: number; height: number; fps: number; monitor: number; features: number }) => void
   monitors: (m: MonitorInfo[]) => void
   stats: (s: RemoteStats) => void
   status: (code: number, message: string) => void
@@ -19,11 +24,13 @@ export interface RemoteClientEvents {
   /** 服务器以 4001 / 4000 关闭：会话结束 / 在别处打开了 */
   ended: (why: 'ended' | 'replaced') => void
   unsupported: () => void
+  audio: (s: AudioState) => void
 }
 
 /**
  * 控制端的数据面：连 /ws/remote/{id}/controller，H.264 关键帧 / 增量帧喂给 WebCodecs，解出来画到 canvas；
- * 每解出一帧回一个 FrameAck（Agent 据此流控，网络慢时自动降帧，延迟不累积）。
+ * 每解出一帧回一个 FrameAck、收到探测包回 Pong（Agent 据此估网络能传多快，网络慢时自动降码率，延迟不累积）。
+ * 声音（Opus）交给 {@link RemoteAudio} 播放。
  * 断线自动重连（会话是否结束由页面根据 SignalR 判断后调用 close）。
  */
 export class RemoteClient {
@@ -41,6 +48,8 @@ export class RemoteClient {
   private readonly ctx: CanvasRenderingContext2D | null
   private quality: QualityPreset | null = null
   private monitor: number | null = null
+  private wantAudio = false
+  private audio: RemoteAudio | null = null
   width = 0
   height = 0
   peer = false
@@ -75,7 +84,7 @@ export class RemoteClient {
       this.ws = null
       this.peer = false
       if (e.code === 4001 || e.code === 4000) {
-        this.closed = true
+        this.close()
         this.on.state?.('closed')
         this.on.ended?.(e.code === 4000 ? 'replaced' : 'ended')
         return
@@ -94,6 +103,7 @@ export class RemoteClient {
 
   close(): void {
     this.closed = true
+    this.peer = false
     window.clearTimeout(this.retryTimer)
     window.clearInterval(this.statsTimer)
     const ws = this.ws
@@ -101,6 +111,8 @@ export class RemoteClient {
     if (ws && ws.readyState <= WebSocket.OPEN) ws.close(1000)
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close()
     this.decoder = null
+    this.audio?.close()
+    this.audio = null
   }
 
   /** 发一帧；鼠标移动在发送缓冲积压时丢掉（键盘、点击照发） */
@@ -121,6 +133,42 @@ export class RemoteClient {
     this.send(encode.selectMonitor(index))
   }
 
+  /** 要不要听对方电脑的声音。关掉时被控端就不采集了（不占流量） */
+  setAudio(on: boolean): void {
+    this.wantAudio = on
+    if (!on) {
+      this.audio?.close()
+      this.audio = null
+      this.on.audio?.('off')
+    } else if (!this.audio && !this.closed) {
+      const audio = new RemoteAudio()
+      audio.onState = (blocked) => {
+        if (this.audio === audio) this.on.audio?.(blocked ? 'blocked' : 'playing')
+      }
+      audio.onUnsupported = () => {
+        if (this.audio !== audio) return
+        audio.close()
+        this.audio = null
+        this.wantAudio = false
+        this.send(encode.setAudio(false))
+        this.on.audio?.('unsupported')
+      }
+      this.audio = audio
+      this.on.audio?.(audio.blocked ? 'blocked' : 'playing')
+    }
+    this.send(encode.setAudio(on))
+  }
+
+  /** 在点击 / 按键的处理函数里调：浏览器要有过用户操作才让页面出声 */
+  resumeAudio(): void {
+    this.audio?.resume()
+  }
+
+  /** 测试用：已经排上去播放的声音采样点数、最近一块的峰值 */
+  get audioProgress(): { scheduled: number; peak: number } {
+    return { scheduled: this.audio?.scheduled ?? 0, peak: this.audio?.peak ?? 0 }
+  }
+
   private onNotice(text: string): void {
     try {
       const notice = JSON.parse(text) as { type?: string; connected?: boolean }
@@ -128,10 +176,11 @@ export class RemoteClient {
       this.peer = !!notice.connected
       this.on.state?.(this.peer ? 'streaming' : 'waiting-agent')
       if (this.peer) {
-        // Agent（重新）连上：它会从关键帧开始；把这边选过的画质、显示器再告诉它一遍
+        // Agent（重新）连上：它会从关键帧开始；把这边选过的画质、显示器、要不要声音再告诉它一遍
         this.needKey = true
         if (this.quality !== null) this.send(encode.setQuality(this.quality))
         if (this.monitor !== null) this.send(encode.selectMonitor(this.monitor))
+        this.send(encode.setAudio(this.wantAudio))
       }
     } catch {
       // 不认识的文本消息
@@ -157,7 +206,14 @@ export class RemoteClient {
         this.on.monitors?.(f.monitors)
         return
       case 'stats':
-        this.on.stats?.({ fps: f.fps, kbps: f.kbps, cpu: f.cpu, rtt: f.rtt, decoded: this.decodedLastSecond })
+        this.on.stats?.({ fps: f.fps, kbps: f.kbps, cpu: f.cpu, rtt: f.rtt, decoded: this.decodedLastSecond, target: f.target, max: f.max })
+        return
+      case 'ping':
+        // 原样回去：被控端量的是这一来一回的时间，所以收到就回，不等别的
+        this.send(encode.pong(f.sequence))
+        return
+      case 'audio':
+        this.audio?.push(f.codec, f.channels, f.timestamp, f.data)
         return
       case 'status':
         this.on.status?.(f.code, f.message)
