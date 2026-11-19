@@ -3,7 +3,7 @@
 // 不碰这台电脑的真实屏幕和鼠标键盘。E2E_REAL_SCREEN=1 时最后再用真实屏幕跑一遍（只检查尺寸和非黑屏，不截图）。
 // 覆盖：下载安装包、设备码添加（管理员替爸爸添加）、主人实时看到在线 / 被远程提醒、远程控制（自动同意）、
 // 画面像素、键鼠 / 滚轮 / 文字 / 特殊键 / 剪贴板、画质与切换显示器、结束与记录、只看模式不注入、拒绝、
-// 免同意名单（勾上后不经同意直接连、移出后立即结束）、移除电脑。
+// 免同意名单（勾上后不经同意直接连、移出后立即结束）、同意窗口没人点时取消 / 改用 PIN（窗口马上收起、PIN 立刻连上）、移除电脑。
 // 加 --agent-tls13：被控端不直连 compose 栈，而是经本机一个只收 TLS 1.3 的入口（e2e/tls13-proxy.cjs），
 // 并强制用程序自带的 TLS 1.3（Windows 10 上的做法）——同一套用例再跑一遍，另外断言三条连接都是 TLS 1.3。
 // 前提：compose 栈已启动，装有 Edge；用法：cd web && node e2e/remote.cjs [--agent-tls13]
@@ -324,6 +324,56 @@ async function moveOnCanvas(page, fx, fy) {
   await card.locator('[data-testid=device-online]', { hasText: '在线' }).waitFor({ timeout: 10000 })
   await card.locator('[data-testid=device-control]').click()
   check('移出名单之后再点：回到等对方同意（这里被拒绝）', await admin.locator('[data-testid=remote-end-reason]', { hasText: '对方拒绝了' }).waitFor({ timeout: 15000 }).then(() => true, () => false))
+
+  // ---- 同意窗口没人点（Agent 设成一直挂着）：误点后取消、改用 PIN，对方电脑上的窗口要马上跟着收起 ----
+  agent.proc.kill()
+  await until(() => agent.proc.exitCode !== null, 5000)
+  agent = startAgent(dir, 'wait')
+  await until(() => agent.out.includes('已连接服务器'), 20000)
+  await admin.goto(BASE + '/devices')
+  await card.locator('[data-testid=device-online]', { hasText: '在线' }).waitFor({ timeout: 10000 })
+  /** 从现在起，被控端的输出里出现这句话要多久（毫秒）；超时返回 null */
+  const agentSays = (from, text, timeout) => {
+    const t = Date.now()
+    return until(() => (agent.out.slice(from).includes(text) ? Date.now() - t + 1 : null), timeout, 50)
+  }
+
+  let mark = agent.out.length
+  await card.locator('[data-testid=device-control]').click()
+  await admin.locator('[data-testid=remote-pending]').waitFor({ timeout: 10000 })
+  const popped = await agentSays(mark, '同意窗口打开', 5000)
+  mark = agent.out.length
+  await admin.locator('[data-testid=remote-pending] button').click()
+  const closedAfter = await agentSays(mark, '同意窗口关闭', 3000)
+  check('误点"远程控制"后取消：对方电脑上的同意窗口马上收起，不用等 30 秒', !!popped && !!closedAfter, { closedAfterMs: closedAfter })
+
+  // 设一个 PIN
+  await admin.goto(BASE + '/devices')
+  await openSettings(admin, card)
+  await admin.locator('[data-testid=device-pin]').fill('246810')
+  await admin.locator('[data-testid=save-device]').click()
+  await admin.locator('[data-testid=device-settings-dialog]').waitFor({ state: 'hidden', timeout: 10000 }).catch(() => undefined)
+
+  // 又误点了一次"查看屏幕"（窗口挂在对方电脑上，没取消），直接在设备列表里用 PIN 连
+  mark = agent.out.length
+  await admin.evaluate(async (id) => {
+    await fetch('/api/remote/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetDeviceId: id, mode: 'View', pin: null }) })
+  }, deviceId)
+  const poppedAgain = await agentSays(mark, '同意窗口打开', 5000)
+  mark = agent.out.length
+  const pinAt = Date.now()
+  await card.locator('[data-testid=device-more]').click()
+  await admin.locator('[data-testid=device-use-pin]:visible').click()
+  await admin.locator('.el-message-box__input input').fill('246810')
+  await admin.locator('.el-message-box__btns .el-button--primary').click()
+  await admin.waitForURL(/\/remote\//, { timeout: 10000 })
+  const startedAfter = await agentSays(mark, '远程会话开始', 8000)
+  const pinStream = await until(async () => (await admin.locator('[data-testid=remote-stats]').textContent().catch(() => '')).includes('1280×720'), 20000)
+  check('同意窗口还挂着时用 PIN 直接连：窗口收起，被控端立刻开始，几秒内出画面',
+    !!poppedAgain && agent.out.slice(mark).includes('同意窗口关闭') && !!startedAfter && !!pinStream,
+    { startedAfterMs: startedAfter, pictureAfterMs: Date.now() - pinAt })
+  await admin.locator('[data-testid=remote-end]').click()
+  await admin.locator('[data-testid=remote-ended]').waitFor({ timeout: 10000 })
 
   // ---- 移除电脑：Agent 回到设备码登记 ----
   await admin.goto(BASE + '/devices')

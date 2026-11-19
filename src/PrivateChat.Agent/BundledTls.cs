@@ -153,17 +153,14 @@ public static class AgentTransport
     private static async Task<Stream> OpenTransportAsync(Uri origin, CancellationToken ct)
     {
         var proxy = SystemProxyFor(origin);
-        var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+        if (proxy is not null && proxy.Scheme != "http")
+            throw new HttpRequestException(HttpRequestError.ProxyTunnelError, $"系统代理 {proxy} 不是 HTTP 代理，自带的 TLS 用不了它");
+        var socket = proxy is null
+            ? await ConnectSocketAsync(origin.IdnHost, origin.Port, ct).ConfigureAwait(false)
+            : await ConnectSocketAsync(proxy.IdnHost, proxy.Port, ct).ConfigureAwait(false);
         try
         {
-            if (proxy is null)
-            {
-                await socket.ConnectAsync(origin.IdnHost, origin.Port, ct).ConfigureAwait(false);
-                return new NetworkStream(socket, ownsSocket: true);
-            }
-            if (proxy.Scheme != "http")
-                throw new HttpRequestException(HttpRequestError.ProxyTunnelError, $"系统代理 {proxy} 不是 HTTP 代理，自带的 TLS 用不了它");
-            await socket.ConnectAsync(proxy.IdnHost, proxy.Port, ct).ConfigureAwait(false);
+            if (proxy is null) return new NetworkStream(socket, ownsSocket: true);
             var stream = new NetworkStream(socket, ownsSocket: true);
             var target = $"{origin.IdnHost}:{origin.Port}";
             await stream.WriteAsync(Encoding.ASCII.GetBytes($"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Connection: keep-alive\r\n\r\n"), ct).ConfigureAwait(false);
@@ -181,6 +178,60 @@ public static class AgentTransport
             if (parts.Length < 2 || parts[1] != "200")
                 throw new HttpRequestException(HttpRequestError.ProxyTunnelError, $"系统代理 {proxy} 拒绝了连接：{status}");
             return stream;
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// 域名有多个地址（IPv6 + IPv4）时不挨个等：先连第一个，过 250 毫秒还没连上就同时试下一个，谁先通用谁。
+    /// 有的网络发了 IPv6 地址却走不通，挨个试的话每条新连接都要先白等二十来秒；浏览器也是这样并行试的。
+    /// </summary>
+    internal static async Task<Socket> ConnectSocketAsync(string host, int port, CancellationToken ct)
+    {
+        var addresses = IPAddress.TryParse(host, out var literal) ? [literal] : await Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);
+        if (addresses.Length == 0) throw new SocketException((int)SocketError.HostNotFound);
+
+        using var attemptsCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var attempts = new List<Task<Socket>>();
+        Exception? last = null;
+        var next = 0;
+        try
+        {
+            while (true)
+            {
+                if (next < addresses.Length) attempts.Add(AttemptAsync(addresses[next++], port, attemptsCts.Token));
+                if (attempts.Count == 0) throw last ?? new SocketException((int)SocketError.HostUnreachable);
+                // 还有没试过的地址：最多等 250 毫秒就加一路；都试上了：等其中一路出结果
+                var stagger = next < addresses.Length ? Task.Delay(250, attemptsCts.Token) : Task.Delay(Timeout.Infinite, attemptsCts.Token);
+                var done = await Task.WhenAny(attempts.Cast<Task>().Append(stagger)).ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested();
+                if (done == stagger) continue;
+                var attempt = (Task<Socket>)done;
+                attempts.Remove(attempt);
+                if (attempt.IsCompletedSuccessfully) return attempt.Result;
+                last = attempt.Exception?.InnerException ?? last;
+            }
+        }
+        finally
+        {
+            // 其余的不要了：还没连上的取消掉，碰巧也连上了的关掉
+            foreach (var other in attempts)
+                _ = other.ContinueWith(t => { if (t.IsCompletedSuccessfully) t.Result.Dispose(); }, TaskScheduler.Default);
+            attemptsCts.Cancel();
+        }
+    }
+
+    private static async Task<Socket> AttemptAsync(IPAddress address, int port, CancellationToken ct)
+    {
+        var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+        try
+        {
+            await socket.ConnectAsync(address, port, ct).ConfigureAwait(false);
+            return socket;
         }
         catch
         {

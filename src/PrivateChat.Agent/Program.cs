@@ -12,7 +12,8 @@ namespace PrivateChat.Agent;
 ///     --name NAME          报给服务器的电脑名（默认计算机名）
 ///     --source pattern     用测试画面代替真实屏幕
 ///     --dry-input FILE     键鼠不注入系统，写到文件里
-///     --consent accept|decline|ignore   自动回复远程请求（accept 需要环境变量 PRIVATECHAT_AGENT_TEST=1）
+///     --consent accept|decline|ignore|wait   自动回复远程请求（accept 需要环境变量 PRIVATECHAT_AGENT_TEST=1；
+///                          wait = 同意窗口一直挂着没人点，直到请求被取消或超时）
 /// PrivateChat.Agent.exe --selftest [out.h264] [--screen]   编码器自检
 /// 环境变量：
 ///     PRIVATECHAT_AGENT_TLS=bundled|system   强制用程序自带的 TLS 1.3 / 系统的 TLS（默认：系统没有 TLS 1.3 时用自带的）

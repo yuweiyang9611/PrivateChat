@@ -41,7 +41,7 @@ public interface IAgentUi
 
 /// <summary>
 /// 无界面模式（--headless）：设备码打印到标准输出并写到数据目录的 device-code.txt，
-/// 同意与否由 --consent 决定（accept / decline / ignore），剪贴板只在内存里。
+/// 同意与否由 --consent 决定（accept / decline / ignore；wait = 像没人点的同意窗口那样挂着，直到请求被取消或超时），剪贴板只在内存里。
 /// </summary>
 public sealed class HeadlessUi(string dataDir, string? serverUrl, string consent) : IAgentUi
 {
@@ -76,10 +76,20 @@ public sealed class HeadlessUi(string dataDir, string? serverUrl, string consent
         else File.WriteAllLines(path, [problem.Summary, problem.Advice, problem.Technical]);
     }
 
-    public Task<bool?> AskConsentAsync(AgentSessionRequest request, CancellationToken ct)
+    public async Task<bool?> AskConsentAsync(AgentSessionRequest request, CancellationToken ct)
     {
-        AgentLog.Info($"{request.ControllerName} 请求{(request.Mode == RemoteSessionMode.View ? "查看" : "控制")}，自动回复：{consent}");
-        return Task.FromResult<bool?>(consent switch { "accept" => true, "decline" => false, _ => null });
+        var what = request.Mode == RemoteSessionMode.View ? "查看" : "控制";
+        if (consent == "wait")
+        {
+            // 像真的同意窗口那样一直开着没人点：直到请求被取消或超时才关
+            AgentLog.Info($"同意窗口打开：{request.ControllerName} 请求{what}");
+            var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using (ct.Register(() => closed.TrySetResult())) await closed.Task;
+            AgentLog.Info($"同意窗口关闭：{request.ControllerName} 的{what}请求已取消或超时");
+            return null;
+        }
+        AgentLog.Info($"{request.ControllerName} 请求{what}，自动回复：{consent}");
+        return consent switch { "accept" => true, "decline" => false, _ => null };
     }
 
     public void ShowBanner(AgentSessionRequest? request)

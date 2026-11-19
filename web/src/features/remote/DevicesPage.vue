@@ -192,7 +192,7 @@ const reasonKeys = { declined: 1, timeout: 1, controller: 1, agent: 1, stopped: 
               <el-button :icon="MoreFilled" circle text data-testid="device-more" />
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item v-if="d.hasPin && d.canControl && d.online" command="pin">{{ t('remote.usePin') }}</el-dropdown-item>
+                  <el-dropdown-item v-if="d.hasPin && d.canControl && d.online" command="pin" data-testid="device-use-pin">{{ t('remote.usePin') }}</el-dropdown-item>
                   <el-dropdown-item v-if="d.canManage" command="settings" data-testid="device-settings">{{ t('remote.settings') }}</el-dropdown-item>
                   <el-dropdown-item v-if="d.canManage" command="revoke" divided data-testid="device-revoke">{{ t('remote.revoke') }}</el-dropdown-item>
                 </el-dropdown-menu>

@@ -282,8 +282,11 @@ public sealed class AgentService
             .Build();
         var revoked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        hub.On<AgentSessionRequest>(AgentHubEvents.SessionRequested, r => _ = OnRequestedAsync(r));
-        hub.On<AgentSessionEnded>(AgentHubEvents.SessionEnded, e => _ = OnEndedAsync(e.SessionId, e.Reason));
+        // 处理函数必须立刻返回（花括号写法，不把 Task 交回去）：SignalR 按顺序一个一个处理通知，会等上一个的 Task 结束。
+        // 以前写成 r => _ = OnRequestedAsync(r)，这个表达式的值就是那个 Task——同意窗口开着的时候，
+        // 后面的通知（对方取消了、又发了一次、用 PIN 直接连）全都排队，要等窗口被点掉或 30 秒超时才轮到
+        hub.On<AgentSessionRequest>(AgentHubEvents.SessionRequested, r => { _ = OnRequestedAsync(r); });
+        hub.On<AgentSessionEnded>(AgentHubEvents.SessionEnded, e => { _ = OnEndedAsync(e.SessionId, e.Reason); });
         hub.On(AgentHubEvents.Revoked, () => revoked.TrySetResult());
         hub.Reconnecting += _ =>
         {
@@ -367,6 +370,9 @@ public sealed class AgentService
             if (_runner is { } old && old.Id != request.SessionId) await StopRunnerCoreAsync(); // 服务端保证旧的已经结束
             if (request.Active)
             {
+                // 不用同意就开始的（PIN、免同意名单）：之前还挂着的同意窗口是同一个人更早发的请求，
+                // 服务器已经把它顶掉了，窗口跟着收起来，别让电脑前的人对着一个没用的窗口点
+                _consent?.Cancel();
                 if (_runner?.Id != request.SessionId) StartRunner(request);
                 return;
             }
