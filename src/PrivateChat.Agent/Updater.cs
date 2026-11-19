@@ -141,6 +141,7 @@ public sealed class Updater(string dataDir)
         TryDelete(old);
         if (File.Exists(old)) old = $"{current}.{DateTime.Now.Ticks}.old"; // 上次留下的还删不掉（被占着）：换个名字
 
+        using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, ReadySignalName(dataDir));
         try
         {
             File.Move(current, old); // 正在运行的 exe 可以改名，不能覆盖
@@ -159,7 +160,6 @@ public sealed class Updater(string dataDir)
             throw;
         }
 
-        using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, ReadySignalName(dataDir));
         Process? child = null;
         try
         {
@@ -203,20 +203,43 @@ public sealed class Updater(string dataDir)
             using (ready) ready.Set();
     }
 
-    /// <summary>清掉升级留下的旧文件（改了名的旧程序、下载目录）。旧进程可能还没退干净，删不掉的下次启动再删。</summary>
-    public void CleanUp()
+    /// <summary>取得单实例后、检查更新前清理上次换版的备份。旧进程尚占用文件时返回 false。</summary>
+    public bool CleanUpOldExecutables()
     {
-        if (!IsPublishedSingleFile || Environment.ProcessPath is not { } current) return;
+        if (!IsPublishedSingleFile || Environment.ProcessPath is not { } current) return true;
         try
         {
             var dir = Path.GetDirectoryName(current)!;
             var name = Path.GetFileName(current);
+            var clean = true;
             foreach (var file in Directory.EnumerateFiles(dir, name + ".*"))
+            {
                 if (file.EndsWith(".old", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".bad", StringComparison.OrdinalIgnoreCase))
+                {
                     TryDelete(file);
-            if (Directory.Exists(UpdateDir))
-                foreach (var file in Directory.EnumerateFiles(UpdateDir))
+                    if (File.Exists(file)) clean = false;
+                }
+            }
+            return clean;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>拿到清单后清理下载残留。保留仍待安装的版本，DownloadAsync 使用前会重新核对文件。</summary>
+    public void CleanUpDownloads(string? keepVersion)
+    {
+        if (!Directory.Exists(UpdateDir)) return;
+        var keep = keepVersion is null ? null : $"PrivateChat.Agent-{keepVersion}.exe";
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(UpdateDir, "PrivateChat.Agent-*"))
+            {
+                if (!string.Equals(Path.GetFileName(file), keep, StringComparison.OrdinalIgnoreCase))
                     TryDelete(file);
+            }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

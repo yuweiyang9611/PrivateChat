@@ -1,5 +1,6 @@
 // 被控端自动升级端到端：用真正发布出来的安装包（web 镜像里的 /downloads/PrivateChat.Agent.exe），不开浏览器。
 // 把安装包下到临时目录当作"装在电脑上的程序"，让它假装自己是旧版本（--pretend-version 0.0.1），然后：
+//   · 首次检查等待清单期间保留已核对的安装包，收到清单后直接用缓存升级；
 //   1. 清单里的 SHA-256 被改过：不升级，照常在线，程序文件原样；
 //   2. 新版本根本启动不了（清单和文件对得上，但文件不是能运行的程序）：换回原来的，照常在线；
 //   3. 正常情况：自己发现新版本 → 下载 → 核对 → 换掉自己 → 重启，重新上线后报的是新版本号，旧文件清掉，只剩一个进程，不会反复升级。
@@ -47,10 +48,17 @@ async function api(method, url, body) {
 function startEntry() {
   const upstream = new URL(BASE)
   const garbage = crypto.randomBytes(4096)
-  const state = { mode: 'pass', manifestHits: 0, installerHits: 0 }
-  const server = http.createServer((req, res) => {
+  const state = { mode: 'pass', manifestHits: 0, installerHits: 0, nextManifestGate: null }
+  const server = http.createServer(async (req, res) => {
     const p = req.url.split('?')[0]
-    if (p === '/downloads/PrivateChat.Agent.json') state.manifestHits++
+    if (p === '/downloads/PrivateChat.Agent.json') {
+      state.manifestHits++
+      if (state.nextManifestGate) {
+        const gate = state.nextManifestGate
+        state.nextManifestGate = null
+        await gate
+      }
+    }
     if (p === '/downloads/PrivateChat.Agent.exe') state.installerHits++
     if (state.mode === 'bad-exe' && p === '/downloads/PrivateChat.Agent.json') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -162,6 +170,43 @@ const killAgents = (dataDir) => { for (const pid of agentPids(dataDir)) try { pr
     const registered = await saysSince(0, '已连接服务器', 30000)
     check('发布出来的安装包能登记上线；关掉自动升级时明说没有启用', !!registered && out.includes('自动升级没有启用') && (await device())?.agentVersion === VERSION,
       { version: (await device())?.agentVersion })
+    await stopAll()
+
+    // 首次检查已经发出 GET 时，启动时的清理已结束，旧版 8 秒后的第二次清理已安排。
+    // 先在缓存目录外核对真实发布包，再一次改名移入，模拟下载完成后因为有远程会话而暂缓安装。
+    const updateDir = path.join(dataDir, 'update')
+    const staged = path.join(work, 'verified.exe')
+    const cached = path.join(updateDir, `PrivateChat.Agent-${VERSION}.exe`)
+    fs.mkdirSync(updateDir, { recursive: true })
+    fs.copyFileSync(exe, staged)
+    if (fs.statSync(staged).size !== manifest.size || sha256(staged) !== manifest.sha256) throw new Error('准备缓存的发布包与清单不符')
+
+    const resumeMark = read().length
+    const downloadsBefore = entry.state.installerHits
+    let releaseManifest
+    entry.state.nextManifestGate = new Promise((resolve) => { releaseManifest = resolve })
+    try {
+      start(['--pretend-version', '0.0.1'])
+      if (!await until(() => entry.state.nextManifestGate === null, 30000, 50)) throw new Error('等待被控端首次请求升级清单超时')
+      fs.renameSync(staged, cached)
+      const deleted = await until(() => !fs.existsSync(cached), 10500, 100)
+      check('首次检查等待清单时，已核对的待安装包仍可用', !deleted, { version: VERSION, cacheExists: fs.existsSync(cached) })
+    } finally {
+      releaseManifest()
+    }
+    const resumeResult = await until(() => {
+      const messages = read().slice(resumeMark)
+      if (messages.includes(`已从 0.0.1 自动升级到 ${VERSION}`)) return 'restarted'
+      if (messages.includes('自动升级没有成功')) return 'failed'
+      return null
+    }, 60000)
+    const resumed = resumeResult === 'restarted' && await until(async () => {
+      const d = await device()
+      return d?.online && d.agentVersion === VERSION
+    }, 30000)
+    check('重新核对并使用缓存升级，原设备上线且没有再下载安装包',
+      !!resumed && entry.state.installerHits === downloadsBefore && sha256(exe) === manifest.sha256,
+      { resumeResult, online: !!resumed, installerDownloads: entry.state.installerHits - downloadsBefore })
     await stopAll()
 
     // ---- 1. 清单被改过：SHA-256 对不上，不升级 ----

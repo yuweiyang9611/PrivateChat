@@ -157,8 +157,12 @@ public sealed class AgentService
             AgentLog.Info($"自动升级没有启用：{reason}");
             return;
         }
-        _updater.CleanUp();
-        var first = true;
+        // 单实例已交接，但 Windows 可能仍占着旧 exe。只在第一次检查前串行重试清理。
+        if (!_updater.CleanUpOldExecutables())
+        {
+            await Task.Delay(TimeSpan.FromSeconds(8), ct);
+            _updater.CleanUpOldExecutables();
+        }
         var wait = TimeSpan.FromSeconds(10);
         while (!ct.IsCancellationRequested)
         {
@@ -169,12 +173,6 @@ public sealed class AgentService
             catch (OperationCanceledException)
             {
                 return;
-            }
-            if (first)
-            {
-                // 刚升级完的话，旧进程这会儿才退干净：把它留下的文件再清一遍
-                first = false;
-                _ = Task.Delay(TimeSpan.FromSeconds(8), ct).ContinueWith(_ => _updater.CleanUp(), ct, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
             }
             wait = Updater.CheckInterval;
             if (!_config.HasServer) wait = TimeSpan.FromMinutes(1);
@@ -202,7 +200,10 @@ public sealed class AgentService
     {
         var server = ServerFromConfig();
         var manifest = await _updater.FetchManifestAsync(server, ct);
-        if (manifest is null || !UpdateManifest.IsNewer(manifest.Version, Version)) return UpdateOutcome.UpToDate;
+        if (manifest is null) return UpdateOutcome.UpToDate;
+        var newer = UpdateManifest.IsNewer(manifest.Version, Version);
+        _updater.CleanUpDownloads(newer ? manifest.Version : null);
+        if (!newer) return UpdateOutcome.UpToDate;
         if (_runner is not null)
         {
             AgentLog.Info($"有新版本 {manifest.Version}，等这次远程结束后再升级");
