@@ -13,7 +13,8 @@ const REAL_CF = process.env.E2E_REAL_CF === '1'
 const BASE = process.env.E2E_BASE || 'http://localhost:8080'
 const SFU_PORT = Number(process.env.E2E_SFU_PORT || 8788)
 const COMPOSE_FILE = path.resolve(__dirname, '../../deploy/docker-compose.yml')
-const COMPOSE = `docker compose -f "${COMPOSE_FILE}"`
+// E2E_COMPOSE：对着另一套 compose 栈跑（带 -p / -f 的完整命令，和 remote.cjs 一样）
+const COMPOSE = process.env.E2E_COMPOSE || `docker compose -f "${COMPOSE_FILE}"`
 
 // 检查实际运行的 api 容器，而不是只看 .env（改了 .env 却没重建容器很常见）。
 // 不打印环境变量的值；错误只给变量名，避免密钥出现在测试日志里。

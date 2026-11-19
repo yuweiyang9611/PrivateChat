@@ -404,6 +404,22 @@ async function moveOnCanvas(page, fx, fy) {
     const fastLog = await until(() => agent.out.match(/网络：目标码率 (\d+) kbps（上限 (\d+)），线路往返 \d+ ms（快速线路）/), 8000)
     check('被控端改用快速线路自己的码率控制', !!fastLog && Number(fastLog[1]) >= 300 && Number(fastLog[2]) === 2500, fastLog?.[0])
 
+    // 在快速线路上换画质：被控端重建编码器（清晰档 15 fps），从关键帧接着发，线路不变；再换回来
+    let rebuilt = agent.out.length
+    await admin.locator('[data-testid=remote-quality-sharp]').click()
+    const sharp = await until(() => /编码 1280x720 15 fps/.test(agent.out.slice(rebuilt)), 8000)
+    await sleep(2000)
+    const sharpOk = !!sharp && (await lineNow()) === 'realtime' && (await fpsNow()) >= 5 && (await statsLine.textContent()).includes('快速线路')
+    rebuilt = agent.out.length
+    await admin.locator('[data-testid=remote-quality-smooth]').click()
+    const smooth = await until(() => /编码 1280x720 20 fps/.test(agent.out.slice(rebuilt)), 8000)
+    // 鼠标从工具栏上挪开：提示条出现在顶部正中，鼠标停在它上面的话它不会自己消失，还会挡住下面要点的按钮
+    await moveOnCanvas(admin, 0.5, 0.5)
+    await sleep(2000)
+    check('快速线路上换画质：编码器重建后画面接着出，仍在快速线路上，中继上没有画面帧',
+      sharpOk && !!smooth && (await lineNow()) === 'realtime' && (await fpsNow()) >= 5 && relayed.video === quietFrom.video,
+      { sharp: !!sharp, smooth: !!smooth, line: await lineNow(), fps: await fpsNow(), relayFrames: relayed.video - quietFrom.video })
+
     // 假 SFU 那一头：被控端发来的画面在解；故意丢掉的 2% 的包靠重发补上了
     const publisher = (await sfu.summary()).find((s) => s.published.length > 0 && s.state === 'connected')
     const received = async () => (await sfu.stats(publisher.id)).inbound.find((t) => t.kind === 'video')
@@ -431,6 +447,7 @@ async function moveOnCanvas(page, fx, fy) {
     check('过一会儿自动重新接上快速线路', !!backToFast && (await until(async () => (await fpsNow()) >= 5, 10000)) !== null, { line: await lineNow() })
 
     // 手动切回标准线路：被控端收掉快速线路，画面回到中继；后面的用例都在中继上跑
+    await admin.locator('.el-message').first().waitFor({ state: 'detached', timeout: 10000 }).catch(() => undefined)
     const mark = agent.out.length
     await admin.locator('[data-testid=remote-line-standard]').click()
     const standard = await until(async () => (await lineNow()) === 'relay' && agent.out.slice(mark).includes('控制端要求改回中继'), 10000)
