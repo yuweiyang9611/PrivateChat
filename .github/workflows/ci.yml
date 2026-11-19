@@ -60,6 +60,7 @@ jobs:
         with:
           context: .
           file: deploy/Dockerfile.api
+          build-args: UBUNTU_MIRROR_HOST=azure.archive.ubuntu.com
           push: false
       - name: Build web image
         uses: docker/build-push-action@v6
