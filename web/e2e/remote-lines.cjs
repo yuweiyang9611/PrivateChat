@@ -102,7 +102,9 @@ function cleanup() {
     for (const line of out.split(/\r?\n/).filter((l) => l.includes('快速线路')).slice(-6)) console.log('   ' + line)
   }
   const fast = connected ? await measure('快速线路（经真实的 Cloudflare Realtime）') : null
-  for (const line of out.split(/\r?\n/).filter((l) => /网络：|快速线路/.test(l)).slice(-8)) console.log('   ' + line.replace(/^\S+ \S+ \[\w+\] /, ''))
+  // 被控端日志里和线路、码率有关的几行（E2E_VERBOSE=1 全打；再加 PRIVATECHAT_AGENT_REALTIME=verbose 还有控制端每秒的汇报）
+  const lines = out.split(/\r?\n/).filter((l) => /网络：|快速线路/.test(l))
+  for (const line of process.env.E2E_VERBOSE ? lines : lines.slice(-8)) console.log('   ' + line.replace(/^\S+ \[\w+\] /, ''))
 
   await page.locator('[data-testid=remote-end]').click()
   await page.locator('[data-testid=remote-ended]').waitFor({ timeout: 15000 })

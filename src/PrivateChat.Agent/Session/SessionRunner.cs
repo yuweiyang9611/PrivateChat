@@ -395,7 +395,9 @@ public sealed class SessionRunner : IAsyncDisposable
                         reported.Confirmed = true;
                         AgentLog.Info("控制端已经在快速线路上收到画面，画面和声音不再经中继");
                     }
-                    reported.Rate.OnReceiverReport(r.LossPermille, r.ReceivedKbps, r.JitterBufferMs, r.RttMs, _clock.ElapsedMilliseconds);
+                    var slowed = reported.Rate.OnReceiverReport(r.LossPermille, r.ReceivedKbps, r.JitterBufferMs, r.RttMs, _clock.ElapsedMilliseconds);
+                    if (slowed is not null) AgentLog.Info($"快速线路降码率：{slowed}");
+                    if (VerboseLine) AgentLog.Info($"快速线路汇报：丢包 {r.LossPermille / 10.0:0.#}%，收 {r.ReceivedKbps} kbps，缓冲 {r.JitterBufferMs} ms，{r.Fps} fps，往返 {r.RttMs} ms；发 {reported.Rate.SentKbps} kbps，目标 {reported.Rate.TargetKbps} kbps，重发 {reported.Publisher.Resent} 包");
                 }
                 return;
         }
@@ -558,6 +560,9 @@ public sealed class SessionRunner : IAsyncDisposable
             publisher?.Dispose();
         }
     }
+
+    /// <summary>排查用：PRIVATECHAT_AGENT_REALTIME=verbose 时把控制端每秒的汇报都记进日志。</summary>
+    private static readonly bool VerboseLine = Environment.GetEnvironmentVariable(RealtimeSwitchVariable)?.Trim().ToLowerInvariant() == "verbose";
 
     private static double TestDropRate()
         => Environment.GetEnvironmentVariable("PRIVATECHAT_AGENT_TEST") == "1"

@@ -13,11 +13,13 @@ public class RealtimeRateControlTests
     /// 过一秒：按目标码率的 share 倍发 20 帧，然后控制端汇报一次。
     /// received：它收到的占发出的多少；loss：它看到的丢包千分比；buffer：浏览器里画面缓冲了多久。
     /// </summary>
-    private static void Second(RealtimeRateController rate, ref long now, double share = 1, double received = 1, int loss = 0, int buffer = 20)
+    private static void Second(RealtimeRateController rate, ref long now, double share = 1, double received = 1, int loss = 0, int buffer = 20, int audioKbps = 0)
     {
         var kbps = rate.TargetKbps * share;
         var perFrame = (int)(kbps * 1000 / 8 / 20);
         for (var i = 0; i < 20; i++) rate.OnSent((uint)(now + i * 50), perFrame, now + i * 50);
+        // 声音：一秒 50 包，只记账
+        for (var i = 0; i < 50 && audioKbps > 0; i++) rate.OnSentUntracked(audioKbps * 1000 / 8 / 50, now + i * 20);
         now += 1000;
         rate.OnReceiverReport(loss, (int)(kbps * received), buffer, 12, now);
     }
@@ -84,13 +86,55 @@ public class RealtimeRateControlTests
         long now = 0;
         Second(rate, ref now, received: 0.5);
         Assert.Equal(Start, rate.TargetKbps); // 一次不算（凑巧少算了一帧），但也不升
-        Second(rate, ref now, received: 0.5);
-        Assert.Equal(270, rate.TargetKbps); // 收到 300：降到它的九成
+        Second(rate, ref now, received: 0.6);
+        Assert.Equal(324, rate.TargetKbps); // 收到 360：降到它的九成
         // 降下来之后收发对上了：先等一等降速的效果，再慢慢往回升（降过之后步子小）
         Second(rate, ref now);
-        Assert.Equal(270, rate.TargetKbps);
+        Assert.Equal(324, rate.TargetKbps);
         Second(rate, ref now);
-        Assert.Equal(301, rate.TargetKbps);
+        Assert.Equal(359, rate.TargetKbps);
+    }
+
+    [Fact]
+    public void Receiving_far_less_than_was_sent_never_cuts_more_than_half_at_once()
+    {
+        var rate = new RealtimeRateController(Min, Max, 2000);
+        long now = 0;
+        Second(rate, ref now, received: 0.05);
+        Second(rate, ref now, received: 0.05);
+        // 收到的只有 100：不是一步降到 90，这个信号没有丢包那么确凿
+        Assert.Equal(1000, rate.TargetKbps);
+    }
+
+    [Fact]
+    public void Sound_is_not_counted_as_picture_that_went_missing()
+    {
+        // 在真实的 Cloudflare 上踩过：声音算进了"发出的"，控制端汇报的却只有画面，码率低的时候看着像丢了三成，
+        // 码率被一步从 2227 压到 112 kbps，接着一个大帧攒不够额度，画面卡了 6 秒
+        var rate = new RealtimeRateController(Min, Max, 2000);
+        long now = 0;
+        for (var i = 0; i < 6; i++) Second(rate, ref now, share: 0.16, audioKbps: 160); // 画面 320 kbps，声音 160 kbps，画面全收到了
+        Assert.Equal(2000, rate.TargetKbps);
+        Assert.Equal(320, rate.SentKbps);
+        // 声音照样占预算：发完一秒的画面和声音，账上欠着的比只发画面多
+        var withSound = new RealtimeRateController(Min, Max, 600);
+        var pictureOnly = new RealtimeRateController(Min, Max, 600);
+        withSound.OnSent(1, 30_000, 0);
+        withSound.OnSentUntracked(15_000, 0);
+        pictureOnly.OnSent(1, 30_000, 0);
+        Assert.True(pictureOnly.Idle(400));
+        Assert.False(withSound.Idle(400));
+        Assert.True(withSound.Idle(600));
+    }
+
+    [Fact]
+    public void A_small_shortfall_at_a_low_rate_is_not_congestion()
+    {
+        var rate = new RealtimeRateController(Min, Max, 2000);
+        long now = 0;
+        // 画面只发了 280 kbps，收到 170：数字太小，统计的时间差一点点就能差出这么多，不算
+        for (var i = 0; i < 6; i++) Second(rate, ref now, share: 0.14, received: 0.6);
+        Assert.Equal(2000, rate.TargetKbps);
     }
 
     [Fact]
