@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { codecFromAnnexB, encode, Features, FrameType, MAX_TEXT_BYTES, modifiersOf, normalizePoint, parseAgentFrame, scanCodeOf, SpecialKey, utf8Length, WheelAccumulator } from './protocol'
+import { codecFromAnnexB, encode, Features, FrameType, MAX_TEXT_BYTES, modifiersOf, normalizePoint, parseAgentFrame, scanCodeOf, SpecialKey, Transport, TransportState, utf8Length, WheelAccumulator } from './protocol'
 
 const buf = (bytes: number[]) => new Uint8Array(bytes).buffer
 
@@ -23,6 +23,12 @@ describe('Agent 帧解析（与 C# RemoteFrames 的布局一致）', () => {
     expect(parseAgentFrame(buf([0x09, 0x2a, 0, 0, 0]))).toEqual({ type: 'ping', sequence: 42 })
     expect(parseAgentFrame(buf([0x08, 0, 0, 0, 0, 1, 2]))).toBeNull() // 没有数据
     expect(parseAgentFrame(buf([0x09, 1, 2]))).toBeNull()
+  })
+
+  it('线路状态：状态、第几次发布、说明', () => {
+    expect(parseAgentFrame(buf([0x0a, 1, 3]))).toEqual({ type: 'transport', state: TransportState.Realtime, generation: 3, detail: '' })
+    expect(parseAgentFrame(new Uint8Array([0x0a, 2, 0, ...new TextEncoder().encode('连不上')]).buffer)).toEqual({ type: 'transport', state: TransportState.RealtimeFailed, generation: 0, detail: '连不上' })
+    expect(parseAgentFrame(buf([0x0a, 1]))).toBeNull()
   })
 
   it('老版本被控端（0.6 及以前）发来的帧照样能解：没有的字段按 0 算', () => {
@@ -53,6 +59,13 @@ describe('控制端帧编码', () => {
     expect(Array.from(encode.setAudio(false))).toEqual([0x1b, 0])
     expect(Array.from(encode.pong(0x01020304))).toEqual([0x1c, 4, 3, 2, 1])
     expect(new TextDecoder().decode(encode.text('中文').subarray(1))).toBe('中文')
+  })
+
+  it('换线路、报接收情况（与 C# 的字节一致；超出范围的数夹住）', () => {
+    expect(Array.from(encode.setTransport(Transport.Realtime))).toEqual([0x1d, 1])
+    expect(Array.from(encode.setTransport(Transport.Relay))).toEqual([0x1d, 0])
+    expect(Array.from(encode.receiverReport({ lossPermille: 25, receivedKbps: 1800, jitterBufferMs: 40, fps: 17, rttMs: 12 }))).toEqual([0x1e, 25, 0, 0x08, 0x07, 40, 0, 17, 12, 0])
+    expect(Array.from(encode.receiverReport({ lossPermille: 5000, receivedKbps: 99999, jitterBufferMs: -3, fps: 999, rttMs: NaN }))).toEqual([0x1e, 0xe8, 0x03, 0xff, 0xff, 0, 0, 255, 0, 0])
   })
 
   it('超过 1 MB 的文字截断在字符边界上', () => {

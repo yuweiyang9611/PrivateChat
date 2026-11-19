@@ -22,6 +22,7 @@ public enum RemoteFrameType : byte
     Status = 0x07,
     Audio = 0x08,       // 对方电脑正在播放的声音
     Ping = 0x09,        // 量线路往返时间的探测包，控制端原样回 Pong
+    Transport = 0x0A,   // 画面和声音现在走哪条线路（见 RemoteTransportState）
 
     // 控制端 → Agent
     MouseMove = 0x10,
@@ -37,7 +38,21 @@ public enum RemoteFrameType : byte
     ReleaseAll = 0x1A,
     SetAudio = 0x1B,
     Pong = 0x1C,
+    SetTransport = 0x1D,    // 让画面和声音改走哪条线路
+    ReceiverReport = 0x1E,  // 快速线路下，控制端每秒报一次自己收得怎么样
 }
+
+/// <summary>
+/// 画面和声音走哪条线路。Relay：经我们自己的服务器中继（WebSocket，一直有）；
+/// Realtime：经 Cloudflare Realtime（WebRTC，不回家里的服务器）。键鼠、剪贴板这些控制帧始终走中继。
+/// </summary>
+public enum RemoteTransport : byte { Relay = 0, Realtime = 1 }
+
+/// <summary>
+/// 被控端报告的线路状态。Realtime：已经发布好，控制端可以去拉流了（每发布一次 Generation 加一）；
+/// RealtimeFailed：快速线路没起来或中途断了，画面已经改回中继（说明里是原因）。
+/// </summary>
+public enum RemoteTransportState : byte { Relay = 0, Realtime = 1, RealtimeFailed = 2 }
 
 public enum RemoteVideoCodec : byte { H264 = 1 }
 
@@ -53,6 +68,8 @@ public enum RemoteFeatures : byte
     Audio = 1,
     /// <summary>码率跟着网络自动调（Stats 里带目标码率；会发 Ping 量线路延迟）。</summary>
     AdaptiveBitrate = 2,
+    /// <summary>画面和声音可以改走 Cloudflare Realtime（控制端发 SetTransport 切换）。服务器没配 Realtime 时不带这一位。</summary>
+    Realtime = 4,
 }
 
 public enum RemoteQualityPreset : byte { Smooth = 0, Sharp = 1 }
@@ -97,6 +114,12 @@ public abstract record ControlFrame
     public sealed record ReleaseAll : ControlFrame;
     public sealed record SetAudio(bool On) : ControlFrame;
     public sealed record Pong(uint Sequence) : ControlFrame;
+    public sealed record SetTransport(RemoteTransport Transport) : ControlFrame;
+    /// <summary>
+    /// 快速线路下控制端的接收情况：最近一秒丢包的千分比、收到的码率、浏览器里画面缓冲了多久、解出的帧率、
+    /// 浏览器到 SFU 的往返时间。被控端据此调码率（SFU 只管转发，不会告诉我们订阅端的网络怎么样）。
+    /// </summary>
+    public sealed record ReceiverReport(int LossPermille, int ReceivedKbps, int JitterBufferMs, int Fps, int RttMs) : ControlFrame;
 }
 
 public static class RemoteFrames
@@ -185,6 +208,18 @@ public static class RemoteFrames
 
     public static byte[] Status(RemoteStatusCode code, string message = "") => WithText(RemoteFrameType.Status, message, (byte)code);
 
+    /// <summary>线路状态：状态、第几次发布（控制端据此知道要不要重新拉流）、说明。</summary>
+    public static byte[] Transport(RemoteTransportState state, int generation, string detail = "")
+    {
+        var text = Encoding.UTF8.GetBytes(detail);
+        var b = new byte[3 + text.Length];
+        b[0] = (byte)RemoteFrameType.Transport;
+        b[1] = (byte)state;
+        b[2] = (byte)generation;
+        text.CopyTo(b.AsSpan(3));
+        return b;
+    }
+
     public static byte[] Clipboard(string text) => WithText(RemoteFrameType.Clipboard, text);
 
     /// <summary>类型字节 + 可选前缀字节 + UTF-8 文本（超过上限时截断在字符边界上）。</summary>
@@ -228,6 +263,10 @@ public static class RemoteFrames
             RemoteFrameType.ReleaseAll => new ControlFrame.ReleaseAll(),
             RemoteFrameType.SetAudio when p.Length >= 1 => new ControlFrame.SetAudio(p[0] != 0),
             RemoteFrameType.Pong when p.Length >= 4 => new ControlFrame.Pong(BinaryPrimitives.ReadUInt32LittleEndian(p)),
+            RemoteFrameType.SetTransport when p.Length >= 1 && p[0] <= 1 => new ControlFrame.SetTransport((RemoteTransport)p[0]),
+            RemoteFrameType.ReceiverReport when p.Length >= 9 => new ControlFrame.ReceiverReport(
+                BinaryPrimitives.ReadUInt16LittleEndian(p), BinaryPrimitives.ReadUInt16LittleEndian(p[2..]),
+                BinaryPrimitives.ReadUInt16LittleEndian(p[4..]), p[6], BinaryPrimitives.ReadUInt16LittleEndian(p[7..])),
             _ => null,
         };
     }
@@ -254,6 +293,20 @@ public static class RemoteFrames
     }
 
     public static byte[] SetAudio(bool on) => [(byte)RemoteFrameType.SetAudio, on ? (byte)1 : (byte)0];
+
+    public static byte[] SetTransport(RemoteTransport transport) => [(byte)RemoteFrameType.SetTransport, (byte)transport];
+
+    public static byte[] ReceiverReport(int lossPermille, int receivedKbps, int jitterBufferMs, int fps, int rttMs)
+    {
+        var b = new byte[10];
+        b[0] = (byte)RemoteFrameType.ReceiverReport;
+        BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(1), (ushort)Math.Clamp(lossPermille, 0, 1000));
+        BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(3), (ushort)Math.Clamp(receivedKbps, 0, ushort.MaxValue));
+        BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(5), (ushort)Math.Clamp(jitterBufferMs, 0, ushort.MaxValue));
+        b[7] = (byte)Math.Clamp(fps, 0, 255);
+        BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(8), (ushort)Math.Clamp(rttMs, 0, ushort.MaxValue));
+        return b;
+    }
 
     public static byte[] FrameAck(uint timestampMs)
     {
@@ -289,6 +342,25 @@ public sealed record AgentReport(string Version, string Os, IReadOnlyList<AgentS
 /// 证书是服务器自己生成的自签证书，被控端经公网（证书由正规机构签发、过 Access）拿到指纹，之后直连时只认这一张。
 /// </summary>
 public sealed record AgentDirectInfo(string Url, string Pin);
+
+/// <summary>ICE 服务器，和浏览器的 RTCIceServer 一个形状。</summary>
+public sealed record RemoteIceServer(IReadOnlyList<string> Urls, string? Username = null, string? Credential = null);
+
+/// <summary>
+/// 快速线路（画面和声音经 Cloudflare Realtime）的信令。被控端和网页都不直接碰 Cloudflare 的接口，SDP 经我们的服务器转手：
+/// GET  /api/remote/sessions/{id}/realtime             → <see cref="RemoteRealtimeInfo"/>（两边都能调）
+/// POST /api/remote/sessions/{id}/realtime/publish     被控端：<see cref="RemoteRealtimePublishRequest"/> → <see cref="RemoteRealtimePublishResponse"/>
+/// POST /api/remote/sessions/{id}/realtime/pull        控制端：→ <see cref="RemoteRealtimePullResponse"/>（SFU 给的 offer）
+/// POST /api/remote/sessions/{id}/realtime/renegotiate 控制端：<see cref="RemoteRealtimeAnswerRequest"/>
+/// </summary>
+public sealed record RemoteRealtimeInfo(bool Available, IReadOnlyList<RemoteIceServer> IceServers);
+
+/// <summary>一条轨道：它在 SDP 里的 mid 和种类（video / audio）。</summary>
+public sealed record RemoteRealtimeTrack(string Mid, string Kind);
+public sealed record RemoteRealtimePublishRequest(string Offer, IReadOnlyList<RemoteRealtimeTrack> Tracks);
+public sealed record RemoteRealtimePublishResponse(string Answer);
+public sealed record RemoteRealtimePullResponse(string Offer, IReadOnlyList<RemoteRealtimeTrack> Tracks);
+public sealed record RemoteRealtimeAnswerRequest(string Answer);
 
 /// <summary>证书指纹：公钥（SubjectPublicKeyInfo，DER）的 SHA-256，base64。服务器和被控端用同一份算法。</summary>
 public static class CertificatePin

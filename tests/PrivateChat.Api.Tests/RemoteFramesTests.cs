@@ -84,5 +84,32 @@ public class RemoteFramesTests
         // 只看模式下也可以听声音、也要回探测包
         Assert.False(RemoteFrames.IsInput(RemoteFrameType.SetAudio));
         Assert.False(RemoteFrames.IsInput(RemoteFrameType.Pong));
+        // 只看模式下也可以换线路、也要报接收情况
+        Assert.False(RemoteFrames.IsInput(RemoteFrameType.SetTransport));
+        Assert.False(RemoteFrames.IsInput(RemoteFrameType.ReceiverReport));
+    }
+
+    [Fact]
+    public void Transport_frames_have_the_documented_layout()
+    {
+        // 被控端 → 控制端：状态、第几次发布、说明
+        Assert.Equal([0x0A, 1, 3], RemoteFrames.Transport(RemoteTransportState.Realtime, 3));
+        Assert.Equal([0x0A, 2, 0, (byte)'x'], RemoteFrames.Transport(RemoteTransportState.RealtimeFailed, 0, "x"));
+        Assert.Equal(7, RemoteFrames.Transport(RemoteTransportState.Realtime, 263)[2]); // 只有一个字节，转一圈回来
+
+        // 控制端 → 被控端
+        Assert.Equal([0x1D, 1], RemoteFrames.SetTransport(RemoteTransport.Realtime));
+        Assert.Equal(RemoteTransport.Realtime, Assert.IsType<ControlFrame.SetTransport>(RemoteFrames.ParseControl(RemoteFrames.SetTransport(RemoteTransport.Realtime))).Transport);
+        Assert.Equal(RemoteTransport.Relay, Assert.IsType<ControlFrame.SetTransport>(RemoteFrames.ParseControl(RemoteFrames.SetTransport(RemoteTransport.Relay))).Transport);
+        Assert.Null(RemoteFrames.ParseControl([(byte)RemoteFrameType.SetTransport])); // 太短
+        Assert.Null(RemoteFrames.ParseControl([(byte)RemoteFrameType.SetTransport, 9])); // 没有这条线路
+
+        var bytes = RemoteFrames.ReceiverReport(25, 1800, 40, 17, 12);
+        Assert.Equal([0x1E, 25, 0, 0x08, 0x07, 40, 0, 17, 12, 0], bytes);
+        Assert.Equal(new ControlFrame.ReceiverReport(25, 1800, 40, 17, 12), RemoteFrames.ParseControl(bytes));
+        // 超出范围的数夹住，不回绕
+        Assert.Equal(new ControlFrame.ReceiverReport(1000, 65535, 65535, 255, 65535), RemoteFrames.ParseControl(RemoteFrames.ReceiverReport(5000, 99999, 99999, 999, 99999)));
+        Assert.Null(RemoteFrames.ParseControl(bytes.AsSpan(0, 9))); // 太短
+        Assert.Null(RemoteFrames.ParseControl(RemoteFrames.Transport(RemoteTransportState.Realtime, 1))); // 这是被控端发的
     }
 }

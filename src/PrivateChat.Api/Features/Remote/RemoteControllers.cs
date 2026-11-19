@@ -91,7 +91,7 @@ public sealed class AgentDirectController(IOptions<RemoteOptions> options, KeySt
 [ApiController]
 [Route("api/remote/sessions")]
 [Authorize]
-public sealed class RemoteSessionsController(RemoteService remote) : ControllerBase
+public sealed class RemoteSessionsController(RemoteService remote, RemoteRealtimeService realtime) : ControllerBase
 {
     /// <summary>发起远程（查看 / 控制）。带 PIN 时直接开始，否则等被控端同意（30 秒）。</summary>
     [HttpPost]
@@ -125,6 +125,28 @@ public sealed class RemoteSessionsController(RemoteService remote) : ControllerB
     /// <summary>挂断：控制的人、被控端、设备主人、管理员。</summary>
     [HttpPost("{id:guid}/end")]
     public Task<RemoteSessionDto> End(Guid id, CancellationToken ct) => remote.EndSessionAsync(User, id, ct);
+
+    // ---- 快速线路：画面和声音经 Cloudflare Realtime，不经我们的中继（见 RemoteRealtimeService）----
+
+    /// <summary>这台服务器能不能走快速线路，以及连 Cloudflare 用的 ICE 服务器。被控端和控制端都要先问。</summary>
+    [HttpGet("{id:guid}/realtime")]
+    public Task<RemoteRealtimeInfo> Realtime(Guid id, CancellationToken ct) => realtime.InfoAsync(User, id, ct);
+
+    /// <summary>被控端 Agent 把画面和声音发布到快速线路：交 offer，拿 answer。</summary>
+    [HttpPost("{id:guid}/realtime/publish")]
+    public Task<RemoteRealtimePublishResponse> RealtimePublish(Guid id, RemoteRealtimePublishRequest req, CancellationToken ct) => realtime.PublishAsync(User, id, req, ct);
+
+    /// <summary>控制端从快速线路拉流：拿到 offer 后把 answer 交给 renegotiate。</summary>
+    [HttpPost("{id:guid}/realtime/pull")]
+    public Task<RemoteRealtimePullResponse> RealtimePull(Guid id, CancellationToken ct) => realtime.PullAsync(User, id, ct);
+
+    [HttpPost("{id:guid}/realtime/renegotiate")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> RealtimeRenegotiate(Guid id, RemoteRealtimeAnswerRequest req, CancellationToken ct)
+    {
+        await realtime.RenegotiateAsync(User, id, req, ct);
+        return NoContent();
+    }
 }
 
 /// <summary>数据面：WebSocket /ws/remote/{sessionId}/{agent|controller}，会话进行中才能连。</summary>

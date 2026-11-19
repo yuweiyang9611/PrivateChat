@@ -138,6 +138,8 @@ builder.Services.AddHostedService<CallMaintenanceWorker>();
 builder.Services.AddSingleton<AgentRegistry>();
 builder.Services.AddSingleton<RemoteRelay>();
 builder.Services.AddSingleton<RemoteNotifier>();
+builder.Services.AddSingleton<RemoteRealtimeStore>();
+builder.Services.AddScoped<RemoteRealtimeService>();
 builder.Services.AddScoped<RemoteService>();
 builder.Services.AddScoped<SearchService>();
 builder.Services.AddHostedService<RemoteMaintenanceWorker>();

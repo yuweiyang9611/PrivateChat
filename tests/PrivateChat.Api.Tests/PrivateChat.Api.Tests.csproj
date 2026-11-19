@@ -31,6 +31,8 @@
     <Compile Include="..\..\src\PrivateChat.Agent\Session\RateControl.cs" Link="Agent\RateControl.cs" />
     <Compile Include="..\..\src\PrivateChat.Agent\Session\QualityPlanner.cs" Link="Agent\QualityPlanner.cs" />
     <Compile Include="..\..\src\PrivateChat.Agent\Audio\AudioLeveler.cs" Link="Agent\AudioLeveler.cs" />
+    <!-- 快速线路（经 Cloudflare Realtime）里的纯计算：H.264 的 RTP 分片 -->
+    <Compile Include="..\..\src\PrivateChat.Agent\Realtime\H264Rtp.cs" Link="Agent\H264Rtp.cs" />
   </ItemGroup>
 
   <ItemGroup>

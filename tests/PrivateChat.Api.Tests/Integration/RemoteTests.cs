@@ -26,9 +26,9 @@ public class RemoteTests
         public ValueTask DisposeAsync() => App.DisposeAsync();
     }
 
-    private static async Task<Ctx> SetupAsync(string? directUrl = null)
+    private static async Task<Ctx> SetupAsync(string? directUrl = null, bool realtimeConfigured = true)
     {
-        var app = new ApiFactory(directUrl: directUrl);
+        var app = new ApiFactory(realtimeConfigured: realtimeConfigured, directUrl: directUrl);
         var admin = await app.LoginAsync("admin@example.com");
         var adminId = (await (await admin.GetAsync("/api/auth/me")).ReadAsync<UserDto>()).Id;
         var bob = await app.AddUserAsync("bob", UserRole.Member);
@@ -756,5 +756,189 @@ public class RemoteTests
         Assert.Equal(RemoteSessionState.Pending, session.State);
         var accepted = await (await agentDoor.PostJsonAsync($"/api/remote/sessions/{session.Id}/consent", new { accept = true })).ReadAsync<RemoteSessionDto>();
         Assert.Equal(RemoteSessionState.Active, accepted.State);
+    }
+
+    // ---- 快速线路：画面和声音经 Cloudflare Realtime（信令经我们的接口）----
+
+    private static readonly object[] BothTracks = [new { mid = "0", kind = "audio" }, new { mid = "1", kind = "video" }];
+
+    private static Task<HttpResponseMessage> PublishAsync(HttpClient c, Guid sessionId, object? tracks = null, string offer = "v=0 agent-offer")
+        => c.PostJsonAsync($"/api/remote/sessions/{sessionId}/realtime/publish", new { offer, tracks = tracks ?? BothTracks });
+
+    private static Task<HttpResponseMessage> PullAsync(HttpClient c, Guid sessionId) => c.PostJsonAsync($"/api/remote/sessions/{sessionId}/realtime/pull", new { });
+
+    private static Task<HttpResponseMessage> AnswerAsync(HttpClient c, Guid sessionId, string answer = "v=0 browser-answer")
+        => c.PostJsonAsync($"/api/remote/sessions/{sessionId}/realtime/renegotiate", new { answer });
+
+    /// <summary>假 Cloudflare 上建过的会话，按先后顺序（从 tracks/new 的路径里取）。</summary>
+    private static List<string> CloudflareSessions(ApiFactory app)
+        => [.. app.Realtime.CallsTo("/tracks/new").Select(c => c.Path.Split('/')[^3]).Distinct()];
+
+    private static Task CleanedUpAsync(ApiFactory app)
+        => EventuallyAsync(() => app.Services.GetRequiredService<Features.Calls.CallCleanupQueue>().Pending == 0, "Cloudflare 那边的轨道关完");
+
+    private static async Task<(Agent Agent, AgentHubClient Hub, RemoteSessionDto Session)> ActiveSessionAsync(Ctx x)
+    {
+        var agent = await RegisterAsync(x, x.BobClient);
+        var hub = await OnlineAsync(x, agent);
+        var session = await StartAsync(x.BobClient, agent.DeviceId);
+        return (agent, hub, await ConsentAsync(agent, session.Id, true));
+    }
+
+    [PgFact]
+    public async Task Fast_line_is_published_by_the_agent_and_pulled_by_the_controller()
+    {
+        await using var x = await SetupAsync();
+        var (agent, hub, session) = await ActiveSessionAsync(x);
+        await using var _ = hub;
+        var url = $"/api/remote/sessions/{session.Id}/realtime";
+
+        // 两边都先问能不能用、连 Cloudflare 用哪些 ICE 服务器（53 端口的浏览器会拦，不给）
+        foreach (var party in new[] { agent.Http, x.BobClient })
+        {
+            var info = await (await party.GetAsync(url)).ReadAsync<RemoteRealtimeInfo>();
+            Assert.True(info.Available);
+            Assert.Contains(info.IceServers, s => s.Urls.Contains("stun:stun.cloudflare.com:3478"));
+            var turn = Assert.Single(info.IceServers, s => s.Username == "turn-user");
+            Assert.Equal("turn-pass", turn.Credential);
+            Assert.DoesNotContain(turn.Urls, u => u.Contains(":53"));
+        }
+        // 不是这次会话的两方：当作没有这个会话（管理员、电脑的主人以外的人都一样）
+        Assert.Equal(HttpStatusCode.NotFound, (await x.CarolClient.GetAsync(url)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await x.Admin.GetAsync(url)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await PullAsync(x.CarolClient, session.Id)).StatusCode);
+
+        // 被控端还没发布：没东西可拉
+        Assert.Equal(HttpStatusCode.Conflict, (await PullAsync(x.BobClient, session.Id)).StatusCode);
+
+        // 被控端发布：offer 换 answer；轨道名由服务器起，App Secret 只在服务器和 Cloudflare 之间
+        var published = await (await PublishAsync(agent.Http, session.Id)).ReadAsync<RemoteRealtimePublishResponse>();
+        var publishSession = Assert.Single(CloudflareSessions(x.App));
+        Assert.Equal($"v=0 answer {publishSession}", published.Answer);
+        var publishCall = Assert.Single(x.App.Realtime.CallsTo("/tracks/new"));
+        Assert.Equal($"Bearer {FakeRealtime.AppSecret}", publishCall.Authorization);
+        Assert.Equal("v=0 agent-offer", publishCall.Body!["sessionDescription"]!["sdp"]!.GetValue<string>());
+        var sent = publishCall.Body["tracks"]!.AsArray();
+        Assert.Equal(["local", "local"], sent.Select(t => t!["location"]!.GetValue<string>()));
+        Assert.Equal(["0", "1"], sent.Select(t => t!["mid"]!.GetValue<string>()));
+        Assert.StartsWith("audio-", sent[0]!["trackName"]!.GetValue<string>());
+        Assert.StartsWith("video-", sent[1]!["trackName"]!.GetValue<string>());
+
+        // 各干各的：控制端不能发布，被控端不能拉
+        Assert.Equal(HttpStatusCode.Forbidden, (await PublishAsync(x.BobClient, session.Id)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await PullAsync(agent.Http, session.Id)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await AnswerAsync(agent.Http, session.Id)).StatusCode);
+
+        // 控制端拉流：拿到 Cloudflare 的 offer 和两条轨道，交回 answer 才算接上
+        var pulled = await (await PullAsync(x.BobClient, session.Id)).ReadAsync<RemoteRealtimePullResponse>();
+        var pullSession = CloudflareSessions(x.App)[1];
+        Assert.Equal($"v=0 offer {pullSession}", pulled.Offer);
+        Assert.Equal(["audio", "video"], pulled.Tracks.Select(t => t.Kind));
+        Assert.All(pulled.Tracks, t => Assert.False(string.IsNullOrEmpty(t.Mid)));
+        var pullCall = x.App.Realtime.CallsTo("/tracks/new")[1];
+        Assert.All(pullCall.Body!["tracks"]!.AsArray(), t => Assert.Equal(("remote", publishSession), (t!["location"]!.GetValue<string>(), t["sessionId"]!.GetValue<string>())));
+        Assert.True(x.App.Realtime.AwaitingAnswer(pullSession));
+        Assert.Equal(HttpStatusCode.NoContent, (await AnswerAsync(x.BobClient, session.Id)).StatusCode);
+        Assert.False(x.App.Realtime.AwaitingAnswer(pullSession));
+        Assert.Equal("v=0 browser-answer", x.App.Realtime.CallsTo("/renegotiate").Single().Body!["sessionDescription"]!["sdp"]!.GetValue<string>());
+
+        // 控制端换了个标签页重新拉：以前拉的那份让 Cloudflare 停掉
+        var again = await (await PullAsync(x.BobClient, session.Id)).ReadAsync<RemoteRealtimePullResponse>();
+        var secondPull = CloudflareSessions(x.App)[2];
+        Assert.Equal($"v=0 offer {secondPull}", again.Offer);
+        await CleanedUpAsync(x.App);
+        Assert.Equal(pulled.Tracks.Select(t => t.Mid).Order(), x.App.Realtime.ClosedMids(pullSession).Order());
+        Assert.Empty(x.App.Realtime.ClosedMids(publishSession));
+
+        // 被控端重新发布（它那条连接断了重连）：旧的发布和旧的拉流都作废，控制端要重新拉
+        await (await PublishAsync(agent.Http, session.Id)).ReadAsync<RemoteRealtimePublishResponse>();
+        await CleanedUpAsync(x.App);
+        Assert.Equal(["0", "1"], x.App.Realtime.ClosedMids(publishSession).Order());
+        Assert.Equal(again.Tracks.Select(t => t.Mid).Order(), x.App.Realtime.ClosedMids(secondPull).Order());
+        Assert.Equal(HttpStatusCode.Conflict, (await AnswerAsync(x.BobClient, session.Id)).StatusCode);
+        var republished = CloudflareSessions(x.App)[3];
+        var last = await (await PullAsync(x.BobClient, session.Id)).ReadAsync<RemoteRealtimePullResponse>();
+        var lastPull = CloudflareSessions(x.App)[4];
+
+        // 会话结束：两边在 Cloudflare 的轨道都关掉，之后不能再发布、再拉
+        await (await x.BobClient.PostAsync($"/api/remote/sessions/{session.Id}/end", null)).ReadAsync<RemoteSessionDto>();
+        await CleanedUpAsync(x.App);
+        Assert.Equal(["0", "1"], x.App.Realtime.ClosedMids(republished).Order());
+        Assert.Equal(last.Tracks.Select(t => t.Mid).Order(), x.App.Realtime.ClosedMids(lastPull).Order());
+        Assert.Equal(0, x.App.Services.GetRequiredService<RemoteRealtimeStore>().Count);
+        Assert.Equal(HttpStatusCode.Conflict, (await PublishAsync(agent.Http, session.Id)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await PullAsync(x.BobClient, session.Id)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await agent.Http.GetAsync(url)).StatusCode);
+    }
+
+    [PgFact]
+    public async Task Fast_line_needs_an_active_session_and_a_sane_request()
+    {
+        await using var x = await SetupAsync();
+        var agent = await RegisterAsync(x, x.BobClient);
+        await using var hub = await OnlineAsync(x, agent);
+        var session = await StartAsync(x.BobClient, agent.DeviceId);
+
+        // 还在等电脑前的人点同意：不能发布
+        Assert.Equal(RemoteSessionState.Pending, session.State);
+        Assert.Equal(HttpStatusCode.Conflict, (await agent.Http.GetAsync($"/api/remote/sessions/{session.Id}/realtime")).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await PublishAsync(agent.Http, session.Id)).StatusCode);
+        await ConsentAsync(agent, session.Id, true);
+
+        Assert.Equal(HttpStatusCode.BadRequest, (await PublishAsync(agent.Http, session.Id, offer: "")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await PublishAsync(agent.Http, session.Id, offer: new string('x', 200_001))).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await PublishAsync(agent.Http, session.Id, tracks: Array.Empty<object>())).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await PublishAsync(agent.Http, session.Id, tracks: new object[] { new { mid = "0", kind = "video" }, new { mid = "1", kind = "video" } })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await PublishAsync(agent.Http, session.Id, tracks: new object[] { new { mid = "0", kind = "text" } })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await PublishAsync(agent.Http, session.Id, tracks: new object[] { new { mid = "0", kind = "audio" }, new { mid = "0", kind = "video" } })).StatusCode);
+        // 上面这些都没到 Cloudflare
+        Assert.Empty(x.App.Realtime.CallsTo("/sessions/"));
+
+        // 只发画面、不带声音也可以
+        await (await PublishAsync(agent.Http, session.Id, tracks: new object[] { new { mid = "0", kind = "video" } })).ReadAsync<RemoteRealtimePublishResponse>();
+        var pulled = await (await PullAsync(x.BobClient, session.Id)).ReadAsync<RemoteRealtimePullResponse>();
+        Assert.Equal("video", Assert.Single(pulled.Tracks).Kind);
+        Assert.Equal(HttpStatusCode.BadRequest, (await AnswerAsync(x.BobClient, session.Id, answer: " ")).StatusCode);
+    }
+
+    [PgFact]
+    public async Task Fast_line_reports_cloudflare_trouble_without_breaking_the_session()
+    {
+        await using var x = await SetupAsync();
+        var (agent, hub, session) = await ActiveSessionAsync(x);
+        await using var _ = hub;
+
+        // Cloudflare 报错、单条轨道被拒：发布失败（被控端据此退回中继），会话本身不受影响
+        x.App.Realtime.FailNext("/tracks/new", HttpStatusCode.InternalServerError, "internal_error");
+        Assert.Equal(HttpStatusCode.BadGateway, (await PublishAsync(agent.Http, session.Id)).StatusCode);
+        x.App.Realtime.NextTrackError = "invalid_track";
+        Assert.Equal(HttpStatusCode.BadGateway, (await PublishAsync(agent.Http, session.Id)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await PullAsync(x.BobClient, session.Id)).StatusCode); // 没发布成，没东西可拉
+
+        await (await PublishAsync(agent.Http, session.Id)).ReadAsync<RemoteRealtimePublishResponse>();
+        // 拉的时候被控端那条连接已经没了：让控制端等它重新发布
+        x.App.Realtime.NextTrackError = "not_found_track_error";
+        Assert.Equal(HttpStatusCode.Conflict, (await PullAsync(x.BobClient, session.Id)).StatusCode);
+        await (await PullAsync(x.BobClient, session.Id)).ReadAsync<RemoteRealtimePullResponse>();
+        // 交 answer 时 Cloudflare 那边的会话已经过期
+        x.App.Realtime.FailNext("/renegotiate", HttpStatusCode.Gone, "session_error");
+        Assert.Equal(HttpStatusCode.Gone, (await AnswerAsync(x.BobClient, session.Id)).StatusCode);
+
+        Assert.Equal(RemoteSessionState.Active, (await (await x.BobClient.GetAsync($"/api/remote/sessions/{session.Id}")).ReadAsync<RemoteSessionDto>()).State);
+    }
+
+    [PgFact]
+    public async Task Fast_line_is_unavailable_when_cloudflare_realtime_is_not_configured()
+    {
+        await using var x = await SetupAsync(realtimeConfigured: false);
+        var (agent, hub, session) = await ActiveSessionAsync(x);
+        await using var _ = hub;
+
+        var info = await (await agent.Http.GetAsync($"/api/remote/sessions/{session.Id}/realtime")).ReadAsync<RemoteRealtimeInfo>();
+        Assert.False(info.Available);
+        Assert.Empty(info.IceServers);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await PublishAsync(agent.Http, session.Id)).StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await PullAsync(x.BobClient, session.Id)).StatusCode);
+        Assert.Empty(x.App.Realtime.Calls);
     }
 }

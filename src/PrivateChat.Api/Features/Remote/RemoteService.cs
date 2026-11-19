@@ -20,7 +20,7 @@ namespace PrivateChat.Api.Features.Remote;
 /// - 状态迁移都是带条件的 UPDATE（WHERE 还没结束 / 还在等同意），同意、超时、挂断同时发生也只会有一个生效。
 /// - 进行中的会话任一端断开超过 30 秒就结束（RemoteMaintenanceWorker）。
 /// </summary>
-public sealed class RemoteService(AppDbContext db, AgentRegistry agents, RemoteRelay relay, RemoteNotifier notifier, ILogger<RemoteService> logger)
+public sealed class RemoteService(AppDbContext db, AgentRegistry agents, RemoteRelay relay, RemoteRealtimeStore realtime, RemoteNotifier notifier, ILogger<RemoteService> logger)
 {
     public static readonly TimeSpan ConsentTimeout = TimeSpan.FromSeconds(30);
     public static readonly TimeSpan AbsentTimeout = TimeSpan.FromSeconds(30);
@@ -411,6 +411,7 @@ public sealed class RemoteService(AppDbContext db, AgentRegistry agents, RemoteR
     private async Task AfterEndedAsync(Guid id, string reason)
     {
         var bytes = await relay.CloseAsync(id);
+        realtime.Close(id); // 快速线路在 Cloudflare 那边的轨道也关掉
         if (bytes > 0) await db.RemoteSessions.Where(s => s.Id == id).ExecuteUpdateAsync(set => set.SetProperty(s => s.BytesRelayed, s => s.BytesRelayed + bytes));
         var dto = await DtoAsync(id);
         await notifier.SessionEndedAsync(dto.TargetDeviceId, new AgentSessionEnded(id, reason));

@@ -1,13 +1,8 @@
+using PrivateChat.Contracts.Remote;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 
 namespace PrivateChat.Agent.Realtime;
-
-/// <summary>ICE 服务器，和浏览器的 RTCIceServer 一个形状。</summary>
-public sealed record RealtimeIceServer(IReadOnlyList<string> Urls, string? Username = null, string? Credential = null);
-
-/// <summary>发布出去的一条轨道：它在 SDP 里的 mid 和种类（video / audio）。</summary>
-public sealed record RealtimeTrack(string Mid, string Kind);
 
 /// <summary>对面对我们发的一路流的接收情况（RTCP 接收报告里的一项）。</summary>
 public readonly record struct RealtimeReception(bool Video, double FractionLost, int PacketsLost, uint Jitter);
@@ -51,7 +46,7 @@ public sealed class RealtimePublisher : IDisposable
     public event Action<RealtimeReception>? ReceptionReported;
     public event Action<RealtimeLinkState>? StateChanged;
 
-    public RealtimePublisher(IReadOnlyList<RealtimeIceServer> iceServers)
+    public RealtimePublisher(IReadOnlyList<RemoteIceServer> iceServers)
     {
         var config = new RTCConfiguration
         {
@@ -84,7 +79,7 @@ public sealed class RealtimePublisher : IDisposable
     public int RoundTripMs => (int)(_video.RtcpSession?.RoundTripTime.TotalMilliseconds ?? 0);
 
     /// <summary>offer 里的两条轨道（给服务器登记用）。<see cref="CreateOfferAsync"/> 之后才有。</summary>
-    public IReadOnlyList<RealtimeTrack> Tracks { get; private set; } = [];
+    public IReadOnlyList<RemoteRealtimeTrack> Tracks { get; private set; } = [];
 
     public async Task<string> CreateOfferAsync()
     {
@@ -195,9 +190,9 @@ public sealed class RealtimePublisher : IDisposable
     }
 
     /// <summary>从 SDP 里按顺序取出每个 m= 段的种类和 mid。</summary>
-    internal static List<RealtimeTrack> ParseTracks(string sdp)
+    internal static List<RemoteRealtimeTrack> ParseTracks(string sdp)
     {
-        var tracks = new List<RealtimeTrack>();
+        var tracks = new List<RemoteRealtimeTrack>();
         string? kind = null;
         foreach (var raw in sdp.Split('\n'))
         {
@@ -205,7 +200,7 @@ public sealed class RealtimePublisher : IDisposable
             if (line.StartsWith("m=", StringComparison.Ordinal)) kind = line[2..].Split(' ')[0];
             else if (kind is "video" or "audio" && line.StartsWith("a=mid:", StringComparison.Ordinal))
             {
-                tracks.Add(new RealtimeTrack(line[6..], kind));
+                tracks.Add(new RemoteRealtimeTrack(line[6..], kind));
                 kind = null;
             }
         }

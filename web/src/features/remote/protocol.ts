@@ -12,6 +12,7 @@ export const FrameType = {
   Status: 0x07,
   Audio: 0x08,
   Ping: 0x09,
+  Transport: 0x0a,
   MouseMove: 0x10,
   MouseButton: 0x11,
   Wheel: 0x12,
@@ -25,10 +26,25 @@ export const FrameType = {
   ReleaseAll: 0x1a,
   SetAudio: 0x1b,
   Pong: 0x1c,
+  SetTransport: 0x1d,
+  ReceiverReport: 0x1e,
 } as const
 
 /** 被控端支持的可选功能（VideoConfig 的最后一个字节；老版本没有，按 0 算） */
-export const Features = { Audio: 1, AdaptiveBitrate: 2 } as const
+export const Features = { Audio: 1, AdaptiveBitrate: 2, Realtime: 4 } as const
+
+/**
+ * 画面和声音走哪条线路。Relay：经我们的服务器中继（WebSocket）；Realtime：经 Cloudflare Realtime（WebRTC）。
+ * 键鼠、剪贴板这些控制帧始终走中继。
+ */
+export const Transport = { Relay: 0, Realtime: 1 } as const
+export type TransportKind = (typeof Transport)[keyof typeof Transport]
+
+/** 被控端报告的线路状态。Realtime：发布好了，可以拉流；RealtimeFailed：快速线路不通，已改回中继 */
+export const TransportState = { Relay: 0, Realtime: 1, RealtimeFailed: 2 } as const
+
+/** 快速线路下控制端每秒报一次的接收情况 */
+export interface ReceiverReport { lossPermille: number; receivedKbps: number; jitterBufferMs: number; fps: number; rttMs: number }
 
 /** 声音的编码：1 = Opus（48 kHz，一包 20 ms） */
 export const AudioCodec = { Opus: 1 } as const
@@ -52,6 +68,7 @@ export type AgentFrame =
   | { type: 'audio'; timestamp: number; codec: number; channels: number; data: Uint8Array }
   | { type: 'ping'; sequence: number }
   | { type: 'status'; code: number; message: string }
+  | { type: 'transport'; state: number; generation: number; detail: string }
 
 const utf8 = new TextDecoder()
 const utf8Encoder = new TextEncoder()
@@ -97,6 +114,9 @@ export function parseAgentFrame(buffer: ArrayBuffer): AgentFrame | null {
     case FrameType.Ping:
       if (b.length < 5) return null
       return { type: 'ping', sequence: v.getUint32(1, true) }
+    case FrameType.Transport:
+      if (b.length < 3) return null
+      return { type: 'transport', state: b[1]!, generation: b[2]!, detail: utf8.decode(b.subarray(3)) }
     default:
       return null
   }
@@ -161,6 +181,18 @@ export const encode = {
   setAudio: (on: boolean) => frame(FrameType.SetAudio, 1, (_, b) => { b[1] = on ? 1 : 0 }),
   /** 对探测包的回应：序号原样带回去，被控端据此量线路的往返时间 */
   pong: (sequence: number) => frame(FrameType.Pong, 4, (v) => v.setUint32(1, sequence >>> 0, true)),
+  setTransport: (transport: TransportKind) => frame(FrameType.SetTransport, 1, (_, b) => { b[1] = transport }),
+  receiverReport: (r: ReceiverReport) => frame(FrameType.ReceiverReport, 9, (v, b) => {
+    v.setUint16(1, clampTo(r.lossPermille, 1000), true)
+    v.setUint16(3, clampTo(r.receivedKbps, 0xffff), true)
+    v.setUint16(5, clampTo(r.jitterBufferMs, 0xffff), true)
+    b[7] = clampTo(r.fps, 255)
+    v.setUint16(8, clampTo(r.rttMs, 0xffff), true)
+  }),
+}
+
+function clampTo(n: number, max: number): number {
+  return Number.isFinite(n) ? Math.max(0, Math.min(max, Math.round(n))) : 0
 }
 
 function clamp16(n: number): number {
