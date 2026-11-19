@@ -27,8 +27,10 @@ public sealed class SessionRunner : IAsyncDisposable
     private static readonly long AckTimeoutTicks = Stopwatch.Frequency * 3;
 
     private readonly AgentSessionRequest _request;
-    private readonly ServerInfo _server;
-    private readonly HttpMessageInvoker? _invoker;
+    private ServerInfo _server;
+    /// <summary>走局域网直连时的退路（公网）：直连连不上就改走它，这次会话剩下的都走公网。</summary>
+    private ServerInfo? _fallback;
+    private HttpMessageInvoker? _invoker;
     private readonly Func<IFrameSource> _sourceFactory;
     private readonly InputController _input;
     private readonly IAgentUi _ui;
@@ -61,11 +63,12 @@ public sealed class SessionRunner : IAsyncDisposable
         public Channel<byte[]> Outgoing { get; } = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(64) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
     }
 
-    public SessionRunner(AgentSessionRequest request, ServerInfo server, Func<IFrameSource> sourceFactory, InputController input, IAgentUi ui)
+    public SessionRunner(AgentSessionRequest request, ServerInfo server, ServerInfo? fallback, Func<IFrameSource> sourceFactory, InputController input, IAgentUi ui)
     {
         _request = request;
         _server = server;
-        _invoker = AgentTransport.CreateInvoker(new Uri(server.Url));
+        _fallback = fallback;
+        _invoker = AgentTransport.CreateInvoker(new Uri(server.Url), server.Pin);
         _sourceFactory = sourceFactory;
         _input = input;
         _ui = ui;
@@ -116,6 +119,16 @@ public sealed class SessionRunner : IAsyncDisposable
                         Finish("ended");
                         return;
                     }
+                    if (_fallback is { } fallback)
+                    {
+                        // 局域网直连连不上（比如笔记本刚离开家）：马上改走公网，不占重连的时间
+                        AgentLog.Warn($"远程数据通道经局域网直连连不上，改走公网：{ex.Message}");
+                        _invoker?.Dispose();
+                        _server = fallback;
+                        _fallback = null;
+                        _invoker = AgentTransport.CreateInvoker(new Uri(fallback.Url), fallback.Pin);
+                        continue;
+                    }
                     if (DateTime.UtcNow - lastUp > ReconnectWindow)
                     {
                         Finish("连不上服务器");
@@ -128,7 +141,7 @@ public sealed class SessionRunner : IAsyncDisposable
                 }
 
                 delay = 500;
-                AgentLog.Info($"远程数据通道已连接：{Id}");
+                AgentLog.Info($"远程数据通道已连接：{Id}{(_server.IsDirect ? "（局域网直连）" : "")}");
                 var connection = new Connection(socket);
                 _connection = connection;
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);

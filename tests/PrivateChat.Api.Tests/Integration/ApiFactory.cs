@@ -2,6 +2,7 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.Identity;
@@ -69,10 +70,16 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
     /// <summary>发往推送服务的请求。</summary>
     public CapturingPush Push { get; } = new();
 
-    public ApiFactory(bool realtimeConfigured = true, bool turnConfigured = true)
+    private readonly string? _directUrl;
+
+    /// <summary>测试服务器只有一个"端口"：带这个头的请求当成是从被控端的局域网直连端口（Remote:DirectPort）进来的。</summary>
+    public const string DirectPortHeader = "X-Test-Direct-Port";
+
+    public ApiFactory(bool realtimeConfigured = true, bool turnConfigured = true, string? directUrl = null)
     {
         _realtimeConfigured = realtimeConfigured;
         _turnConfigured = turnConfigured;
+        _directUrl = directUrl;
         DataRoot = Path.Combine(Path.GetTempPath(), DbName);
         _connection = new NpgsqlConnectionStringBuilder(TestDatabase.AdminConnection) { Database = DbName, Timeout = 15 }.ConnectionString;
         using var c = new NpgsqlConnection(TestDatabase.AdminConnection);
@@ -96,11 +103,27 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         builder.UseSetting("CloudflareRealtime:AppSecret", _realtimeConfigured ? FakeRealtime.AppSecret : "");
         builder.UseSetting("CloudflareRealtime:TurnKeyId", _turnConfigured ? FakeRealtime.TurnKeyId : "");
         builder.UseSetting("CloudflareRealtime:TurnApiToken", _turnConfigured ? FakeRealtime.TurnToken : "");
+        if (_directUrl is not null) builder.UseSetting("Remote:DirectUrl", _directUrl);
         builder.ConfigureTestServices(services =>
         {
             services.AddHttpClient<CloudflareRealtimeClient>().ConfigurePrimaryHttpMessageHandler(() => Realtime);
             services.AddHttpClient(nameof(PushService)).ConfigurePrimaryHttpMessageHandler(() => Push);
+            services.AddTransient<IStartupFilter, DirectPortFilter>();
         });
+    }
+
+    /// <summary>在所有中间件之前：带 <see cref="DirectPortHeader"/> 的请求，把"本地端口"改成直连端口。</summary>
+    private sealed class DirectPortFilter : IStartupFilter
+    {
+        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
+        {
+            app.Use((context, nextMiddleware) =>
+            {
+                if (context.Request.Headers.ContainsKey(DirectPortHeader)) context.Connection.LocalPort = new PrivateChat.Api.Features.Remote.RemoteOptions().DirectPort;
+                return nextMiddleware(context);
+            });
+            next(app);
+        };
     }
 
     public const string Password = "test-password-123";

@@ -16,6 +16,9 @@ public sealed class AgentConfig
     public string AccessClientSecretProtected { get; set; } = "";
     public string DeviceTokenProtected { get; set; } = "";
     public Guid? DeviceId { get; set; }
+    /// <summary>局域网直连的入口和证书指纹：添加之后经公网从服务器拿到（不是秘密，明文存）；服务器没开直连时为空。</summary>
+    public string DirectUrl { get; set; } = "";
+    public string DirectPin { get; set; } = "";
 
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
 

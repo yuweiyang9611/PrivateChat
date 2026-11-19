@@ -5,11 +5,12 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using PrivateChat.Api.Features.Auth;
 using PrivateChat.Api.Infrastructure;
+using PrivateChat.Api.Infrastructure.Keys;
 using PrivateChat.Contracts.Remote;
 
 namespace PrivateChat.Api.Features.Remote;
 
-/// <summary>环境变量 Remote__AgentAccessClientId / Remote__AgentAccessClientSecret / Remote__AgentDownloadUrl。</summary>
+/// <summary>环境变量 Remote__AgentAccessClientId / Remote__AgentAccessClientSecret / Remote__AgentDownloadUrl / Remote__DirectUrl / Remote__DirectPort。</summary>
 public sealed class RemoteOptions
 {
     public const string Section = "Remote";
@@ -18,6 +19,16 @@ public sealed class RemoteOptions
     public string AgentAccessClientSecret { get; set; } = "";
     /// <summary>Agent 安装包的下载地址（web 镜像里自带一份）。</summary>
     public string AgentDownloadUrl { get; set; } = "/downloads/PrivateChat.Agent.exe";
+    /// <summary>
+    /// 被控端在局域网里直连的地址（如 https://192.168.88.3:3508）：被控端在家时直接连它，不绕 Cloudflare（见 DirectEntrance）。
+    /// 空 = 不开。必须是 https：入口用服务器自己生成的证书，被控端按指纹认它。
+    /// </summary>
+    public string DirectUrl { get; set; } = "";
+    /// <summary>直连入口在 api 进程里听的端口（容器里）；compose 把它发布到宿主机的局域网地址上。</summary>
+    public int DirectPort { get; set; } = 8443;
+
+    public bool DirectEnabled => DirectPort is > 0 and <= 65535
+        && Uri.TryCreate(DirectUrl, UriKind.Absolute, out var url) && url.Scheme == Uri.UriSchemeHttps;
 }
 
 [ApiController]
@@ -53,6 +64,27 @@ public sealed class DevicesController(RemoteService remote) : ControllerBase
         var json = JsonSerializer.SerializeToUtf8Bytes(new { v = 1, url = server, id = configured ? o.AgentAccessClientId : null, secret = configured ? o.AgentAccessClientSecret : null });
         var code = "PCA1." + Convert.ToBase64String(json).TrimEnd('=').Replace('+', '-').Replace('/', '_');
         return new AgentSetupDto(server, string.IsNullOrWhiteSpace(o.AgentDownloadUrl) ? null : o.AgentDownloadUrl, code, configured);
+    }
+}
+
+/// <summary>被控端在局域网里直连用的入口（只给设备令牌）。</summary>
+[ApiController]
+[ApiExplorerSettings(IgnoreApi = true)]
+[Route("api/remote/agent")]
+[Authorize]
+public sealed class AgentDirectController(IOptions<RemoteOptions> options, KeyStore keys) : ControllerBase
+{
+    /// <summary>
+    /// 直连地址 + 入口证书的指纹。被控端经公网（正规证书、过 Access）来拿，之后在家直连时只认这张证书；
+    /// 没开直连时 204，被控端据此忘掉之前记下的。
+    /// </summary>
+    [HttpGet("direct")]
+    public ActionResult<AgentDirectInfo> Direct()
+    {
+        if (User.DeviceId() is null) throw ApiException.Forbidden("只给被控电脑上的远程协助程序");
+        var o = options.Value;
+        if (!o.DirectEnabled) return NoContent();
+        return new AgentDirectInfo(o.DirectUrl.TrimEnd('/'), CertificatePin.Of(keys.DirectCertificate));
     }
 }
 

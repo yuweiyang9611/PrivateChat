@@ -33,6 +33,8 @@ builder.Services.Configure<CloudflareAccessOptions>(builder.Configuration.GetSec
 builder.Services.Configure<CloudflareRealtimeOptions>(builder.Configuration.GetSection(CloudflareRealtimeOptions.Section));
 builder.Services.Configure<WebPushOptions>(builder.Configuration.GetSection(WebPushOptions.Section));
 builder.Services.Configure<RemoteOptions>(builder.Configuration.GetSection(RemoteOptions.Section));
+// 被控端的局域网直连入口（配了 Remote:DirectUrl 才开）：多听一个 HTTPS 端口
+builder.AddDirectEntrance();
 
 // nginx 转发；tus 分片 8 MB，放宽到 64 MB
 builder.Services.Configure<KestrelServerOptions>(o => o.Limits.MaxRequestBodySize = 64 * 1024 * 1024);
@@ -142,6 +144,7 @@ builder.Services.AddHostedService<RemoteMaintenanceWorker>();
 
 var app = builder.Build();
 
+app.UseDirectEntranceGate(); // 直连端口只放行被控端的接口；要在处理转发头之前
 app.UseForwardedHeaders();
 // 远程控制数据面（/ws/remote）：15 秒一次 ping（Cloudflare 约 100 秒空闲就断）；30 秒收不到 pong 就当对端已经没了
 // （手机掉线、笔记本合盖时不会有 FIN，不设超时的话连接会一直挂着，会话永远是"进行中"）

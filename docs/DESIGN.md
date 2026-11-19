@@ -473,6 +473,12 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
   - 0.6.1 及更早的版本没有这个功能，要最后手动装一次 0.6.2 以后的版本。
   - 测试：`AgentUpdateManifestTests`（读清单、比版本、核对文件、重启参数）；`web/e2e/agent-update.cjs` 用镜像里真正发布的安装包跑：清单被改过不升级、新版本启动不了换回去、正常升级后用原令牌重新上线且不反复升级。
 - 连不上时说人话（`ConnectionDiagnosis`）：.NET 对握手失败只在最外层说一句"The SSL connection could not be established"，原因在异常链里层。Agent 把整条链认一遍，给出一句原因 + 该怎么办：系统不支持 TLS 1.3（强制用系统 TLS 时）、服务器不接受 TLS 1.3（用自带 TLS 时）、证书是别的网站的（要先登录的 Wi-Fi）、证书不受信任（HTTPS 扫描，带颁发者）、电脑时间不对、域名解析失败、系统代理没放行、服务令牌失效（403 / 回来的是登录页）等。添加到家庭时连不上会弹出说明窗口（可复制给管理员的详细信息：异常链、系统版本、是否走代理、证书），已添加的电脑只把原因写在托盘上；同一个原因在日志里只记一次全的，之后约 5 分钟一次。
+- **局域网直连**（0.7.0 起，`.env` 配了 `REMOTE_AGENT_DIRECT_URL` 才开）：被控电脑在家时不绕 Cloudflare（出公网到边缘、经隧道回小主机——两台都在家也要绕这一圈，远程画面在家里宽带的上下行各跑一遍），直接连服务器。
+  - 入口：api 自己多听一个 HTTPS 端口（容器里 8443，compose 发布到宿主机的局域网地址，如 `192.168.88.3:3508`），TLS 在 api 里终结，不经 nginx、不经 Access。证书是 api 首次启动时生成的自签证书（`{DataRoot}/keys/direct-tls.pfx`，ECDSA P-256）。
+  - 怎么防冒充：被控端经公网（正规证书 + Access + 设备令牌）调 `GET /api/remote/agent/direct` 拿到直连地址和证书**指纹**（公钥 SubjectPublicKeyInfo 的 SHA-256），记在本地配置里；直连时只认这张证书，不看签发者、有效期和域名，局域网里别的机器冒充不了。加密和公网一样（系统 TLS 或自带的 TLS 1.3），屏幕、键盘输入、设备令牌都不会在局域网里明文传。删掉证书文件就换新的：被控端直连失败后经公网拿到新指纹自己换过来。
+  - 入口只给被控端：直连端口上只放行 `/healthz` 和带设备令牌（Bearer）的远程接口（`/hubs/agent`、`/ws/remote`、`/api/remote/*`），网页、密码登录、Cookie 一律 404；客户端自带的转发头（X-Forwarded-*）丢掉。没有 Access 那道门，所以只该发布在局域网地址上。
+  - 选路：每次连服务器先用 3 秒试一下直连（`/healthz`，不经系统代理），通了就 REST、SignalR、远程画面三条连接全走直连，不通走公网。走公网时网络一变（回到家、连上家里 Wi-Fi）或每分钟再试一次，通了就断开重连到直连（正在被远程、正在问同意时不换）。走直连时 SignalR 只重试两次，多半是离开家了，交给外层重新选路改走公网；会话中途直连断了，数据通道马上改走公网重连，不占 30 秒的重连窗口；回复同意、挂断经直连失败也改走公网再发一次。托盘上写"在线（局域网直连）"，日志记走的哪条路。
+  - 控制端（浏览器）不受影响：从 `family.lolic.xyz` 打开的网页那一半仍经 Cloudflare；被控端这一半走局域网，家里宽带少跑一份画面。
 - 自动化测试：`--headless --source pattern --dry-input FILE --consent accept`（测试画面、键鼠写日志，accept 需要 `PRIVATECHAT_AGENT_TEST=1`）；`--selftest` 编 60 帧写出 Annex B 供 ffprobe 检查。
 - v1 明确接受的限制：无法操作 UAC 提示和锁屏、发不了 Ctrl+Alt+Del（需要 SYSTEM 服务 + 桌面切换）、注入不到管理员权限的窗口（UIPI）、无音频、Windows N 版要装媒体功能包。
 - v2：桌面复制（DXGI Desktop Duplication）+ 硬件编码（异步 MFT），SYSTEM 服务 + 用户会话助手进程解决 UAC / 锁屏 / Ctrl+Alt+Del。
@@ -747,6 +753,7 @@ web/src/
 |---|---|---|---|---|
 | 无 | — | cloudflared / web / api / postgres | 否 | 全部出站 |
 | 8080 | TCP | web（nginx） | 否，仅局域网 | 可选：断外网时局域网直连 |
+| 8443（发布到局域网地址，`REMOTE_AGENT_DIRECT_BIND`） | TCP | api（HTTPS，自签证书） | 否，仅局域网 | 可选：远程协助被控端在家时直连，只放行被控端的接口 |
 | 21115–21119 | TCP / UDP | rustdesk | profile `rustdesk` 需要 | |
 
 Cloudflare 的几个硬限制：单个请求体 100 MB（免费 / Pro 套餐），所以上传用 8 MB 分片；代理空闲连接约 100 s 超时，所以 WebSocket 要有心跳；WebSocket 流量与下载响应不限大小；Realtime 媒体出站每月前 1 TB 免费。

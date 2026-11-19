@@ -12,5 +12,6 @@
 - 被控端程序在 `src/PrivateChat.Agent`（WinForms 托盘：GDI 截屏 + Media Foundation H.264 + SendInput），web 镜像构建时交叉编译成单文件 exe 放在 `/downloads/`。
   安装包旁边有一份清单 `/downloads/PrivateChat.Agent.json`（版本、大小、SHA-256，镜像构建时生成）：已经装出去的程序（0.6.2 起）靠它自动升级（`Updater`）。
   系统没有 TLS 1.3（Windows 10 及更早）时它用程序自带的 TLS 1.3 连服务器（`AgentTransport`，BouncyCastle；证书仍由 Windows 校验），所以服务器可以只收 TLS 1.3。
+- `DirectEntrance` + `AgentDirectController`（`/api/remote/agent/direct`）：局域网直连入口。配了 `Remote:DirectUrl` 时 api 多听一个 HTTPS 端口（`Remote:DirectPort`，默认 8443，自签证书在 `KeyStore.DirectCertificate`），只放行被控端的接口；被控端经公网拿到地址和证书指纹（`PrivateChat.Contracts` 的 `CertificatePin`），在家时直连、只认这张证书，连不上就走公网。
 
 测试：`tests/.../Integration/RemoteTests.cs`（真实 PostgreSQL + 测试服务器上的 WebSocket），`web/e2e/remote.cjs`（Edge + 本机无界面 Agent，测试画面、键鼠写日志）。

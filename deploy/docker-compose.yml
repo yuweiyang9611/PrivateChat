@@ -53,6 +53,13 @@ services:
       # 远程协助：Access 服务令牌，写进"添加电脑"的配置串里，电脑上的程序用它过 Access 门禁（没有就留空，局域网直连照样能用）
       Remote__AgentAccessClientId: ${REMOTE_AGENT_ACCESS_CLIENT_ID:-}
       Remote__AgentAccessClientSecret: ${REMOTE_AGENT_ACCESS_CLIENT_SECRET:-}
+      # 远程协助：被控电脑在家时直连这个地址，不绕 Cloudflare（https://<服务器局域网 IP>:<端口>，和下面 ports 发布的一致）。
+      # api 自己听 8443（HTTPS，证书自动生成，被控端按指纹认），只放行被控端用的接口。留空 = 不开，被控端一直走公网
+      Remote__DirectUrl: ${REMOTE_AGENT_DIRECT_URL:-}
+    ports:
+      # 远程协助的局域网直连入口：发布到服务器的局域网地址上（如 192.168.1.10:8443），见上面的 Remote__DirectUrl。
+      # 默认只绑本机回环，等于不对外；不要发布到公网地址上（这个入口没有 Access 那道门）
+      - "${REMOTE_AGENT_DIRECT_BIND:-127.0.0.1:8443}:8443"
     extra_hosts:
       - "host.docker.internal:host-gateway"   # Linux 上也能从容器访问宿主机（同样只为上面的测试）
     volumes:

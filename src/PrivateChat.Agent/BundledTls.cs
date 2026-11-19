@@ -10,6 +10,7 @@ using Org.BouncyCastle.Security;
 using Org.BouncyCastle.Tls;
 using Org.BouncyCastle.Tls.Crypto;
 using Org.BouncyCastle.Tls.Crypto.Impl.BC;
+using PrivateChat.Contracts.Remote;
 
 namespace PrivateChat.Agent;
 
@@ -60,7 +61,7 @@ public static class AgentTransport
 
     public static TlsMode ModeFor(Uri server)
     {
-        // 明文 HTTP（局域网直连）没有 TLS，谈不上哪一种
+        // 明文 HTTP（局域网 8080 那种地址、本机测试）没有 TLS，谈不上哪一种
         if (server.Scheme is not ("https" or "wss")) return TlsMode.System;
         return Environment.GetEnvironmentVariable(ModeVariable)?.Trim().ToLowerInvariant() switch
         {
@@ -71,7 +72,7 @@ public static class AgentTransport
     }
 
     public static string Describe(Uri server) => server.Scheme is not ("https" or "wss")
-        ? "不加密（http 地址，局域网直连）"
+        ? "不加密（http 地址）"
         : ModeFor(server) == TlsMode.Bundled
             ? $"程序自带的 TLS 1.3（BouncyCastle {LibraryVersion}，这台电脑的系统{(ConnectionDiagnosis.SystemHasTls13 ? "有" : "没有")} TLS 1.3）"
             : "系统自带的 TLS";
@@ -83,10 +84,30 @@ public static class AgentTransport
         return new UriBuilder(uri) { Scheme = uri.Scheme == "wss" ? "ws" : "http", Port = -1 }.Uri;
     }
 
-    /// <summary>给这台服务器发 HTTP 请求用的处理器。两种方式都跟随系统代理；连不上时证书的问题都会记到 <see cref="TlsObserver"/>。</summary>
-    public static HttpMessageHandler CreateHandler(Uri server)
+    /// <summary>
+    /// 局域网直连连不上时多久放弃（好改走公网）：家里的服务器正常几毫秒就应答；
+    /// 不在家时那个地址多半根本不存在，不设的话 Windows 要等二十来秒才报连不上。
+    /// </summary>
+    public static readonly TimeSpan DirectConnectTimeout = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// 给这台服务器发 HTTP 请求用的处理器。两种方式都跟随系统代理；连不上时证书的问题都会记到 <see cref="TlsObserver"/>。
+    /// pin 不为空 = 局域网直连：服务器证书只按指纹认（<see cref="CertificatePin"/>，服务器自己生成的自签证书），
+    /// 不经代理（就是要直连），连不上 <see cref="DirectConnectTimeout"/> 就放弃。
+    /// </summary>
+    public static HttpMessageHandler CreateHandler(Uri server, string? pin = null)
     {
-        if (ModeFor(server) != TlsMode.Bundled) return TlsObserver.CreateHandler();
+        if (ModeFor(server) != TlsMode.Bundled)
+        {
+            var handler = TlsObserver.CreateHandler();
+            if (pin is not null)
+            {
+                handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, _) => CertificatePin.Matches(certificate, pin);
+                handler.UseProxy = false;
+                handler.ConnectTimeout = DirectConnectTimeout;
+            }
+            return handler;
+        }
         var origin = new Uri(server.GetLeftPart(UriPartial.Authority));
         return new OriginHandler(origin, new SocketsHttpHandler
         {
@@ -94,13 +115,14 @@ public static class AgentTransport
             UseProxy = false,
             // 服务器自己从不重定向；出现重定向只可能是被登录页拦住了（这个处理器也连不了别的域名），原样交回去由上层说明
             AllowAutoRedirect = false,
-            ConnectCallback = (context, ct) => ConnectAsync(origin, context.DnsEndPoint.Host, ct),
+            ConnectTimeout = pin is null ? Timeout.InfiniteTimeSpan : DirectConnectTimeout,
+            ConnectCallback = (context, ct) => ConnectAsync(origin, context.DnsEndPoint.Host, pin, ct),
         });
     }
 
-    /// <summary>WebSocket 用的调用器；系统 TLS 时返回 null（ClientWebSocket 自己连就行）。</summary>
-    public static HttpMessageInvoker? CreateInvoker(Uri server)
-        => ModeFor(server) == TlsMode.Bundled ? new HttpMessageInvoker(CreateHandler(server)) : null;
+    /// <summary>WebSocket 用的调用器；系统 TLS 又不是局域网直连时返回 null（ClientWebSocket 自己连就行）。</summary>
+    public static HttpMessageInvoker? CreateInvoker(Uri server, string? pin = null)
+        => ModeFor(server) == TlsMode.Bundled || pin is not null ? new HttpMessageInvoker(CreateHandler(server, pin)) : null;
 
     /// <summary>连 WebSocket：有调用器（自带 TLS）就经它连改写后的地址。</summary>
     public static Task ConnectVia(this ClientWebSocket socket, Uri uri, HttpMessageInvoker? invoker, CancellationToken ct)
@@ -116,15 +138,15 @@ public static class AgentTransport
         }
     }
 
-    private static async ValueTask<Stream> ConnectAsync(Uri origin, string requestedHost, CancellationToken ct)
+    private static async ValueTask<Stream> ConnectAsync(Uri origin, string requestedHost, string? pin, CancellationToken ct)
     {
         if (!string.Equals(requestedHost, origin.IdnHost, StringComparison.OrdinalIgnoreCase) && !string.Equals(requestedHost, origin.Host, StringComparison.OrdinalIgnoreCase))
             throw new IOException($"这个连接只给 {origin.Host} 用，不能连 {requestedHost}");
 
-        var transport = await OpenTransportAsync(origin, ct).ConfigureAwait(false);
+        var transport = await OpenTransportAsync(origin, useProxy: pin is null, ct).ConfigureAwait(false);
         try
         {
-            var client = new Tls13Client(new BcTlsCrypto(new SecureRandom()), origin);
+            var client = new Tls13Client(new BcTlsCrypto(new SecureRandom()), origin, pin);
             var protocol = new TlsClientProtocol(transport);
             // 握手是阻塞的：取消（超时）时把连接掐掉，它就会抛出来
             await using (ct.Register(transport.Dispose))
@@ -149,10 +171,13 @@ public static class AgentTransport
         }
     }
 
-    /// <summary>到服务器 TLS 端口的 TCP 通道：直连，或者经系统代理 CONNECT（和 .NET 默认一样跟随 Windows 的代理设置）。</summary>
-    private static async Task<Stream> OpenTransportAsync(Uri origin, CancellationToken ct)
+    /// <summary>
+    /// 到服务器 TLS 端口的 TCP 通道：直连，或者经系统代理 CONNECT（和 .NET 默认一样跟随 Windows 的代理设置）。
+    /// 局域网直连（useProxy = false）一律不经代理。
+    /// </summary>
+    private static async Task<Stream> OpenTransportAsync(Uri origin, bool useProxy, CancellationToken ct)
     {
-        var proxy = SystemProxyFor(origin);
+        var proxy = useProxy ? SystemProxyFor(origin) : null;
         if (proxy is not null && proxy.Scheme != "http")
             throw new HttpRequestException(HttpRequestError.ProxyTunnelError, $"系统代理 {proxy} 不是 HTTP 代理，自带的 TLS 用不了它");
         var socket = proxy is null
@@ -256,8 +281,8 @@ public static class AgentTransport
     }
 }
 
-/// <summary>只说 TLS 1.3 的客户端：不带客户端证书，证书校验交给 <see cref="WindowsTrust"/>。</summary>
-internal sealed class Tls13Client(TlsCrypto crypto, Uri origin) : DefaultTlsClient(crypto)
+/// <summary>只说 TLS 1.3 的客户端：不带客户端证书，证书校验交给 <see cref="WindowsTrust"/>（局域网直连时交给 <see cref="PinnedTrust"/>）。</summary>
+internal sealed class Tls13Client(TlsCrypto crypto, Uri origin, string? pin = null) : DefaultTlsClient(crypto)
 {
     protected override ProtocolVersion[] GetSupportedVersions() => ProtocolVersion.TLSv13.Only();
 
@@ -268,7 +293,24 @@ internal sealed class Tls13Client(TlsCrypto crypto, Uri origin) : DefaultTlsClie
     // 改写成 http:// 之后 .NET 只会说 HTTP/1.1
     protected override IList<ProtocolName> GetProtocolNames() => [ProtocolName.Http_1_1];
 
-    public override TlsAuthentication GetAuthentication() => new WindowsTrust(origin.IdnHost);
+    public override TlsAuthentication GetAuthentication() => pin is null ? new WindowsTrust(origin.IdnHost) : new PinnedTrust(pin);
+}
+
+/// <summary>
+/// 局域网直连：服务器那张自签证书按指纹认（指纹是之前经公网从服务器拿到的），不看签发者、有效期和域名。
+/// 指纹对不上（局域网里别的机器冒充、服务器换了证书）就中止握手，上层改走公网。
+/// </summary>
+internal sealed class PinnedTrust(string pin) : TlsAuthentication
+{
+    public void NotifyServerCertificate(TlsServerCertificate serverCertificate)
+    {
+        var list = serverCertificate.Certificate.GetCertificateList();
+        if (list.Length == 0) throw new TlsFatalAlert(AlertDescription.bad_certificate);
+        using var leaf = X509CertificateLoader.LoadCertificate(list[0].GetEncoded());
+        if (!CertificatePin.Matches(leaf, pin)) throw new TlsFatalAlert(AlertDescription.bad_certificate);
+    }
+
+    public TlsCredentials? GetClientCredentials(Org.BouncyCastle.Tls.CertificateRequest certificateRequest) => null;
 }
 
 /// <summary>
