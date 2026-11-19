@@ -6,11 +6,14 @@ RUN dotnet publish src/PrivateChat.Api -c Release -o /app
 
 # 运行时带 ffmpeg 做缩略图与转码
 FROM mcr.microsoft.com/dotnet/aspnet:11.0
+# 默认用基础镜像自带的软件源；给了 UBUNTU_MIRROR_HOST（CI 在用）才换成那个镜像的 HTTPS 地址
 ARG UBUNTU_MIRROR_HOST
-RUN sed -Ei \
-      -e "s|^URIs: https?://archive\.ubuntu\.com/|URIs: https://${UBUNTU_MIRROR_HOST:-archive.ubuntu.com}/|" \
-      -e "s|^URIs: https?://security\.ubuntu\.com/|URIs: https://${UBUNTU_MIRROR_HOST:-security.ubuntu.com}/|" \
-      /etc/apt/sources.list.d/ubuntu.sources \
+RUN if [ -n "$UBUNTU_MIRROR_HOST" ]; then \
+      sed -Ei \
+        -e "s|^URIs: https?://archive\.ubuntu\.com/|URIs: https://${UBUNTU_MIRROR_HOST}/|" \
+        -e "s|^URIs: https?://security\.ubuntu\.com/|URIs: https://${UBUNTU_MIRROR_HOST}/|" \
+        /etc/apt/sources.list.d/ubuntu.sources; \
+    fi \
  && apt-get -o Acquire::Retries=3 update --error-on=any \
  && apt-get -o Acquire::Retries=3 install -y --no-install-recommends ffmpeg \
  && rm -rf /var/lib/apt/lists/*
