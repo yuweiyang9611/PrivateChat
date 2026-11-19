@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Win32;
+using PrivateChat.Agent.Audio;
 using PrivateChat.Agent.Input;
 using PrivateChat.Agent.Session;
 using PrivateChat.Agent.Ui;
@@ -12,7 +13,7 @@ using PrivateChat.Contracts.Remote;
 namespace PrivateChat.Agent;
 
 /// <summary>启动参数（Program 解析命令行）。</summary>
-public sealed record AgentOptions(string DataDir, string DeviceName, bool UsePattern, string? DryInputPath, bool Headless);
+public sealed record AgentOptions(string DataDir, string DeviceName, bool UsePattern, string? DryInputPath, bool Headless, bool BusyPattern = false);
 
 /// <summary>
 /// Agent 的主流程：
@@ -51,7 +52,10 @@ public sealed class AgentService
         ui.SetupRequested += () => _reset?.Cancel();
     }
 
-    private IFrameSource CreateSource() => _options.UsePattern ? new TestPatternSource() : new GdiScreenSource();
+    private IFrameSource CreateSource() => _options.BusyPattern ? new BusyPatternSource() : _options.UsePattern ? new TestPatternSource() : new GdiScreenSource();
+
+    /// <summary>电脑正在播放的声音；测试画面配测试音（一直响的 440 Hz），不碰声卡。</summary>
+    private IAudioSource CreateAudioSource() => _options.UsePattern ? new TestToneSource() : new WasapiLoopback();
 
     public async Task RunAsync(CancellationToken ct)
     {
@@ -426,7 +430,7 @@ public sealed class AgentService
 
     private void StartRunner(AgentSessionRequest request)
     {
-        var runner = new SessionRunner(request, _server!, CreateSource, _input, _ui);
+        var runner = new SessionRunner(request, _server!, CreateSource, CreateAudioSource, _input, _ui);
         _runner = runner;
         runner.Start();
         _ui.ShowBanner(request);

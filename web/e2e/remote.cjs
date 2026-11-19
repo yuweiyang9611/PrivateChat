@@ -2,7 +2,7 @@
 // Agent 用测试画面（四色象限 + 移动黑块，两块假显示器 1280×720 / 1920×1080），键鼠不注入系统、写到日志文件——
 // 不碰这台电脑的真实屏幕和鼠标键盘。E2E_REAL_SCREEN=1 时最后再用真实屏幕跑一遍（只检查尺寸和非黑屏，不截图）。
 // 覆盖：下载安装包、设备码添加（管理员替爸爸添加）、主人实时看到在线 / 被远程提醒、远程控制（自动同意）、
-// 画面像素、键鼠 / 滚轮 / 文字 / 特殊键 / 剪贴板、画质与切换显示器、结束与记录、只看模式不注入、拒绝、
+// 画面像素、声音（测试音）、键鼠 / 滚轮 / 文字 / 特殊键 / 剪贴板、画质与切换显示器、结束与记录、只看模式不注入、拒绝、
 // 免同意名单（勾上后不经同意直接连、移出后立即结束）、同意窗口没人点时取消 / 改用 PIN（窗口马上收起、PIN 立刻连上）、移除电脑。
 // 加 --agent-tls13：被控端不直连 compose 栈，而是经本机一个只收 TLS 1.3 的入口（e2e/tls13-proxy.cjs），
 // 并强制用程序自带的 TLS 1.3（Windows 10 上的做法）——同一套用例再跑一遍，另外断言三条连接都是 TLS 1.3。
@@ -186,6 +186,36 @@ async function moveOnCanvas(page, fx, fy) {
     return fps >= 5 ? t : null
   }, 10000)
   check('持续出帧（解码帧率 ≥ 5，有往返延迟）', !!stats && / \d+ ms/.test(stats), stats)
+
+  // 声音：测试画面配的是一直响的 440 Hz 测试音（不碰声卡）；网页默认开着声音
+  const soundButton = admin.locator('[data-testid=remote-sound]')
+  const audioNow = async () => ({
+    state: await soundButton.getAttribute('data-audio'),
+    scheduled: Number(await soundButton.getAttribute('data-scheduled')),
+    peak: Number(await soundButton.getAttribute('data-peak')),
+    label: (await soundButton.textContent()).trim(),
+  })
+  const heard = await until(async () => {
+    const a = await audioNow()
+    return a.scheduled > 48000 && a.peak > 0.1 ? a : null
+  }, 15000)
+  check('能听到对方电脑的声音（Opus 解出来超过 1 秒，不是静音，正在播放）', !!heard && heard.state === 'playing' && heard.label === '声音：开', heard ?? (await audioNow()))
+  check('被控端应控制端的要求才开始采集声音', agent.out.includes('控制端要听这台电脑的声音') && agent.out.includes('声音采集已打开'))
+  await soundButton.click()
+  const off = await until(() => agent.out.includes('控制端关了声音'), 5000)
+  await sleep(1200)
+  const quiet1 = (await audioNow()).scheduled
+  await sleep(1500)
+  const quiet2 = await audioNow()
+  check('关掉声音：被控端停止采集，网页不再收到声音', !!off && quiet2.scheduled === quiet1 && quiet2.label === '声音：关' && quiet2.state === 'off', { off: !!off, quiet1, quiet2 })
+  await soundButton.click()
+  const again = await until(async () => {
+    const a = await audioNow()
+    return a.state === 'playing' && a.scheduled > 24000 ? a : null
+  }, 10000)
+  check('再打开又有声音', !!again, again ?? (await audioNow()))
+  const netLog = agent.out.match(/网络：目标码率 (\d+) kbps（上限 (\d+)），线路往返 (\d+) ms/)
+  check('被控端在按网络状况定码率（本机直连：往返很短，码率没有被压到最低）', !!netLog && Number(netLog[1]) >= 300 && Number(netLog[2]) === 2500 && Number(netLog[3]) < 200, netLog?.[0])
 
   // 键鼠
   const before = inputs(agent).length
@@ -411,6 +441,9 @@ async function moveOnCanvas(page, fx, fy) {
       return size !== '0x0' && size !== '300x150' && lit > 100 ? { size, lit } : null
     }, 20000)
     check('真实屏幕：GDI 截屏 + 编码 + 解码出非黑画面', !!real, real ?? (await canvasSize(admin)))
+    // 真实的声音：环回采集这台电脑的播放设备（这会儿没有声音在播就采到静音，不发包；这里只确认设备打得开）
+    const loopback = await until(() => agent.out.match(/声音采集已打开[^\r\n]*/)?.[0] ?? (agent.out.includes('声音采集出错') ? 'error' : null), 8000)
+    check('真实声音：能打开这台电脑的播放设备做环回采集', !!loopback && loopback !== 'error', loopback ?? agent.out.split(/\r?\n/).filter((l) => l.includes('声音')).slice(-2))
     await admin.locator('[data-testid=remote-end]').click()
     await admin.goto(BASE + '/devices')
     await realCard.locator('[data-testid=device-more]').click()

@@ -1,18 +1,33 @@
 import { describe, expect, it } from 'vitest'
-import { codecFromAnnexB, encode, FrameType, MAX_TEXT_BYTES, modifiersOf, normalizePoint, parseAgentFrame, scanCodeOf, SpecialKey, utf8Length, WheelAccumulator } from './protocol'
+import { codecFromAnnexB, encode, Features, FrameType, MAX_TEXT_BYTES, modifiersOf, normalizePoint, parseAgentFrame, scanCodeOf, SpecialKey, utf8Length, WheelAccumulator } from './protocol'
 
 const buf = (bytes: number[]) => new Uint8Array(bytes).buffer
 
 describe('Agent 帧解析（与 C# RemoteFrames 的布局一致）', () => {
   it('视频配置、视频帧、显示器、统计、状态', () => {
-    expect(parseAgentFrame(buf([0x01, 1, 0x80, 0x07, 0x38, 0x04, 20, 1]))).toEqual({ type: 'config', codec: 1, width: 1920, height: 1080, fps: 20, monitor: 1 })
+    // 0.7.0 起多一个字节：支持哪些可选功能
+    expect(parseAgentFrame(buf([0x01, 1, 0x80, 0x07, 0x38, 0x04, 20, 1, 3]))).toEqual({ type: 'config', codec: 1, width: 1920, height: 1080, fps: 20, monitor: 1, features: Features.Audio | Features.AdaptiveBitrate })
     const video = parseAgentFrame(buf([0x02, 4, 3, 2, 1, 1, 9, 9]))
     expect(video).toMatchObject({ type: 'video', timestamp: 0x01020304, key: true })
     expect(Array.from((video as { data: Uint8Array }).data)).toEqual([9, 9])
     expect(parseAgentFrame(buf([0x04, 1, 0, 0x00, 0x05, 0xd0, 0x02, 1]))).toEqual({ type: 'monitors', monitors: [{ index: 0, width: 1280, height: 720, primary: true }] })
-    expect(parseAgentFrame(buf([0x06, 20, 0xe8, 0x03, 100, 85, 0]))).toEqual({ type: 'stats', fps: 20, kbps: 1000, cpu: 100, rtt: 85 })
+    expect(parseAgentFrame(buf([0x06, 20, 0xe8, 0x03, 100, 85, 0, 0x58, 0x02, 0xc4, 0x09]))).toEqual({ type: 'stats', fps: 20, kbps: 1000, cpu: 100, rtt: 85, target: 600, max: 2500 })
     expect(parseAgentFrame(buf([0x07, 1, 0x78]))).toEqual({ type: 'status', code: 1, message: 'x' })
     expect(parseAgentFrame(new Uint8Array([0x05, ...new TextEncoder().encode('你好')]).buffer)).toEqual({ type: 'clipboard', text: '你好' })
+  })
+
+  it('声音包、探测包', () => {
+    const audio = parseAgentFrame(buf([0x08, 4, 3, 2, 1, 1, 2, 7, 7, 7]))
+    expect(audio).toMatchObject({ type: 'audio', timestamp: 0x01020304, codec: 1, channels: 2 })
+    expect(Array.from((audio as { data: Uint8Array }).data)).toEqual([7, 7, 7])
+    expect(parseAgentFrame(buf([0x09, 0x2a, 0, 0, 0]))).toEqual({ type: 'ping', sequence: 42 })
+    expect(parseAgentFrame(buf([0x08, 0, 0, 0, 0, 1, 2]))).toBeNull() // 没有数据
+    expect(parseAgentFrame(buf([0x09, 1, 2]))).toBeNull()
+  })
+
+  it('老版本被控端（0.6 及以前）发来的帧照样能解：没有的字段按 0 算', () => {
+    expect(parseAgentFrame(buf([0x01, 1, 0x80, 0x07, 0x38, 0x04, 20, 1]))).toEqual({ type: 'config', codec: 1, width: 1920, height: 1080, fps: 20, monitor: 1, features: 0 })
+    expect(parseAgentFrame(buf([0x06, 20, 0xe8, 0x03, 100, 85, 0]))).toEqual({ type: 'stats', fps: 20, kbps: 1000, cpu: 100, rtt: 85, target: 0, max: 0 })
   })
 
   it('截断的、方向不对的帧不解析', () => {
@@ -34,6 +49,9 @@ describe('控制端帧编码', () => {
     expect(Array.from(encode.frameAck(0x01020304))).toEqual([0x19, 4, 3, 2, 1])
     expect(Array.from(encode.specialKey(SpecialKey.TaskManager))).toEqual([0x17, 4])
     expect(Array.from(encode.requestKeyFrame())).toEqual([0x16])
+    expect(Array.from(encode.setAudio(true))).toEqual([0x1b, 1])
+    expect(Array.from(encode.setAudio(false))).toEqual([0x1b, 0])
+    expect(Array.from(encode.pong(0x01020304))).toEqual([0x1c, 4, 3, 2, 1])
     expect(new TextDecoder().decode(encode.text('中文').subarray(1))).toBe('中文')
   })
 

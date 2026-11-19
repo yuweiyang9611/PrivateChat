@@ -37,22 +37,33 @@ public class RemoteFramesTests
         Assert.Equal(1234u, Assert.IsType<ControlFrame.FrameAck>(RemoteFrames.ParseControl(RemoteFrames.FrameAck(1234))).TimestampMs);
         Assert.Equal("你好", Assert.IsType<ControlFrame.Clipboard>(RemoteFrames.ParseControl(RemoteFrames.Clipboard("你好"))).Value);
         Assert.IsType<ControlFrame.RequestKeyFrame>(RemoteFrames.ParseControl([(byte)RemoteFrameType.RequestKeyFrame]));
+        Assert.True(Assert.IsType<ControlFrame.SetAudio>(RemoteFrames.ParseControl(RemoteFrames.SetAudio(true))).On);
+        Assert.False(Assert.IsType<ControlFrame.SetAudio>(RemoteFrames.ParseControl(RemoteFrames.SetAudio(false))).On);
+        Assert.Equal(0x01020304u, Assert.IsType<ControlFrame.Pong>(RemoteFrames.ParseControl(RemoteFrames.Pong(0x01020304))).Sequence);
+        Assert.Equal([0x1C, 4, 3, 2, 1], RemoteFrames.Pong(0x01020304));
 
         Assert.Null(RemoteFrames.ParseControl([]));
         Assert.Null(RemoteFrames.ParseControl([(byte)RemoteFrameType.MouseMove, 1, 2])); // 太短
         Assert.Null(RemoteFrames.ParseControl([(byte)RemoteFrameType.MouseButton, 9, 1])); // 没有这个键
         Assert.Null(RemoteFrames.ParseControl([(byte)RemoteFrameType.SpecialKey, 99]));
         Assert.Null(RemoteFrames.ParseControl([(byte)RemoteFrameType.VideoFrame, 0, 0, 0, 0, 1])); // 方向不对
+        Assert.Null(RemoteFrames.ParseControl([(byte)RemoteFrameType.Pong, 1, 2])); // 太短
+        Assert.Null(RemoteFrames.ParseControl(RemoteFrames.Ping(1))); // 探测包是被控端发的
     }
 
     [Fact]
     public void Agent_frames_have_the_documented_layout()
     {
-        Assert.Equal([0x01, 1, 0x80, 0x07, 0x38, 0x04, 20, 1], RemoteFrames.VideoConfig(new VideoConfigFrame(RemoteVideoCodec.H264, 1920, 1080, 20, 1)));
+        // 最后一个字节：支持的可选功能（0.7.0 加的；老网页只读前 8 个字节）
+        Assert.Equal([0x01, 1, 0x80, 0x07, 0x38, 0x04, 20, 1, 0], RemoteFrames.VideoConfig(new VideoConfigFrame(RemoteVideoCodec.H264, 1920, 1080, 20, 1)));
+        Assert.Equal(3, RemoteFrames.VideoConfig(new VideoConfigFrame(RemoteVideoCodec.H264, 1920, 1080, 20, 1, RemoteFeatures.Audio | RemoteFeatures.AdaptiveBitrate))[8]);
         var frame = RemoteFrames.VideoFrame(0x01020304, true, [9, 9]);
         Assert.Equal([0x02, 4, 3, 2, 1, 1, 9, 9], frame);
         Assert.Equal([0x04, 1, 0, 0x00, 0x05, 0xD0, 0x02, 1], RemoteFrames.Monitors([new MonitorInfo(0, 1280, 720, true)]));
-        Assert.Equal([0x06, 20, 0xE8, 0x03, 100, 85, 0], RemoteFrames.Stats(new StatsFrame(20, 1000, 140, 85)));
+        // 后 4 个字节：目标码率、档位上限（0.7.0 加的）
+        Assert.Equal([0x06, 20, 0xE8, 0x03, 100, 85, 0, 0x58, 0x02, 0xC4, 0x09], RemoteFrames.Stats(new StatsFrame(20, 1000, 140, 85, 600, 2500)));
+        Assert.Equal([0x08, 4, 3, 2, 1, 1, 2, 7, 7], RemoteFrames.Audio(0x01020304, RemoteAudioCodec.Opus, 2, [7, 7]));
+        Assert.Equal([0x09, 0x2A, 0, 0, 0], RemoteFrames.Ping(42));
         Assert.Equal([0x07, 1, (byte)'x'], RemoteFrames.Status(RemoteStatusCode.SecureDesktop, "x"));
         // 剪贴板超长：截断在字符边界上
         var huge = RemoteFrames.Clipboard(new string('好', RemoteFrames.MaxTextBytes));
@@ -70,5 +81,8 @@ public class RemoteFramesTests
         Assert.False(RemoteFrames.IsInput(RemoteFrameType.SetQuality));
         Assert.False(RemoteFrames.IsInput(RemoteFrameType.FrameAck));
         Assert.False(RemoteFrames.IsInput(RemoteFrameType.SelectMonitor));
+        // 只看模式下也可以听声音、也要回探测包
+        Assert.False(RemoteFrames.IsInput(RemoteFrameType.SetAudio));
+        Assert.False(RemoteFrames.IsInput(RemoteFrameType.Pong));
     }
 }

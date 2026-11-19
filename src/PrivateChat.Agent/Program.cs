@@ -10,7 +10,8 @@ namespace PrivateChat.Agent;
 /// PrivateChat.Agent.exe --headless --server URL  无界面（自动化测试），另可加：
 ///     --data-dir DIR       配置与日志目录（默认 %LOCALAPPDATA%\PrivateChat\Agent）
 ///     --name NAME          报给服务器的电脑名（默认计算机名）
-///     --source pattern     用测试画面代替真实屏幕
+///     --source pattern     用测试画面代替真实屏幕（声音也换成测试音，不碰声卡）
+///     --source busy        同上，但画面里有一块一直在滚动的"文字"，还带着时间码：弱网测试用（量得出端到端延迟）
 ///     --dry-input FILE     键鼠不注入系统，写到文件里
 ///     --consent accept|decline|ignore|wait   自动回复远程请求（accept 需要环境变量 PRIVATECHAT_AGENT_TEST=1；
 ///                          wait = 同意窗口一直挂着没人点，直到请求被取消或超时）
@@ -57,7 +58,7 @@ internal static class Program
             AgentLog.Warn("--consent accept 只在测试环境（PRIVATECHAT_AGENT_TEST=1）下生效");
             consent = "ignore";
         }
-        var options = new AgentOptions(dataDir, Value("--name") ?? Environment.MachineName, Value("--source") == "pattern", Value("--dry-input"), headless);
+        var options = new AgentOptions(dataDir, Value("--name") ?? Environment.MachineName, Value("--source") is "pattern" or "busy", Value("--dry-input"), headless, Value("--source") == "busy");
         AgentLog.Info($"PrivateChat Agent {AgentService.Version} 启动（{(headless ? "无界面" : "托盘")}），数据目录 {dataDir}");
         using var cts = new CancellationTokenSource();
 
