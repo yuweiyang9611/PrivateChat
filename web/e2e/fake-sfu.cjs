@@ -8,7 +8,8 @@
 //   POST /v1/turn/keys/{keyId}/credentials/generate-ice-servers
 // 媒体是真的：每个会话在一个 headless Chromium 页面里对应一条 RTCPeerConnection，
 // 发布者的轨道收下来再加到订阅者的连接上转发出去。和真实服务一样，上一个 offer 没回 answer 就来新的变更会被 406 拒绝。
-// 另有测试专用入口：POST /__test/drop-session/{id} 关掉服务端这条连接，模拟媒体链路中断。
+// 另有测试专用入口：POST /__test/drop-session/{id} 关掉服务端这条连接，模拟媒体链路中断；
+// GET /__test/stats/{id} 看这条会话收到的轨道的接收统计。
 const http = require('http')
 const { chromium } = require('playwright')
 
@@ -149,6 +150,19 @@ function installSfu() {
       return true
     },
 
+    /** 测试专用：这条会话收到的各条轨道的接收统计（丢包、要过几次重发和关键帧、解了多少帧） */
+    async stats(id) {
+      const s = get(id)
+      if (!s) return fail(410, 'session_error', 'session not found')
+      const out = []
+      ;(await s.pc.getStats()).forEach((r) => {
+        if (r.type !== 'inbound-rtp') return
+        out.push({ kind: r.kind, packetsReceived: r.packetsReceived, packetsLost: r.packetsLost, nackCount: r.nackCount, pliCount: r.pliCount, firCount: r.firCount,
+          framesDecoded: r.framesDecoded, keyFramesDecoded: r.keyFramesDecoded, freezeCount: r.freezeCount, frameWidth: r.frameWidth, frameHeight: r.frameHeight, retransmittedPacketsReceived: r.retransmittedPacketsReceived })
+      })
+      return { inbound: out }
+    },
+
     summary() {
       return [...sessions.entries()].map(([id, s]) => ({ id, state: s.pc.connectionState, published: [...s.published.keys()], pulled: [...s.mids.values()].filter((m) => m.location === 'remote' && !m.closed).length }))
     },
@@ -158,9 +172,11 @@ function installSfu() {
 /**
  * 启动假 SFU。返回 { url, requests, errors, drop(sessionId), summary(), close() }。
  * requests：每个请求 { method, path, status }；errors：返回了 4xx / 5xx 的请求（测试结束时应为空）。
+ * channel：'msedge' 时用系统里的 Edge。Playwright 自带的 Chromium 没有 H.264，远程协助被控端发来的画面要 Edge 才收得下来。
  */
-async function startFakeSfu({ port = 8788, appId = 'e2e-app', appSecret = 'e2e-secret', turnKeyId = 'e2e-turn', turnToken = 'e2e-turn-token' } = {}) {
+async function startFakeSfu({ port = 8788, appId = 'e2e-app', appSecret = 'e2e-secret', turnKeyId = 'e2e-turn', turnToken = 'e2e-turn-token', channel } = {}) {
   const browser = await chromium.launch({
+    channel,
     args: ['--disable-features=WebRtcHideLocalIpsWithMdns', '--allow-loopback-in-peer-connection', '--autoplay-policy=no-user-gesture-required'],
   })
   const page = await (await browser.newContext()).newPage()
@@ -202,6 +218,8 @@ async function startFakeSfu({ port = 8788, appId = 'e2e-app', appSecret = 'e2e-s
       }
       const drop = path.match(/^\/__test\/drop-session\/([^/]+)$/)
       if (drop && req.method === 'POST') return send(200, { dropped: await run('drop', drop[1]) })
+      const stats = path.match(/^\/__test\/stats\/([^/]+)$/)
+      if (stats && req.method === 'GET') return send(200, await run('stats', stats[1]))
 
       const m = path.match(new RegExp(`^/v1/apps/${appId}/sessions/([^/]+)(?:/(.+))?$`))
       if (!m) return send(404, { errorCode: 'not_found', errorDescription: 'unknown app or path' })
@@ -237,6 +255,7 @@ async function startFakeSfu({ port = 8788, appId = 'e2e-app', appSecret = 'e2e-s
     requests,
     errors,
     drop: (sessionId) => run('drop', sessionId),
+    stats: (sessionId) => run('stats', sessionId),
     summary: () => run('summary'),
     async close() {
       await new Promise((resolve) => server.close(resolve))
@@ -247,7 +266,7 @@ async function startFakeSfu({ port = 8788, appId = 'e2e-app', appSecret = 'e2e-s
 
 module.exports = { startFakeSfu }
 
-// 直接运行：node e2e/fake-sfu.cjs [端口]，手动联调时把 api 的 CloudflareRealtime__BaseUrl 指过来
+// 直接运行：node e2e/fake-sfu.cjs [端口] [--edge]，手动联调时把 api 的 CloudflareRealtime__BaseUrl 指过来
 if (require.main === module) {
-  startFakeSfu({ port: Number(process.argv[2]) || 8788 }).then((sfu) => console.log(`fake SFU listening on ${sfu.url}（appId e2e-app / secret e2e-secret / turn e2e-turn / e2e-turn-token）`))
+  startFakeSfu({ port: Number(process.argv[2]) || 8788, channel: process.argv.includes('--edge') ? 'msedge' : undefined }).then((sfu) => console.log(`fake SFU listening on ${sfu.url}（appId e2e-app / secret e2e-secret / turn e2e-turn / e2e-turn-token）`))
 }

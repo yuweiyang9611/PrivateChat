@@ -10,6 +10,11 @@
     <!-- 被控端把电脑播放的声音编成 Opus（libopus 的纯托管移植，只处理本机的声音数据）。
          固定在 2.2.2（2024-05 发布，用了两年多）：2.2.3 是 2026-11-17 才发的，观察一阵再升 -->
     <PackageVersion Include="Concentus" Version="2.2.2" />
+    <!-- 被控端的 WebRTC（远程协助的快速线路，画面和声音经 Cloudflare Realtime）。纯托管，DTLS / SRTP 用的就是上面那份 BouncyCastle。
+         许可证是 BSD-3 外加一条地域限制（见包里的 LICENSE.md）。收发网络数据的依赖：版本固定，升级前看发布说明。
+         用的是预发布版：稳定版 10.0.17 接不住 SFU 发来的"要关键帧"和"丢了哪些包"（中途加入的浏览器一帧都解不出来），
+         10.0.19-pre 才改好。等 10.0.18 以后的稳定版出来就换过去，换完跑一遍 web/e2e/remote.cjs 的 realtime 用例 -->
+    <PackageVersion Include="SIPSorcery" Version="10.0.19-pre" />
     <PackageVersion Include="EFCore.NamingConventions" Version="10.0.1" />
     <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="11.0.0" />
     <PackageVersion Include="Microsoft.AspNetCore.SignalR.Client" Version="11.0.0" />

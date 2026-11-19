@@ -29,6 +29,7 @@
     <PackageReference Include="BouncyCastle.Cryptography" />
     <PackageReference Include="Concentus" />
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" />
+    <PackageReference Include="SIPSorcery" />
   </ItemGroup>
 
   <ItemGroup>
