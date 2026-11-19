@@ -18,6 +18,11 @@
     <ProjectReference Include="..\..\src\PrivateChat.Api\PrivateChat.Api.csproj" />
   </ItemGroup>
 
+  <!-- 被控端自动升级里不碰网络和进程的那部分（读清单、比版本、核对文件）：同样把源文件编进来测 -->
+  <ItemGroup>
+    <Compile Include="..\..\src\PrivateChat.Agent\UpdateManifest.cs" Link="Agent\UpdateManifest.cs" />
+  </ItemGroup>
+
   <!-- 被控端程序是 net11.0-windows 的 WinForms 程序，这个测试项目引用不了它。
        其中"连不上服务器是什么原因"那一块是纯逻辑、只用到基础类库：直接把源文件编进来测。 -->
   <ItemGroup>

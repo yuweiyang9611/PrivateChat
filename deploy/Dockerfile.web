@@ -13,8 +13,13 @@ COPY Directory.Build.props Directory.Packages.props ./
 COPY src/PrivateChat.Contracts/ src/PrivateChat.Contracts/
 COPY src/PrivateChat.Agent/ src/PrivateChat.Agent/
 RUN dotnet publish src/PrivateChat.Agent/PrivateChat.Agent.csproj -c Release -r win-x64 -o /agent
+# 安装包旁边放一份清单（版本、大小、SHA-256）：已经装出去的程序靠它知道有没有新版本，并核对下载到的文件（自动升级）
+RUN version="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' src/PrivateChat.Agent/PrivateChat.Agent.csproj | head -n 1)" \
+ && test -n "$version" \
+ && printf '{"version":"%s","sha256":"%s","size":%s}\n' "$version" "$(sha256sum /agent/PrivateChat.Agent.exe | cut -d' ' -f1)" "$(stat -c %s /agent/PrivateChat.Agent.exe)" > /agent/PrivateChat.Agent.json \
+ && cat /agent/PrivateChat.Agent.json
 
 FROM nginx:1.27-alpine
 COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /src/dist /usr/share/nginx/html
-COPY --from=agent /agent/PrivateChat.Agent.exe /usr/share/nginx/html/downloads/PrivateChat.Agent.exe
+COPY --from=agent /agent/PrivateChat.Agent.exe /agent/PrivateChat.Agent.json /usr/share/nginx/html/downloads/

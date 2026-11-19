@@ -10,6 +10,7 @@
 - `RemoteNotifier`：网页 `RemoteSessionChanged`（控制的人 + 设备主人）、`DeviceChanged`（所有人，各自重新拉列表）；Agent 的 `SessionRequested` / `SessionEnded` / `Revoked`。
 - 设备码登记在 `Features/Auth/AuthController`（`device/code` · `poll` · `lookup` · `confirm`）；设备令牌只能用于上面这些远程接口（`DeviceTokenAuthenticationHandler`）。
 - 被控端程序在 `src/PrivateChat.Agent`（WinForms 托盘：GDI 截屏 + Media Foundation H.264 + SendInput），web 镜像构建时交叉编译成单文件 exe 放在 `/downloads/`。
+  安装包旁边有一份清单 `/downloads/PrivateChat.Agent.json`（版本、大小、SHA-256，镜像构建时生成）：已经装出去的程序（0.6.2 起）靠它自动升级（`Updater`）。
   系统没有 TLS 1.3（Windows 10 及更早）时它用程序自带的 TLS 1.3 连服务器（`AgentTransport`，BouncyCastle；证书仍由 Windows 校验），所以服务器可以只收 TLS 1.3。
 
 测试：`tests/.../Integration/RemoteTests.cs`（真实 PostgreSQL + 测试服务器上的 WebSocket），`web/e2e/remote.cjs`（Edge + 本机无界面 Agent，测试画面、键鼠写日志）。

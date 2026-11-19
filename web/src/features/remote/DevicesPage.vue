@@ -183,6 +183,8 @@ const reasonKeys = { declined: 1, timeout: 1, controller: 1, agent: 1, stopped: 
               </div>
               <div class="truncate text-sm" style="color: var(--pc-text-muted)">
                 {{ ownerText(d) }}
+                <!-- 远程协助程序的版本：部署新版本后能看出哪台电脑已经自动升级了 -->
+                <template v-if="d.agentVersion"> · v{{ d.agentVersion }}</template>
                 <template v-if="d.online && screensText(d)"> · {{ screensText(d) }}</template>
                 <template v-else-if="!d.online && d.lastSeenAt"> · {{ t('remote.lastSeen', { time: formatWhen(d.lastSeenAt) }) }}</template>
               </div>

@@ -21,12 +21,21 @@ public sealed record AgentOptions(string DataDir, string DeviceName, bool UsePat
 /// </summary>
 public sealed class AgentService
 {
-    public static string Version => typeof(AgentService).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0] ?? "0";
+    public static string Version => PretendVersion ?? typeof(AgentService).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0] ?? "0";
+    /// <summary>自动化测试用（--pretend-version，只在 PRIVATECHAT_AGENT_TEST=1 时生效）：假装自己是个旧版本，好触发自动升级。</summary>
+    public static string? PretendVersion { get; set; }
+    /// <summary>自动升级换好了新版本、新版本已经起来：这个进程该退出了（Program 收到后结束运行）。</summary>
+    public event Action? RestartRequested;
 
     private readonly AgentOptions _options;
     private readonly IAgentUi _ui;
     private readonly InputController _input;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly Updater _updater;
+    /// <summary>有理由现在就查一次更新（刚连上服务器——服务器多半刚部署过新版本）。</summary>
+    private readonly SemaphoreSlim _updateSignal = new(0, 1);
+    /// <summary>新版本已经启动、自己正要退出：新来的请求不接了（新版本连上服务器时会收到补发的）。</summary>
+    private volatile bool _updating;
     private AgentConfig _config;
     private ServerInfo? _server;
     private SessionRunner? _runner;
@@ -47,6 +56,7 @@ public sealed class AgentService
         _ui = ui;
         _input = new InputController(options.DryInputPath is { } path ? new DryRunInputSink(path) : new SendInputSink());
         _config = AgentConfig.Load(options.DataDir);
+        _updater = new Updater(options.DataDir);
         ui.DisconnectRequested += () => _ = DisconnectLocallyAsync();
         ui.SetupRequested += () => _reset?.Cancel();
     }
@@ -55,6 +65,7 @@ public sealed class AgentService
 
     public async Task RunAsync(CancellationToken ct)
     {
+        _ = UpdateLoopAsync(ct);
         string? setupError = null;
         while (!ct.IsCancellationRequested)
         {
@@ -113,6 +124,91 @@ public sealed class AgentService
             }
         }
         await StopRunnerAsync();
+    }
+
+    // ---- 自动升级 ----
+
+    /// <summary>
+    /// 启动后、每次连上服务器时、之后每 6 小时查一次：服务器上的安装包比自己新就下载、核对、换掉自己并重启（见 <see cref="Updater"/>）。
+    /// 正在被远程的时候不换，等结束了再说。
+    /// </summary>
+    private async Task UpdateLoopAsync(CancellationToken ct)
+    {
+        if (Updater.DisabledReason() is { } reason)
+        {
+            AgentLog.Info($"自动升级没有启用：{reason}");
+            return;
+        }
+        _updater.CleanUp();
+        var first = true;
+        var wait = TimeSpan.FromSeconds(10);
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await _updateSignal.WaitAsync(wait, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            if (first)
+            {
+                // 刚升级完的话，旧进程这会儿才退干净：把它留下的文件再清一遍
+                first = false;
+                _ = Task.Delay(TimeSpan.FromSeconds(8), ct).ContinueWith(_ => _updater.CleanUp(), ct, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
+            }
+            wait = Updater.CheckInterval;
+            if (!_config.HasServer) wait = TimeSpan.FromMinutes(1);
+            else
+                try
+                {
+                    var outcome = await TryUpdateAsync(ct);
+                    if (outcome == UpdateOutcome.Restarting)
+                    {
+                        RestartRequested?.Invoke();
+                        return;
+                    }
+                    if (outcome == UpdateOutcome.Deferred) wait = TimeSpan.FromMinutes(2);
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    // 升级不成不影响使用：记下来，过半小时再试（连不上服务器这类原因，主流程那边已经在说了）
+                    AgentLog.Warn($"自动升级没有成功，稍后再试：{ex.Message}");
+                    wait = TimeSpan.FromMinutes(30);
+                }
+        }
+    }
+
+    private async Task<UpdateOutcome> TryUpdateAsync(CancellationToken ct)
+    {
+        var server = ServerFromConfig();
+        var manifest = await _updater.FetchManifestAsync(server, ct);
+        if (manifest is null || !UpdateManifest.IsNewer(manifest.Version, Version)) return UpdateOutcome.UpToDate;
+        if (_runner is not null)
+        {
+            AgentLog.Info($"有新版本 {manifest.Version}，等这次远程结束后再升级");
+            return UpdateOutcome.Deferred;
+        }
+
+        AgentLog.Info($"发现新版本 {manifest.Version}（现在是 {Version}），开始下载");
+        var downloaded = await _updater.DownloadAsync(server, manifest, ct);
+        AgentLog.Info($"新版本 {manifest.Version} 下载完成，大小和 SHA-256 核对无误");
+
+        await _gate.WaitAsync(ct);
+        try
+        {
+            if (_runner is not null) return UpdateOutcome.Deferred; // 下载的工夫开始了远程：文件留着，结束后直接换
+            _updater.SwapAndRelaunch(downloaded, Version, Environment.GetCommandLineArgs()[1..]);
+            _updating = true;
+            _consent?.Cancel();
+            AgentLog.Info($"已换成新版本 {manifest.Version} 并启动，这个进程退出");
+            return UpdateOutcome.Restarting;
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     // ---- 设备码登记 ----
@@ -327,6 +423,7 @@ public sealed class AgentService
         }
         _lastProblem = null;
         AgentLog.Info("已连接服务器，等待远程请求");
+        try { _updateSignal.Release(); } catch (SemaphoreFullException) { } // 顺便查一下有没有新版本
         _ui.SetState(AgentState.Online, "在线");
         await ReportAsync(hub);
         EventHandler displayChanged = (_, _) => _ = ReportAsync(hub);
@@ -366,7 +463,7 @@ public sealed class AgentService
         await _gate.WaitAsync();
         try
         {
-            if (_ended.Contains(request.SessionId)) return;
+            if (_updating || _ended.Contains(request.SessionId)) return;
             if (_runner is { } old && old.Id != request.SessionId) await StopRunnerCoreAsync(); // 服务端保证旧的已经结束
             if (request.Active)
             {

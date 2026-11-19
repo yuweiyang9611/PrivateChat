@@ -12,10 +12,12 @@ namespace PrivateChat.Agent;
 ///     --name NAME          报给服务器的电脑名（默认计算机名）
 ///     --source pattern     用测试画面代替真实屏幕
 ///     --dry-input FILE     键鼠不注入系统，写到文件里
+///     --pretend-version X  假装自己是版本 X（只在 PRIVATECHAT_AGENT_TEST=1 时生效）：测自动升级用
 ///     --consent accept|decline|ignore|wait   自动回复远程请求（accept 需要环境变量 PRIVATECHAT_AGENT_TEST=1；
 ///                          wait = 同意窗口一直挂着没人点，直到请求被取消或超时）
 /// PrivateChat.Agent.exe --selftest [out.h264] [--screen]   编码器自检
 /// 环境变量：
+///     PRIVATECHAT_AGENT_AUTOUPDATE=off        不自动升级（默认：服务器上的安装包比自己新就自动换，见 Updater）
 ///     PRIVATECHAT_AGENT_TLS=bundled|system   强制用程序自带的 TLS 1.3 / 系统的 TLS（默认：系统没有 TLS 1.3 时用自带的）
 ///     PRIVATECHAT_AGENT_TEST_CA=FILE.pem     自带的 TLS 只信任这个根证书（只在 PRIVATECHAT_AGENT_TEST=1 时生效，自动化测试用）
 /// </summary>
@@ -44,6 +46,21 @@ internal static class Program
         // 每个数据目录只跑一个实例（正常使用就是每个 Windows 用户一个）
         var mutexName = @"Local\PrivateChat.Agent." + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(dataDir.ToLowerInvariant())))[..16];
         using var mutex = new Mutex(true, mutexName, out var first);
+        var updatedFrom = Value("--updated-from");
+        if (updatedFrom is not null)
+        {
+            // 自动升级后由旧版本启动的：先告诉它"我起来了"（它等到了才退出），再等它退出、把单实例的位置让出来
+            Updater.SignalReady(dataDir);
+            if (!first)
+                try
+                {
+                    first = mutex.WaitOne(TimeSpan.FromSeconds(30));
+                }
+                catch (AbandonedMutexException)
+                {
+                    first = true; // 旧进程没来得及释放就退出了：位置已经是我们的
+                }
+        }
         if (!first)
         {
             if (!headless && !args.Contains("--autostart"))
@@ -58,7 +75,9 @@ internal static class Program
             consent = "ignore";
         }
         var options = new AgentOptions(dataDir, Value("--name") ?? Environment.MachineName, Value("--source") == "pattern", Value("--dry-input"), headless);
+        if (Value("--pretend-version") is { } pretend && Environment.GetEnvironmentVariable("PRIVATECHAT_AGENT_TEST") == "1") AgentService.PretendVersion = pretend;
         AgentLog.Info($"PrivateChat Agent {AgentService.Version} 启动（{(headless ? "无界面" : "托盘")}），数据目录 {dataDir}");
+        if (updatedFrom is not null) AgentLog.Info($"已从 {updatedFrom} 自动升级到 {AgentService.Version}");
         using var cts = new CancellationTokenSource();
 
         if (headless)
@@ -70,6 +89,7 @@ internal static class Program
                 cts.Cancel();
             };
             var service = new AgentService(options, new HeadlessUi(dataDir, Value("--server"), consent));
+            service.RestartRequested += cts.Cancel; // 自动升级：新版本已经起来了，这个进程结束
             try
             {
                 service.RunAsync(cts.Token).GetAwaiter().GetResult();
@@ -81,6 +101,7 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         using var tray = new TrayUi(dataDir);
         var agent = new AgentService(options, tray);
+        agent.RestartRequested += cts.Cancel; // 自动升级：新版本已经起来了，下面的 run 结束后托盘跟着退出
         tray.ExitRequested += async () =>
         {
             await agent.DisconnectLocallyAsync();

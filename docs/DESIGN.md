@@ -466,6 +466,12 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
   - 接法：.NET 对 `https://` 一定会自己套一层系统 TLS，所以这一路把地址改写成 `http://` / `ws://`，在 `SocketsHttpHandler.ConnectCallback` 里自己建连接（直连，或经系统代理 `CONNECT`）并握手，再把加密流交给 .NET；每个处理器只给一台服务器用，不跟随重定向。REST、SignalR（协商请求 + 自建 WebSocket）、远程画面的 WebSocket 三条连接都走它。BouncyCastle 的流是阻塞式的，包了一层让读和写各走各的（WebSocket 要一边等着读一边写）。
   - 为什么选 BouncyCastle：纯托管代码（没有内存破坏这一类漏洞，也不用自己写原生互操作），官方 NuGet 包、MIT 许可、一直在维护；2.x 系列的已知漏洞只有 2024 年的 3 个中危（证书解析耗 CPU、Ed25519 死循环、TLS 1.2 RSA 密钥交换的计时侧信道），都在 2.3.1 修复，其中没有影响 TLS 1.3 客户端握手的。备选的 rustls 核心更受推崇，但要随程序带原生 DLL、自己写一层非托管互操作——它 2026-10 的安全公告正是这一层的内存生命周期问题；OpenSSL 没有官方的 Windows 二进制。版本在 `Directory.Packages.props` 里固定，升级前看发布说明和安全公告。
   - 测试：`web/e2e/remote.cjs --agent-tls13` 让 Agent 经本机一个只收 TLS 1.3 的入口（`e2e/tls13-proxy.cjs`，临时自签证书，Agent 靠只在测试模式生效的 `PRIVATECHAT_AGENT_TEST_CA` 信任它）把整套远程用例再跑一遍，并断言三条连接都是 TLS 1.3。
+- 自动升级（`Updater`，0.6.2 起）：web 镜像构建时在安装包旁边生成一份清单 `/downloads/PrivateChat.Agent.json`（版本、大小、SHA-256）。Agent 启动后、每次连上服务器时（服务器刚部署完，Agent 重连上来正好查到）、之后每 6 小时看一次；清单里的版本比自己高，就下载安装包、核对大小和 SHA-256、把自己换掉并重启，不用再去每台电脑上重装。
+  - 信任谁：只信自己配置里的那台服务器，走的是和平时一样的连接（证书照常校验、带 Access 通行令牌）。服务器本来就能让 Agent 不经同意开始远程（PIN、免同意名单都是它说了算），升级没有给它更多的权力；SHA-256 防的是下载坏了、截断了、半路被改了，不是防服务器本身。
+  - 怎么换：正在运行的 exe 在 Windows 上可以改名，所以先把自己改名成 `.old`，把新文件放到原来的位置（开机自启登记的就是这个路径，不用动），按原来的启动参数启动新版本，等它置位一个命名事件报"我起来了"才退出；新版本等旧进程让出单实例互斥量后接手，用原来的设备令牌重新上线，再把 `.old` 和下载目录清掉。新版本启动不了 / 一启动就退出 / 30 秒没就绪：换回原来的文件接着跑，半小时后再试。
+  - 不升的情况：只往高版本升（不降级、认不出的版本号不升）；正在被远程时不换，结束后再换（下好核对过的文件留着直接用）；清单或文件对不上就不动，绝不留下没核对过的文件；开发时直接运行的版本（不是发布的单文件程序）不升；环境变量 `PRIVATECHAT_AGENT_AUTOUPDATE=off` 关闭。程序所在的文件夹不可写时升不了，日志里会说。
+  - 0.6.1 及更早的版本没有这个功能，要最后手动装一次 0.6.2 以后的版本。
+  - 测试：`AgentUpdateManifestTests`（读清单、比版本、核对文件、重启参数）；`web/e2e/agent-update.cjs` 用镜像里真正发布的安装包跑：清单被改过不升级、新版本启动不了换回去、正常升级后用原令牌重新上线且不反复升级。
 - 连不上时说人话（`ConnectionDiagnosis`）：.NET 对握手失败只在最外层说一句"The SSL connection could not be established"，原因在异常链里层。Agent 把整条链认一遍，给出一句原因 + 该怎么办：系统不支持 TLS 1.3（强制用系统 TLS 时）、服务器不接受 TLS 1.3（用自带 TLS 时）、证书是别的网站的（要先登录的 Wi-Fi）、证书不受信任（HTTPS 扫描，带颁发者）、电脑时间不对、域名解析失败、系统代理没放行、服务令牌失效（403 / 回来的是登录页）等。添加到家庭时连不上会弹出说明窗口（可复制给管理员的详细信息：异常链、系统版本、是否走代理、证书），已添加的电脑只把原因写在托盘上；同一个原因在日志里只记一次全的，之后约 5 分钟一次。
 - 自动化测试：`--headless --source pattern --dry-input FILE --consent accept`（测试画面、键鼠写日志，accept 需要 `PRIVATECHAT_AGENT_TEST=1`）；`--selftest` 编 60 帧写出 Annex B 供 ffprobe 检查。
 - v1 明确接受的限制：无法操作 UAC 提示和锁屏、发不了 Ctrl+Alt+Del（需要 SYSTEM 服务 + 桌面切换）、注入不到管理员权限的窗口（UIPI）、无音频、Windows N 版要装媒体功能包。
@@ -806,7 +812,7 @@ docker compose up -d     # 首次会构建 web 与 api 镜像
 ### 6.6 备份与升级
 
 - 备份：`pg_dump` 每日 + `data` 卷用 restic 增量备份到另一块盘 / 云存储；提供 `scripts/backup.sh`。
-- 升级：`git pull && docker compose build && docker compose up -d`；数据库迁移在 api 启动时自动执行。
+- 升级：`git pull && docker compose build && docker compose up -d`；数据库迁移在 api 启动时自动执行。已经装出去的远程协助程序（0.6.2 起）会在服务重启、重新连上来之后自己升级到新镜像里的版本。
 - 回滚：镜像打 tag；EF 迁移保持向后兼容（先加列后删列）。
 - cloudflared、postgres 镜像随 `docker compose pull` 更新。
 
