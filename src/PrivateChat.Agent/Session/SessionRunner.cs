@@ -390,12 +390,14 @@ public sealed class SessionRunner : IAsyncDisposable
             case ControlFrame.ReceiverReport r:
                 if (_line is { } reported)
                 {
+                    // 先记下这次汇报，再算"接上了"：CheckRealtime 在另一个线程上看"接上之后多久没汇报"，
+                    // 顺序反过来的话，刚接上的那一瞬间会被它当成很久没汇报
+                    var slowed = reported.Rate.OnReceiverReport(r.LossPermille, r.ReceivedKbps, r.JitterBufferMs, r.RttMs, _clock.ElapsedMilliseconds);
                     if (!reported.Confirmed && r.Fps > 0)
                     {
                         reported.Confirmed = true;
                         AgentLog.Info("控制端已经在快速线路上收到画面，画面和声音不再经中继");
                     }
-                    var slowed = reported.Rate.OnReceiverReport(r.LossPermille, r.ReceivedKbps, r.JitterBufferMs, r.RttMs, _clock.ElapsedMilliseconds);
                     if (slowed is not null) AgentLog.Info($"快速线路降码率：{slowed}");
                     if (VerboseLine) AgentLog.Info($"快速线路汇报：丢包 {r.LossPermille / 10.0:0.#}%，收 {r.ReceivedKbps} kbps，缓冲 {r.JitterBufferMs} ms，{r.Fps} fps，往返 {r.RttMs} ms；发 {reported.Rate.SentKbps} kbps，目标 {reported.Rate.TargetKbps} kbps，重发 {reported.Publisher.Resent} 包");
                 }
@@ -510,6 +512,10 @@ public sealed class SessionRunner : IAsyncDisposable
             publisher = new RealtimePublisher(info.IceServers);
             if (TestDropRate() is > 0 and var drop) publisher.DropForTest = _ => Random.Shared.NextDouble() < drop;
             var offer = await publisher.CreateOfferAsync();
+            // 收集候选要一会儿。这期间这次接通作废了的话（控制端改了主意、换了连接，可能已经在接下一次）就不要再去登记：
+            // 服务器上一次会话只留一份登记，晚到的这份会把后来那次已经接通的线路顶掉
+            lock (_lineGate)
+                if (attempt != _lineAttempt) return;
             var answer = await api.PublishRealtimeAsync(Id, new RemoteRealtimePublishRequest(offer, publisher.Tracks), timeout.Token);
             publisher.SetAnswer(answer.Answer);
             await publisher.WaitConnectedAsync(LineConnectTimeout, timeout.Token);
@@ -630,7 +636,7 @@ public sealed class SessionRunner : IAsyncDisposable
         var now = _clock.ElapsedMilliseconds;
         line.Rate.SetUpstreamRtt(line.Publisher.RoundTripMs);
         if (!line.Confirmed && now - line.ReadyAt > LineConfirmMs) FailRealtime(line, "控制端没有接上快速线路");
-        else if (line.Confirmed && now - line.Rate.LastReportAt > LineSilenceMs) FailRealtime(line, "控制端很久没有回报接收情况");
+        else if (line.Confirmed && now - Math.Max(line.Rate.LastReportAt, line.ReadyAt) > LineSilenceMs) FailRealtime(line, "控制端很久没有回报接收情况");
     }
 
     // ---- 统计、探测、剪贴板 ----
@@ -787,16 +793,28 @@ public sealed class SessionRunner : IAsyncDisposable
                 }
                 if (secure)
                 {
-                    // 锁屏期间不采集。快速线路上隔一阵把锁屏前的那一帧再编一次发出去（内容没变，很小），不然轨道会被 Cloudflare 回收
-                    if (_line is { } held && encoder is not null && nv12Valid && now - lastSentAt >= LineKeepAliveMs)
+                    // 锁屏期间不采集。快速线路上隔一阵把锁屏前的那一帧再编一次发出去（内容没变，很小），不然轨道会被 Cloudflare 回收。
+                    // 对面要关键帧（丢的包补不回来了）、或者这条线路是锁屏期间才接上的（那头的解码器是空的）：马上发，而且编成关键帧，
+                    // 不然后面这些帧它一帧都解不出来，过一会儿就当线路断了
+                    if (_line is { } held && encoder is not null && nv12Valid)
                     {
-                        var again = Math.Max((uint)now, lastTimestamp + 1);
-                        if (encoder.Encode(nv12, TimeSpan.FromMilliseconds(again)) is { } same)
+                        var wantKey = _keyRequested || !ReferenceEquals(held, lastLine);
+                        if (wantKey || now - lastSentAt >= LineKeepAliveMs)
                         {
-                            lastTimestamp = again;
-                            held.Publisher.SendVideo(again, same.Data);
+                            if (wantKey)
+                            {
+                                lastLine = held;
+                                _keyRequested = false;
+                                encoder.RequestKeyFrame();
+                            }
+                            var again = Math.Max((uint)now, lastTimestamp + 1);
+                            if (encoder.Encode(nv12, TimeSpan.FromMilliseconds(again)) is { } same)
+                            {
+                                lastTimestamp = again;
+                                held.Publisher.SendVideo(again, same.Data);
+                            }
+                            lastSentAt = now;
                         }
-                        lastSentAt = now;
                     }
                     continue;
                 }

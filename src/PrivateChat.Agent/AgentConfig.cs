@@ -205,8 +205,9 @@ public static class AgentLog
         {
             if (_console) Console.WriteLine(line);
             if (_path is null) return;
+            // 写不进日志不能把调用的线程带崩（有些调用来自别的库的线程，异常漏出去整个程序就退了）
             try { File.AppendAllText(_path, line + Environment.NewLine); }
-            catch (IOException) { }
+            catch (Exception) { }
         }
     }
 }

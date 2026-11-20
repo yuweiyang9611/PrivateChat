@@ -119,14 +119,35 @@ public sealed class RealtimePublisher : IDisposable
         var packets = H264Rtp.Packetize(annexB);
         var timestamp = unchecked(timestampMs * (VideoClock / 1000));
         var now = _clock.ElapsedMilliseconds;
-        lock (_send)
-            foreach (var packet in packets)
-            {
-                var sequence = _videoSequence++;
-                _sent[sequence % ResendSlots] = new SentPacket(sequence, packet.Data, timestamp, packet.Marker, now);
-                if (DropForTest?.Invoke(sequence) == true) continue;
-                _pc.SendRtpRaw(SDPMediaTypesEnum.video, packet.Data, timestamp, packet.Marker ? 1 : 0, VideoPayloadType, sequence);
-            }
+        try
+        {
+            lock (_send)
+                foreach (var packet in packets)
+                {
+                    var sequence = _videoSequence++;
+                    _sent[sequence % ResendSlots] = new SentPacket(sequence, packet.Data, timestamp, packet.Marker, now);
+                    if (DropForTest?.Invoke(sequence) == true) continue;
+                    _pc.SendRtpRaw(SDPMediaTypesEnum.video, packet.Data, timestamp, packet.Marker ? 1 : 0, VideoPayloadType, sequence);
+                }
+        }
+        catch (Exception ex)
+        {
+            SendFailed(ex);
+        }
+    }
+
+    /// <summary>
+    /// 往连接上发东西出了错：多半是连接正在关（另一个线程在收这条线路），也可能是库里的问题。
+    /// 不往外抛：调用的是采集线程、声音线程、库自己的线程，抛出去轻则这次远程结束、声音没了，重则整个程序退出。
+    /// 当作线路断了，画面回中继。
+    /// </summary>
+    private void SendFailed(Exception ex)
+    {
+        if (!_up) return; // 已经断了 / 正在关：不用再报
+        _up = false;
+        if (Volatile.Read(ref _disposed) != 0) return;
+        AgentLog.Warn($"快速线路发送出错：{ex.GetType().Name} {ex.Message}");
+        Changed(RealtimeLinkState.Failed);
     }
 
     /// <summary>测试用：返回 true 的包第一次不发出去（模拟丢包，看重发管不管用）。</summary>
@@ -137,7 +158,14 @@ public sealed class RealtimePublisher : IDisposable
     {
         if (!_up) return;
         var timestamp = unchecked(timestampMs * (uint)(Audio.AudioFormat.SampleRate / 1000));
-        lock (_send) _pc.SendRtpRaw(SDPMediaTypesEnum.audio, opus, timestamp, 0, AudioPayloadType, _audioSequence++);
+        try
+        {
+            lock (_send) _pc.SendRtpRaw(SDPMediaTypesEnum.audio, opus, timestamp, 0, AudioPayloadType, _audioSequence++);
+        }
+        catch (Exception ex)
+        {
+            SendFailed(ex);
+        }
     }
 
     /// <summary>对面报丢的包里，库已经不留的那些（notKept）：这里还留着、也不太旧的就按原样再发一次。</summary>
@@ -145,14 +173,22 @@ public sealed class RealtimePublisher : IDisposable
     {
         if (notKept.Count == 0 || !_up) return;
         var now = _clock.ElapsedMilliseconds;
-        lock (_send)
-            foreach (var sequence in notKept)
-            {
-                var packet = _sent[sequence % ResendSlots];
-                if (packet.Data is null || packet.Sequence != sequence || now - packet.SentAt > ResendWindowMs) continue;
-                _pc.SendRtpRaw(SDPMediaTypesEnum.video, packet.Data, packet.Timestamp, packet.Marker ? 1 : 0, VideoPayloadType, sequence);
-                Interlocked.Increment(ref _resentHere);
-            }
+        try
+        {
+            lock (_send)
+                foreach (var sequence in notKept)
+                {
+                    var packet = _sent[sequence % ResendSlots];
+                    if (packet.Data is null || packet.Sequence != sequence || now - packet.SentAt > ResendWindowMs) continue;
+                    _pc.SendRtpRaw(SDPMediaTypesEnum.video, packet.Data, packet.Timestamp, packet.Marker ? 1 : 0, VideoPayloadType, sequence);
+                    Interlocked.Increment(ref _resentHere);
+                }
+        }
+        catch (Exception ex)
+        {
+            // 这里是库的线程：异常漏出去会让整个程序退出
+            SendFailed(ex);
+        }
     }
 
     private void OnState(RTCPeerConnectionState state)

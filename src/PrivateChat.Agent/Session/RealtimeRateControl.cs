@@ -117,7 +117,9 @@ public sealed class RealtimeRateController : IRateController
         {
             // 这一段时间里画面实际发了多快（和它收到的画面比）
             var elapsed = nowMs - _windowStart;
-            if (elapsed >= 300)
+            // 两份汇报挤在一起到（网络卡了一下）时，后一份没有自己的"发了多少"可比：不拿它判断"收到的比发出的少"
+            var comparable = elapsed >= 300;
+            if (comparable)
             {
                 _sentKbps = _windowBytes * 8.0 / elapsed;
                 _windowBytes = 0;
@@ -130,7 +132,7 @@ public sealed class RealtimeRateController : IRateController
             // 两段都量到了才算数（只有一段时会显得特别短）
             if (_receiverRttMs > 0) _minRttMs = Math.Min(_minRttMs, _receiverRttMs + _upstreamRttMs);
 
-            _deficitStreak = _sentKbps >= MinComparableKbps && receivedKbps < _sentKbps * 0.7 ? _deficitStreak + 1 : 0;
+            if (comparable) _deficitStreak = _sentKbps >= MinComparableKbps && receivedKbps < _sentKbps * 0.7 ? _deficitStreak + 1 : 0;
             _deepStreak = jitterBufferMs > DeepBufferMs ? _deepStreak + 1 : 0;
 
             if (nowMs - _lastDecreaseAt < DecreaseGapMs) return null;

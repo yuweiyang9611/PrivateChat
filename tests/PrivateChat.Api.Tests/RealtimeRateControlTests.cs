@@ -128,6 +128,23 @@ public class RealtimeRateControlTests
     }
 
     [Fact]
+    public void Reports_that_arrive_bunched_together_do_not_add_up_to_congestion()
+    {
+        var rate = new RealtimeRateController(Min, Max, 2000);
+        long now = 0;
+        // 这一秒控制端只收到一半（比如正好压着一个大帧）：第一次，不算数
+        Second(rate, ref now, received: 0.5);
+        Assert.Equal(2000, rate.TargetKbps);
+        // 网络卡了一下，下一份汇报紧跟着就到了：这边还没有新的"发了多少"可比，不能拿它凑成"连着两次"
+        rate.OnReceiverReport(0, 300, 20, 12, now + 50);
+        Assert.Equal(2000, rate.TargetKbps);
+        // 之后收发对上了：照常
+        now += 50;
+        Second(rate, ref now);
+        Assert.True(rate.TargetKbps >= 2000);
+    }
+
+    [Fact]
     public void A_small_shortfall_at_a_low_rate_is_not_congestion()
     {
         var rate = new RealtimeRateController(Min, Max, 2000);
