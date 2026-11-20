@@ -168,8 +168,10 @@ const killAgents = (dataDir) => { for (const pid of agentPids(dataDir)) try { pr
     const code = await until(() => (fs.existsSync(codeFile) ? fs.readFileSync(codeFile, 'utf8').trim() : null), 30000)
     deviceId = code ? (await api('POST', '/api/auth/device/confirm', { code })).deviceId : null
     const registered = await saysSince(0, '已连接服务器', 30000)
-    check('发布出来的安装包能登记上线；关掉自动升级时明说没有启用', !!registered && out.includes('自动升级没有启用') && (await device())?.agentVersion === VERSION,
-      { version: (await device())?.agentVersion })
+    // 被控端说"已连接"和服务器把它报的版本号记下来之间差一小会儿（测试栈不在本机时更明显）：等版本号出现，不要连上就立刻查
+    const reported = registered ? await until(async () => (await device())?.agentVersion === VERSION, 10000) : null
+    check('发布出来的安装包能登记上线；关掉自动升级时明说没有启用', !!registered && out.includes('自动升级没有启用') && !!reported,
+      { version: (await device())?.agentVersion, connected: !!registered, saidDisabled: out.includes('自动升级没有启用') })
     await stopAll()
 
     // 首次检查已经发出 GET 时，启动时的清理已结束，旧版 8 秒后的第二次清理已安排。
