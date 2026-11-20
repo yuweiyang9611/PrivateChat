@@ -26,6 +26,8 @@ export interface LineProblem { reason: string; retrying: boolean }
 
 /** 快速线路出问题后隔多久重新接一次（接的还是这条线路）。都试完还不行就停下来，等用户决定 */
 const REALTIME_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 15_000, 15_000]
+/** 线路本来在出画面、中途断了：第一次重接只等这么一小会儿（让对方先把旧的连接收掉） */
+const REALTIME_QUICK_RETRY_MS = 300
 /** 让被控端接快速线路，这么久没有回音就算了 */
 const REALTIME_REQUEST_TIMEOUT_MS = 30_000
 
@@ -333,10 +335,12 @@ export class RemoteClient {
   private failRealtime(reason: string, tellAgent = true): void {
     // 用户已经切走了；或者这次失败已经算过了（两边各报一次）
     if (!this.onFastLine || (!this.realtime && !this.realtimeAsked)) return
+    // 这条线路刚才还在出画面（不是一直没接上）：第一次重接不用等，画面已经停着了
+    const wasShowing = this.line === 'realtime'
     this.dropRealtime()
     if (tellAgent) this.send(encode.setTransport(Transport.Relay))
     this.realtimeFailures++
-    const delay = REALTIME_RETRY_DELAYS_MS[this.realtimeFailures - 1]
+    const delay = wasShowing && this.realtimeFailures === 1 ? REALTIME_QUICK_RETRY_MS : REALTIME_RETRY_DELAYS_MS[this.realtimeFailures - 1]
     this.setLine('connecting', { reason, retrying: delay !== undefined })
     if (delay !== undefined) this.realtimeTimer = window.setTimeout(() => this.requestRealtime(), delay)
   }

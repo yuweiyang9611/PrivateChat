@@ -51,7 +51,37 @@ export class StallWatch {
   }
 }
 
-/** 多久看一次"是不是卡在补不回来的包上" */
+/**
+ * 出过画面之后这么久一个包都没收到（画面和声音都没有）：线路断了。
+ * 被控端在这条线路上每 2 秒至少发一帧画面和一个声音包（屏幕不动、没声音时也发），连着两轮都没到才会超过这个时间。
+ */
+const SILENT_TIMEOUT_MS = 4_500
+
+/**
+ * 判断"线路上什么都收不到了"。
+ * 真实的 Cloudflare 上偶尔会这样：连接还显示连着，但 SFU 不再转发任何东西（原因没查到）。
+ * 等"7 秒没有新画面"才发现太慢——屏幕不动时本来就可以几秒没有新画面，所以那个时间不能再短；
+ * 而一个包都收不到是另一回事，保活的包两秒就该来一轮。
+ * 页面在后台、定时器停过的时间不算（和 StallWatch 一样）。
+ */
+export class SilenceWatch {
+  private packets = -1
+  /** 见过包数在涨：浏览器要是根本不报这个数（一直是 0），就不能拿它判断 */
+  private counting = false
+  private lastPacketAt = 0
+  private lastCheckAt = Number.NEGATIVE_INFINITY
+
+  /** 每取到一次接收统计调一次；packets 是画面和声音一共收到的包数。返回 true：很久一个包都没到 */
+  sample(now: number, packets: number): boolean {
+    if (this.packets >= 0 && packets > this.packets) this.counting = true
+    if (packets !== this.packets || now - this.lastCheckAt > TIMER_GAP_MS) this.lastPacketAt = now
+    this.packets = packets
+    this.lastCheckAt = now
+    return this.counting && now - this.lastPacketAt > SILENT_TIMEOUT_MS
+  }
+}
+
+/** 多久看一次接收统计（"是不是卡在补不回来的包上""是不是什么都收不到了"） */
 const STUCK_POLL_MS = 200
 /** 要了重发，既没补到包、也没解出新的一帧，过了这么久（网络往返慢的话是 3 个往返）：不等了 */
 const STUCK_QUIET_MS = 400
@@ -157,6 +187,7 @@ export class RemoteRealtime {
   private started = false
   private readonly stall = new StallWatch()
   private readonly stuck = new StuckWatch()
+  private readonly silence = new SilenceWatch()
   private stuckTimer: number | undefined
   private lastTime = -1
   private framesSinceReport = 0
@@ -260,7 +291,7 @@ export class RemoteRealtime {
         if (!this.started) {
           this.started = true
           window.clearTimeout(this.firstTimer)
-          this.stuckTimer = window.setInterval(() => void this.checkStuck(), STUCK_POLL_MS)
+          this.stuckTimer = window.setInterval(() => void this.checkReceiving(), STUCK_POLL_MS)
           this.applyAudio()
           this.on.first()
         }
@@ -283,19 +314,22 @@ export class RemoteRealtime {
   }
 
   /**
-   * 出了画面之后隔一小会儿看一眼接收统计：卡在补不回来的包上就报 stuck（由调用方去要关键帧）。
+   * 出了画面之后隔一小会儿看一眼接收统计：
+   * 什么都收不到了就判定线路断了（由调用方重新接）；卡在补不回来的包上就报 stuck（由调用方去要关键帧）。
    * 页面在后台时不看：那时浏览器可能不解画面，会被当成卡住。
    */
-  private async checkStuck(): Promise<void> {
+  private async checkReceiving(): Promise<void> {
     const pc = this.pc
     if (!pc || this.closed || !pageVisible()) return
     let framesDecoded = -1
     let nackCount = 0
     let retransmitted = 0
     let rttMs = 0
+    let packets = 0
     try {
       const stats = await pc.getStats()
       stats.forEach((s: Record<string, unknown>) => {
+        if (s.type === 'inbound-rtp') packets += Number(s.packetsReceived ?? 0)
         if (s.type === 'inbound-rtp' && s.kind === 'video') {
           framesDecoded = Number(s.framesDecoded ?? 0)
           nackCount = Number(s.nackCount ?? 0)
@@ -308,7 +342,12 @@ export class RemoteRealtime {
       return
     }
     if (this.closed || this.pc !== pc || framesDecoded < 0) return
-    if (this.stuck.sample(performance.now(), { framesDecoded, nackCount, retransmitted, rttMs })) this.on.stuck()
+    const now = performance.now()
+    if (this.silence.sample(now, packets)) {
+      this.fail('收不到对方的数据')
+      return
+    }
+    if (this.stuck.sample(now, { framesDecoded, nackCount, retransmitted, rttMs })) this.on.stuck()
   }
 
   /**

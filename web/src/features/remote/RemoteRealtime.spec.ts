@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { StallWatch, StuckWatch, withStereo } from './RemoteRealtime'
+import { SilenceWatch, StallWatch, StuckWatch, withStereo } from './RemoteRealtime'
 
 describe('快速线路：很久没有新画面才算断', () => {
   /** 从 from 到 to 每秒查一次，返回第一次判定"断了"的时刻（没有就是 null） */
@@ -141,5 +141,44 @@ describe('快速线路：卡在补不回来的包上就自己要关键帧', () =
     expect(run(repeat(6, { nacks: 2 }), 300)[0]).toBe(1200) // 200 起算，等 900 毫秒
     // 慢网络上要了三次、第四个 200 毫秒里补到了
     expect(run([{ nacks: 1 }, { nacks: 1 }, { nacks: 1 }, { recovered: 1, decoded: 1 }, ...repeat(5, { decoded: 2 })], 300)).toEqual([])
+  })
+})
+
+describe('快速线路：什么都收不到了就算断，不等 7 秒', () => {
+  /** 每 200 毫秒取一次统计；received(now) 说到这一刻一共收到多少个包。返回第一次判定"断了"的时刻 */
+  const firstSilent = (received: (now: number) => number, until: number, watch = new SilenceWatch(), from = 0): number | null => {
+    for (let now = from; now <= until; now += 200) if (watch.sample(now, received(now))) return now
+    return null
+  }
+
+  it('一直有包：不算', () => {
+    expect(firstSilent((now) => Math.floor(now / 20), 60_000)).toBeNull()
+  })
+
+  it('屏幕不动、没声音：两秒来一轮保活的包，不算', () => {
+    expect(firstSilent((now) => Math.floor(now / 2000) * 9, 60_000)).toBeNull()
+  })
+
+  it('保活的包丢了一整轮（四秒才来下一轮）：还不算', () => {
+    // 2 秒那一轮没到，4 秒那一轮到了
+    expect(firstSilent((now) => (now < 4000 ? 9 : 18 + Math.floor((now - 4000) / 2000) * 9), 30_000)).toBeNull()
+  })
+
+  it('10 秒起一个包都没有：4.5 秒多判定断了', () => {
+    const at = firstSilent((now) => Math.floor(Math.min(now, 10_000) / 20), 30_000)
+    expect(at).toBe(14_600) // 最后一次看到包数在涨是 10000，之后第一次超过 4.5 秒的检查
+  })
+
+  it('浏览器不报收到的包数（一直是 0）：不拿它判断', () => {
+    expect(firstSilent(() => 0, 60_000)).toBeNull()
+  })
+
+  it('页面在后台 / 定时器停过：那段时间不算', () => {
+    const watch = new SilenceWatch()
+    // 前 5 秒有包，之后包数不变；5.0–5.2 秒查过，然后 20 秒没人来查（页面在后台），回来再接着查
+    expect(firstSilent((now) => Math.floor(Math.min(now, 5000) / 20), 5200, watch)).toBeNull()
+    expect(watch.sample(25_200, 250)).toBe(false) // 刚回来：不拿后台那 20 秒说事
+    expect(firstSilent(() => 250, 29_600, watch, 25_400)).toBeNull() // 回来后还没满 4.5 秒
+    expect(firstSilent(() => 250, 31_000, watch, 29_800)).toBe(29_800) // 回来后一直没包：满 4.5 秒判定断了
   })
 })
