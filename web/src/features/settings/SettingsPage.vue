@@ -135,8 +135,12 @@ async function logout(): Promise<void> {
         <div>
           <div>{{ t('settings.elderMode') }}</div>
           <div class="text-xs" style="color: var(--pc-text-muted)">{{ t('settings.elderModeDesc') }}</div>
+          <!-- 家人在"家庭"页替这个账号开的；这里的开关只管这台设备 -->
+          <div v-if="ui.elderFromAccount" class="mt-1 text-xs" style="color: var(--pc-text-muted)" data-testid="elder-from-family">
+            {{ t(ui.elderMode ? 'settings.elderFromFamily' : 'settings.elderFromFamilyOff') }}
+          </div>
         </div>
-        <el-switch v-model="ui.elderMode" />
+        <el-switch v-model="ui.elderMode" data-testid="elder-switch" />
       </div>
       <el-divider class="!my-1" />
       <div class="flex items-center justify-between py-2">

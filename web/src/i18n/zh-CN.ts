@@ -15,6 +15,11 @@ export default {
     me: '我的',
     search: '搜索',
   },
+  elder: {
+    home: '家',
+    quickDial: '常联系的人',
+    callName: '打给{name}',
+  },
   chat: {
     search: '搜索消息 / 文件',
     gapLoad: '加载中间的消息',
@@ -134,6 +139,8 @@ export default {
   settings: {
     elderMode: '长辈模式',
     elderModeDesc: '更大的字号和按钮，只保留消息、通话、时光',
+    elderFromFamily: '家人替你开的，换一台设备登录也是这样',
+    elderFromFamilyOff: '家人替你开过，这台设备上你自己关掉了',
     darkMode: '暗色模式',
     profile: '个人资料',
     notifications: '通知',
@@ -343,6 +350,11 @@ export default {
       Child: '不能远程控制电脑、建群和创建外链',
     },
     disabledTag: '已停用',
+    elderTag: '长辈模式',
+    elderOn: '开启长辈模式',
+    elderOff: '关闭长辈模式',
+    elderOnDone: '已为{name}开启长辈模式，对方下次打开应用时生效',
+    elderOffDone: '已为{name}关闭长辈模式，对方下次打开应用时生效',
     rename: '改名字',
     renamePrompt: '家里人看到的名字',
     nameRequired: '名字不能为空',

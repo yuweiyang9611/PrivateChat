@@ -18,7 +18,7 @@ function check(name, ok, detail) {
 const sql = (q) => execSync(`${COMPOSE} exec -T postgres psql -U privatechat -d privatechat -At -c "${q}"`).toString().trim()
 const ok = (p) => p.then(() => true).catch(() => false)
 /** bob 回到别的测试期望的样子 */
-const resetBob = () => sql(`update users set role='Member', disabled_at=null, display_name='爸爸' where id='${BOB_ID}'`)
+const resetBob = () => sql(`update users set role='Member', disabled_at=null, display_name='爸爸', elder_mode=false where id='${BOB_ID}'`)
 
 async function login(page, who) {
   await page.goto(BASE + '/')
@@ -160,6 +160,47 @@ const confirmBox = (page) => page.locator('.el-message-box__btns .el-button--pri
     const untagged = await ok(member(admin, 'bob@example.com').locator('[data-testid=member-disabled]').waitFor({ state: 'detached', timeout: 10000 }))
     const back = await ok(login(bob, 'bob'))
     check('恢复：标记消失，对方又能登录', untagged && back, { untagged, back })
+
+    // ---- 长辈模式：管理员替家人开，跟着对方的账号走；对方可以在自己的设备上关掉 ----
+    await menu('bob@example.com', 'member-elder-on')
+    const elderTagged = await ok(member(admin, 'bob@example.com').locator('[data-testid=member-elder]').waitFor({ timeout: 10000 }))
+    // bob 下次打开应用（这里是换成手机宽度重新加载）就是长辈模式
+    await bob.setViewportSize({ width: 390, height: 800 })
+    await bob.goto(BASE + '/messages')
+    const elderOn = await ok(bob.waitForFunction(() => document.documentElement.classList.contains('elder'), null, { timeout: 15000 }))
+    await ok(bob.locator('[data-testid=elder-dial]').first().waitFor({ timeout: 10000 }))
+    const elderView = await bob.evaluate(() => ({
+      rootPx: parseFloat(getComputedStyle(document.documentElement).fontSize),
+      // 只取文字标签：第一项上可能还挂着未读数
+      tabs: [...document.querySelectorAll('nav a')].map((a) => a.lastElementChild.textContent.trim()).join('/'),
+      dial: document.querySelectorAll('[data-testid=elder-dial]').length,
+      dialHeight: Math.round(document.querySelector('[data-testid=elder-dial]')?.getBoundingClientRect().height ?? 0),
+      settings: document.querySelectorAll('[data-testid=elder-settings]').length,
+      search: document.querySelectorAll('[data-testid=conversation-search]').length,
+      overflow: document.documentElement.scrollWidth > innerWidth + 1,
+    }))
+    check('长辈模式：管理员替家人开，对方再打开就是大字、三项底栏、首页有一键拨打和设置入口',
+      elderTagged && elderOn && sql(`select elder_mode from users where id='${BOB_ID}'`) === 't' && elderView.rootPx === 20 && elderView.tabs === '消息/通话/时光'
+        && elderView.dial >= 1 && elderView.dialHeight >= 64 && elderView.settings === 1 && elderView.search === 0 && !elderView.overflow, elderView)
+
+    await bob.locator('[data-testid=elder-settings]').click()
+    const hintOn = await bob.locator('[data-testid=elder-from-family]').innerText({ timeout: 10000 }).catch(() => '')
+    await bob.locator('[data-testid=elder-switch]').click()
+    const elderOff = await ok(bob.waitForFunction(() => !document.documentElement.classList.contains('elder'), null, { timeout: 5000 }))
+    const hintOff = await bob.locator('[data-testid=elder-from-family]').innerText().catch(() => '')
+    const stored = await bob.evaluate(() => localStorage.getItem('pc.elder'))
+    // 刷新前后都等一下：正在进行的请求被刷新掐断的话，服务器会把这次取消记成 500（已知的老问题，会让最后的日志检查不过）
+    await bob.waitForTimeout(1500)
+    await bob.reload()
+    await bob.locator('[data-testid=elder-switch]').waitFor({ timeout: 15000 })
+    await bob.waitForTimeout(1500)
+    const staysOff = await bob.evaluate(() => !document.documentElement.classList.contains('elder'))
+    check('长辈模式：对方在自己设备的设置里关掉，只管这台设备，账号上的不变，刷新后还是关的',
+      hintOn.includes('家人替你开的') && elderOff && hintOff.includes('自己关掉了') && stored === 'off' && staysOff && sql(`select elder_mode from users where id='${BOB_ID}'`) === 't', { hintOn, hintOff, stored, staysOff })
+
+    await menu('bob@example.com', 'member-elder-off')
+    const elderUntagged = await ok(member(admin, 'bob@example.com').locator('[data-testid=member-elder]').waitFor({ state: 'detached', timeout: 10000 }))
+    check('长辈模式：管理员再关掉', elderUntagged && sql(`select elder_mode from users where id='${BOB_ID}'`) === 'f')
 
     // ---- 手机宽度 ----
     await admin.locator('[data-testid=invite-open]').click()

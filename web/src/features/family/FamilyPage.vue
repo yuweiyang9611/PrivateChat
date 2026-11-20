@@ -56,7 +56,8 @@ function expired(i: InviteDto): boolean {
 function expiryText(i: InviteDto): string {
   if (!i.expiresAt) return ''
   if (expired(i)) return t('family.inviteExpired')
-  const days = Math.ceil((new Date(i.expiresAt).getTime() - Date.now()) / 86_400_000)
+  // 留一分钟的余量：这台设备的钟比服务器慢一点点时，刚发出的 30 天邀请不该显示成"31 天后过期"
+  const days = Math.max(1, Math.ceil((new Date(i.expiresAt).getTime() - Date.now() - 60_000) / 86_400_000))
   return t('family.inviteExpiresIn', { n: days })
 }
 
@@ -110,8 +111,16 @@ async function setDisabled(m: MemberDto, disabled: boolean): Promise<void> {
   await run(m.id, () => family.patchMember(m.id, { disabled }), disabled ? t('family.disabledDone', { name }) : t('family.enabledDone', { name }))
 }
 
+/** 替这位家人开 / 关长辈模式：跟着对方的账号走，对方下次打开应用时生效（对方在自己设备的设置里另拨过的，以那台设备为准） */
+async function setElder(m: MemberDto, elderMode: boolean): Promise<void> {
+  const name = nameOf(m)
+  await run(m.id, () => family.patchMember(m.id, { elderMode }), t(elderMode ? 'family.elderOnDone' : 'family.elderOffDone', { name }))
+}
+
 function onCommand(m: MemberDto, command: string): void {
   if (command === 'rename') void rename(m)
+  else if (command === 'elder:on') void setElder(m, true)
+  else if (command === 'elder:off') void setElder(m, false)
   else if (command === 'disable') void setDisabled(m, true)
   else if (command === 'enable') void setDisabled(m, false)
   else if (command.startsWith('role:')) void setRole(m, command.slice(5) as UserRole)
@@ -157,6 +166,7 @@ async function renew(i: InviteDto): Promise<void> {
                 <span class="truncate font-medium" data-testid="member-name">{{ nameOf(m) }}</span>
                 <span v-if="m.id === me" class="text-xs" style="color: var(--pc-text-muted)">{{ t('family.me') }}</span>
                 <el-tag :type="roleTag(m.role)" size="small" round data-testid="member-role">{{ t(`family.roles.${m.role}`) }}</el-tag>
+                <el-tag v-if="m.elderMode" type="info" size="small" round data-testid="member-elder">{{ t('family.elderTag') }}</el-tag>
                 <el-tag v-if="m.disabled" type="danger" size="small" round data-testid="member-disabled">{{ t('family.disabledTag') }}</el-tag>
               </div>
               <!-- 邮箱是登录身份，只给管理员看 -->
@@ -167,6 +177,8 @@ async function renew(i: InviteDto): Promise<void> {
               <template #dropdown>
                 <el-dropdown-menu :data-menu-for="m.email">
                   <el-dropdown-item command="rename" data-testid="member-rename">{{ t('family.rename') }}</el-dropdown-item>
+                  <el-dropdown-item v-if="m.elderMode" command="elder:off" data-testid="member-elder-off">{{ t('family.elderOff') }}</el-dropdown-item>
+                  <el-dropdown-item v-else command="elder:on" data-testid="member-elder-on">{{ t('family.elderOn') }}</el-dropdown-item>
                   <!-- 自己的角色和停用不能自己改：至少留一个管理员 -->
                   <template v-if="m.id !== me">
                     <template v-for="r in ROLES" :key="r">

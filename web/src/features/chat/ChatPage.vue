@@ -10,6 +10,7 @@ import { useConversationsStore } from '@/stores/conversations'
 import { useMessagesStore } from '@/stores/messages'
 import { useCallsStore } from '@/stores/calls'
 import { useFamilyStore } from '@/stores/family'
+import { useUiStore } from '@/stores/ui'
 import { callsSupported } from '@/features/calls/rtc/media'
 import { typing } from '@/realtime/connection'
 
@@ -21,6 +22,7 @@ const conversations = useConversationsStore()
 const messages = useMessagesStore()
 const calls = useCallsStore()
 const family = useFamilyStore()
+const ui = useUiStore()
 
 const conversation = computed(() => conversations.byId(props.id))
 const typingUsers = computed(() => typing.value[props.id] ?? [])
@@ -98,7 +100,8 @@ function onFocused(found: boolean): void {
       </div>
       <el-button :icon="Phone" circle text :disabled="!canCall" :title="callHint || t('calls.audioCall')" data-testid="chat-call-audio" @click="calls.startCall(id, 'Audio')" />
       <el-button :icon="VideoCamera" circle text :disabled="!canCall" :title="callHint || t('calls.videoCall')" data-testid="chat-call-video" @click="calls.startCall(id, 'Video')" />
-      <el-button :icon="MoreFilled" circle text />
+      <!-- 长辈模式：按钮都变大了，把地方让给会话名 -->
+      <el-button v-if="!ui.elderMode" :icon="MoreFilled" circle text />
     </header>
 
     <!-- 会话里有通话正在进行：随时可以加入 -->

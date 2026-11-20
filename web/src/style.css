@@ -12,8 +12,14 @@
   --pc-text-muted: #8a7a6d;
   --pc-radius: 12px;
 
-  /* 让 Element Plus 跟随主色 */
+  /* 让 Element Plus 跟随主色：连它按主色推出来的那几档深浅（悬停、禁用、浅底）也一起，不然禁用的主按钮是蓝的 */
   --el-color-primary: var(--pc-primary);
+  --el-color-primary-light-3: color-mix(in srgb, var(--pc-primary) 70%, var(--pc-surface));
+  --el-color-primary-light-5: color-mix(in srgb, var(--pc-primary) 50%, var(--pc-surface));
+  --el-color-primary-light-7: color-mix(in srgb, var(--pc-primary) 30%, var(--pc-surface));
+  --el-color-primary-light-8: color-mix(in srgb, var(--pc-primary) 20%, var(--pc-surface));
+  --el-color-primary-light-9: color-mix(in srgb, var(--pc-primary) 10%, var(--pc-surface));
+  --el-color-primary-dark-2: color-mix(in srgb, var(--pc-primary) 82%, #000);
   --el-border-radius-base: 8px;
   color-scheme: light;
 }
@@ -26,6 +32,14 @@ html.dark {
   --pc-border: #3a322d;
   --pc-text: #f3ece5;
   --pc-text-muted: #a3958a;
+  /* Element Plus 的暗色变量表会把主色改回它自己的蓝：在这里再指回来（深浅几档按上面 :root 里的式子跟着新的主色和底色重算） */
+  --el-color-primary: var(--pc-primary);
+  --el-color-primary-light-3: color-mix(in srgb, var(--pc-primary) 70%, var(--pc-surface));
+  --el-color-primary-light-5: color-mix(in srgb, var(--pc-primary) 50%, var(--pc-surface));
+  --el-color-primary-light-7: color-mix(in srgb, var(--pc-primary) 30%, var(--pc-surface));
+  --el-color-primary-light-8: color-mix(in srgb, var(--pc-primary) 20%, var(--pc-surface));
+  --el-color-primary-light-9: color-mix(in srgb, var(--pc-primary) 10%, var(--pc-surface));
+  --el-color-primary-dark-2: color-mix(in srgb, var(--pc-primary) 82%, #fff);
   color-scheme: dark;
 }
 
@@ -39,12 +53,89 @@ html.dark {
   border-radius: 12px;
 }
 
-/* 长辈模式：全局字号 +25%，触控目标更大 */
+/*
+ * 长辈模式：字号 +25%，能点的东西不小于 56px。
+ * rem 跟着根字号放大（Tailwind 的字号、间距都是 rem）；Element Plus 的字号和控件高度写死成 px，要单独放大。
+ */
 html.elder {
   font-size: 125%;
+  --el-font-size-extra-large: 25px;
+  --el-font-size-large: 22px;
+  --el-font-size-medium: 20px;
+  --el-font-size-base: 18px;
+  --el-font-size-small: 16px;
+  --el-font-size-extra-small: 15px;
+  --el-component-size-large: 64px;
+  --el-component-size: 56px;
+  --el-component-size-small: 48px;
 }
 html.elder .el-button {
   min-height: 56px;
+  padding-inline: 20px;
+  font-size: var(--el-font-size-base);
+}
+/* 主按钮：橙底上的白字对比度不到 3:1，字大了也还是发虚；长辈模式下换成深棕色的字（约 6.5:1） */
+html.elder .el-button--primary:not(.is-plain):not(.is-link):not(.is-text):not(.is-disabled) {
+  --el-button-text-color: #2b211a;
+  --el-button-hover-text-color: #2b211a;
+  --el-button-active-text-color: #2b211a;
+}
+html.elder .el-button--small {
+  min-height: 48px;
+  font-size: var(--el-font-size-small);
+}
+/* 圆形按钮跟着变成 56px 的圆，不然只高不宽成了椭圆 */
+html.elder .el-button.is-circle {
+  min-width: 56px;
+  padding: 0;
+}
+html.elder .el-button.is-circle .el-icon {
+  font-size: 26px;
+}
+html.elder .touch-target {
+  min-width: 56px;
+  min-height: 56px;
+}
+html.elder .el-input__inner,
+html.elder .el-textarea__inner {
+  font-size: var(--el-font-size-base);
+}
+/* 开关整体放大：里面的滑块按固定像素定位，逐项改尺寸会错位 */
+html.elder .el-switch {
+  zoom: 1.4;
+}
+html.elder .el-tag {
+  height: auto;
+  min-height: 28px;
+  padding: 2px 10px;
+  font-size: 15px;
+}
+html.elder .el-dropdown-menu__item {
+  min-height: 56px;
+  padding-inline: 20px;
+  font-size: var(--el-font-size-base);
+  line-height: 1.4;
+}
+html.elder .el-message-box {
+  --el-messagebox-width: min(92vw, 520px);
+  --el-messagebox-font-size: 22px;
+  --el-messagebox-content-font-size: 18px;
+}
+html.elder .el-message {
+  --el-message-padding: 16px 20px;
+}
+html.elder .el-avatar {
+  --el-avatar-text-size: 20px;
+}
+html.elder .el-badge__content {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 15px;
+}
+/* 未读数变大以后（尤其"99+"）会伸到右边盖住名字：改成右边最多探出 12px，宽出来的部分往头像里面长 */
+html.elder .el-badge__content.is-fixed {
+  right: 0;
+  transform: translateY(-40%) translateX(12px);
 }
 
 html, body, #app {

@@ -114,17 +114,17 @@ export const useFamilyStore = defineStore('family', () => {
     invites.value = invites.value.filter((i) => i.id !== id)
   }
 
-  async function patchMember(id: string, patch: { displayName?: string; role?: UserRole; disabled?: boolean }): Promise<MemberDto> {
+  async function patchMember(id: string, patch: { displayName?: string; role?: UserRole; disabled?: boolean; elderMode?: boolean }): Promise<MemberDto> {
     const updated = await unwrap(
       api.PATCH('/api/family/members/{id}', {
         params: { path: { id } },
-        body: { displayName: patch.displayName ?? null, role: patch.role ?? null, elderMode: null, disabled: patch.disabled ?? null },
+        body: { displayName: patch.displayName ?? null, role: patch.role ?? null, elderMode: patch.elderMode ?? null, disabled: patch.disabled ?? null },
       }),
     )
     members.value = members.value.map((m) => (m.id === id ? updated : m))
-    // 改的是自己：左下角头像、"我的"页显示的名字跟着变
+    // 改的是自己：左下角头像、"我的"页显示的名字跟着变，给自己开关长辈模式也马上生效
     const session = useSessionStore()
-    if (session.user?.id === id) session.user = { ...session.user, displayName: updated.displayName, role: updated.role }
+    if (session.user?.id === id) session.user = { ...session.user, displayName: updated.displayName, role: updated.role, elderMode: updated.elderMode }
     return updated
   }
 

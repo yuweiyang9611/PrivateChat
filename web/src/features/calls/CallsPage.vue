@@ -9,6 +9,7 @@ import { useCallsStore } from '@/stores/calls'
 import { useConversationsStore } from '@/stores/conversations'
 import { useFamilyStore } from '@/stores/family'
 import { useSessionStore } from '@/stores/session'
+import { useUiStore } from '@/stores/ui'
 
 // 通话页：客厅（常驻会议室）、进行中的通话、给家人打电话、最近通话。
 const { t } = useI18n()
@@ -16,6 +17,7 @@ const calls = useCallsStore()
 const conversations = useConversationsStore()
 const family = useFamilyStore()
 const session = useSessionStore()
+const ui = useUiStore()
 
 const supported = callsSupported()
 const history = ref<CallDto[]>([])
@@ -98,7 +100,7 @@ function gigabytes(bytes: number): string {
         </div>
         <div class="min-w-0 flex-1">
           <div class="text-lg font-semibold">{{ t('calls.livingRoom') }}</div>
-          <div class="truncate text-sm" style="color: var(--pc-text-muted)" data-testid="living-room-people">
+          <div class="text-sm" :class="ui.elderMode ? '' : 'truncate'" style="color: var(--pc-text-muted)" data-testid="living-room-people">
             {{ roomPeople.length ? t('calls.roomPeople', { names: roomPeople.join('、') }) : t('calls.roomEmpty') }}
           </div>
         </div>
@@ -129,7 +131,7 @@ function gigabytes(bytes: number): string {
         <el-empty v-if="family.loaded && !relatives.length" :description="t('calls.noFamily')" :image-size="64" />
         <ul v-else class="overflow-hidden rounded-2xl border" style="border-color: var(--pc-border); background: var(--pc-surface)">
           <li v-for="m in relatives" :key="m.id" class="flex items-center gap-3 px-4 py-2.5" data-testid="family-member" :data-user-id="m.id">
-            <el-avatar :size="44" style="background: var(--pc-primary)">{{ (m.displayName || m.username).slice(0, 1) }}</el-avatar>
+            <el-avatar :size="ui.elderMode ? 56 : 44" class="shrink-0" style="background: var(--pc-primary)">{{ (m.displayName || m.username).slice(0, 1) }}</el-avatar>
             <div class="min-w-0 flex-1 truncate font-medium">{{ m.displayName || m.username }}</div>
             <el-button :icon="Phone" circle size="large" :disabled="disabled" :title="t('calls.audioCall')" data-testid="dial-audio" @click="dial(m.id, 'Audio')" />
             <el-button :icon="VideoCamera" circle size="large" type="primary" :disabled="disabled" :title="t('calls.videoCall')" data-testid="dial-video" @click="dial(m.id, 'Video')" />

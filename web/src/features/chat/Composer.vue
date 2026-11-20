@@ -124,7 +124,7 @@ onBeforeUnmount(cancelRecord)
 
 <template>
   <footer
-    class="relative flex items-end gap-2 border-t p-2"
+    class="pc-composer relative flex items-end gap-2 border-t p-2"
     style="border-color: var(--pc-border); background: var(--pc-surface); padding-bottom: calc(0.5rem + env(safe-area-inset-bottom))"
     @dragover.prevent="dragging = true"
     @dragleave.prevent="dragging = false"
@@ -172,7 +172,23 @@ onBeforeUnmount(cancelRecord)
         @keydown="onKeydown"
         @paste="onPaste"
       />
-      <el-button type="primary" :disabled="!text.trim()" @click="send">{{ t('chat.send') }}</el-button>
+      <el-button type="primary" class="pc-composer-send" :disabled="!text.trim()" @click="send">{{ t('chat.send') }}</el-button>
     </template>
   </footer>
 </template>
+
+<style>
+/* 长辈模式（不带 scoped，要匹配 html 上的 class）：字和按钮都大了，一行放不下——输入框单独占一行，按钮排在下面，发送靠右 */
+html.elder .pc-composer {
+  flex-wrap: wrap;
+  padding: 0.75rem;
+}
+html.elder .pc-composer > .el-textarea {
+  order: -1;
+  flex: 0 0 100%;
+}
+html.elder .pc-composer .pc-composer-send {
+  min-width: 96px;
+  margin-left: auto;
+}
+</style>
