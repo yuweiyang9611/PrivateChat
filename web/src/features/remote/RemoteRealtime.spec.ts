@@ -1,5 +1,48 @@
 import { describe, expect, it } from 'vitest'
-import { withStereo } from './RemoteRealtime'
+import { StallWatch, withStereo } from './RemoteRealtime'
+
+describe('快速线路：很久没有新画面才算断', () => {
+  /** 从 from 到 to 每秒查一次，返回第一次判定"断了"的时刻（没有就是 null） */
+  const checks = (watch: StallWatch, from: number, to: number, visible: boolean): number | null => {
+    for (let now = from; now <= to; now += 1000) if (watch.stalled(now, visible)) return now
+    return null
+  }
+
+  it('在前台：有帧就不算；7 秒没有新的一帧算断', () => {
+    const watch = new StallWatch()
+    for (let now = 0; now <= 20_000; now += 1000) {
+      watch.frame(now) // 屏幕不动时被控端也会每 2 秒发一帧保活
+      expect(watch.stalled(now, true)).toBe(false)
+    }
+    // 20 秒之后再没有帧
+    expect(checks(watch, 21_000, 40_000, true)).toBe(28_000)
+  })
+
+  it('页面在后台的时间不算（浏览器这时不回调"出了一帧"），回到前台重新数', () => {
+    const watch = new StallWatch()
+    watch.frame(0)
+    expect(watch.stalled(1000, true)).toBe(false)
+    // 切到别的标签页 5 分钟：一帧回调都没有
+    expect(checks(watch, 2000, 300_000, false)).toBeNull()
+    // 回到前台：马上有帧就没事
+    watch.frame(300_500)
+    expect(checks(watch, 301_000, 305_000, true)).toBeNull()
+    // 回到前台之后真的一直没有帧：从回来那一刻起数 7 秒
+    const dead = new StallWatch()
+    dead.frame(0)
+    expect(checks(dead, 1000, 300_000, false)).toBeNull()
+    expect(checks(dead, 301_000, 320_000, true)).toBe(308_000)
+  })
+
+  it('定时器停过一阵（页面被冻结、电脑睡过）不算', () => {
+    const watch = new StallWatch()
+    watch.frame(0)
+    expect(watch.stalled(1000, true)).toBe(false)
+    // 一小时后才又查到：这一小时不是"没有画面"，是页面根本没在跑
+    expect(watch.stalled(3_600_000, true)).toBe(false)
+    expect(checks(watch, 3_601_000, 3_620_000, true)).toBe(3_608_000)
+  })
+})
 
 describe('快速线路：answer 里声明能收双声道', () => {
   const sdp = (opus: string): string =>

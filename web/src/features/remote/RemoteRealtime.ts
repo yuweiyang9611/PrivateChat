@@ -23,6 +23,36 @@ const FIRST_FRAME_TIMEOUT_MS = 10_000
 const STALL_TIMEOUT_MS = 7_000
 /** 连接断开这么久没恢复：算断了 */
 const DISCONNECT_TIMEOUT_MS = 5_000
+/** 两次检查隔了这么久：定时器停过（页面被冻结、电脑睡过），这段时间不算"没有画面" */
+const TIMER_GAP_MS = 3_000
+
+/**
+ * 判断"出过画面之后很久没有新的一帧"。
+ * 页面在后台时（切到别的标签页、窗口最小化或被盖住）浏览器不再回调"出了一帧"，画面其实还在收；
+ * 定时器停过一阵（页面被冻结、电脑睡过）也一样。这些时间都不算，不然一切走标签页快速线路就被当成断了。
+ * 线路真断了的话，后台期间由连接状态和被控端那边发现。
+ */
+export class StallWatch {
+  private lastFrameAt = 0
+  private lastCheckAt = Number.NEGATIVE_INFINITY
+
+  /** 出了一帧 */
+  frame(now: number): void {
+    this.lastFrameAt = now
+  }
+
+  /** 每秒查一次。visible：页面现在在前台 */
+  stalled(now: number, visible: boolean): boolean {
+    if (!visible || now - this.lastCheckAt > TIMER_GAP_MS) this.lastFrameAt = now
+    this.lastCheckAt = now
+    return now - this.lastFrameAt > STALL_TIMEOUT_MS
+  }
+}
+
+/** 页面现在在前台（没有这个属性的环境当作在前台） */
+export function pageVisible(): boolean {
+  return typeof document === 'undefined' || document.visibilityState !== 'hidden'
+}
 
 interface Sample { at: number; lost: number; received: number; bytes: number; delay: number; emitted: number }
 
@@ -40,7 +70,7 @@ export class RemoteRealtime {
   private wantAudio = false
   private closed = false
   private started = false
-  private lastFrameAt = 0
+  private readonly stall = new StallWatch()
   private lastTime = -1
   private framesSinceReport = 0
   private previous: Sample | null = null
@@ -137,7 +167,7 @@ export class RemoteRealtime {
       const fresh = perFrame || video.currentTime !== this.lastTime
       if (fresh && video.videoWidth > 0) {
         this.lastTime = video.currentTime
-        this.lastFrameAt = performance.now()
+        this.stall.frame(performance.now())
         this.framesSinceReport++
         this.paint(video)
         if (!this.started) {
@@ -166,13 +196,13 @@ export class RemoteRealtime {
 
   /**
    * 每秒调一次：这一秒收得怎么样（发给被控端，它据此调码率）。还没出画面时返回 null。
-   * 出过画面之后太久没有新的一帧，这里会判定线路断了。
+   * 出过画面之后太久没有新的一帧，这里会判定线路断了（页面在后台的时间不算，见 StallWatch）。
    */
   async report(): Promise<ReceiverReport | null> {
     const pc = this.pc
     if (!pc || !this.active) return null
     const now = performance.now()
-    if (now - this.lastFrameAt > STALL_TIMEOUT_MS) {
+    if (this.stall.stalled(now, pageVisible())) {
       this.fail('很久没有收到画面')
       return null
     }

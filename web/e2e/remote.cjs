@@ -446,6 +446,27 @@ async function moveOnCanvas(page, fx, fy) {
     const backToFast = await until(async () => (await lineNow()) === 'realtime', 40000)
     check('过一会儿自动重新接上快速线路', !!backToFast && (await until(async () => (await fpsNow()) >= 5, 10000)) !== null, { line: await lineNow() })
 
+    // 页面进了后台（切到别的标签页、窗口被盖住）：浏览器不再回调"出了一帧"，这段时间不能算成"没有画面"；
+    // 线路要是真断了，后台时不去重连（接上了也等不到第一帧，白算一次失败），回到前台马上接。
+    // 无界面浏览器做不出真正的后台，这里只让页面"以为"自己在后台：验证的是后台时不重连、回前台就接这两步
+    const setHidden = (hidden) => admin.evaluate((hidden) => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (hidden ? 'hidden' : 'visible') })
+      document.dispatchEvent(new Event('visibilitychange'))
+    }, hidden)
+    await setHidden(true)
+    await sleep(9000) // 比"7 秒没有画面算断"长：在后台待着本身不会把线路判成断了
+    const stayed = (await lineNow()) === 'realtime'
+    const subscriber2 = (await sfu.summary()).find((s) => s.pulled > 0 && s.state === 'connected')
+    await sfu.drop(subscriber2.id)
+    const fellBack2 = await until(async () => (await lineNow()) === 'relay', 45000)
+    await sleep(33000) // 第二次失败后 30 秒会自动再试：页面在后台，不试
+    const waited = (await lineNow()) === 'relay'
+    await setHidden(false)
+    const resumed = await until(async () => (await lineNow()) === 'realtime', 10000)
+    check('页面在后台：待着不算断线；线路真断了不在后台重连，回到前台马上接上',
+      stayed && !!fellBack2 && waited && !!resumed && (await until(async () => (await fpsNow()) >= 5, 10000)) !== null,
+      { stayed, fellBack: !!fellBack2, waitedInBackground: waited, resumed: !!resumed, line: await lineNow() })
+
     // 手动切回标准线路：被控端收掉快速线路，画面回到中继；后面的用例都在中继上跑
     await admin.locator('.el-message').first().waitFor({ state: 'detached', timeout: 10000 }).catch(() => undefined)
     const mark = agent.out.length

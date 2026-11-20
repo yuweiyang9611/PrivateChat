@@ -1,6 +1,6 @@
 import { codecFromAnnexB, encode, Features, parseAgentFrame, Transport, TransportState, type MonitorInfo, type QualityPreset } from './protocol'
 import { RemoteAudio } from './RemoteAudio'
-import { RemoteRealtime, realtimeSupported } from './RemoteRealtime'
+import { RemoteRealtime, pageVisible, realtimeSupported } from './RemoteRealtime'
 
 /** 浏览器能不能解 H.264：要 WebCodecs（Chrome / Edge 94+、Safari 16.4+、Firefox 130+） */
 export function webCodecsSupported(): boolean {
@@ -89,6 +89,12 @@ export class RemoteClient {
     this.canvas = canvas
     this.on = on
     this.ctx = canvas.getContext('2d', { alpha: false })
+    document.addEventListener('visibilitychange', this.onVisibility)
+  }
+
+  /** 页面回到前台：在后台时没去接的快速线路，现在接 */
+  private readonly onVisibility = (): void => {
+    if (pageVisible()) this.requestRealtime()
   }
 
   connect(): void {
@@ -130,6 +136,7 @@ export class RemoteClient {
   close(): void {
     this.closed = true
     this.peer = false
+    document.removeEventListener('visibilitychange', this.onVisibility)
     window.clearTimeout(this.retryTimer)
     window.clearInterval(this.statsTimer)
     const ws = this.ws
@@ -230,6 +237,8 @@ export class RemoteClient {
   private requestRealtime(): void {
     if (!this.wantRealtime || this.closed || !this.peer || !this.realtimeAvailable) return
     if (this.line !== 'relay' || this.realtimeFailures > REALTIME_AUTO_RETRIES) return
+    // 页面在后台时不接：浏览器这时不回调"出了一帧"，接上了也等不到第一帧，白白算一次失败。回到前台再接（onVisibility）
+    if (!pageVisible()) return
     this.setLine('connecting')
     this.send(encode.setTransport(Transport.Realtime))
     window.clearTimeout(this.realtimeTimer)
