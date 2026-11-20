@@ -311,6 +311,10 @@ export class RemoteClient {
       audio: (state) => {
         if (this.realtime === realtime && realtime.active) this.on.audio?.(state)
       },
+      stuck: () => {
+        // 有个包怎么要都补不回来：浏览器自己要等满 3 秒才向对方要关键帧，这里经控制通道直接要
+        if (this.realtime === realtime) this.requestKey()
+      },
     })
     this.realtime = realtime
     void realtime.start()

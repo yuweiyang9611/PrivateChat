@@ -15,6 +15,8 @@ export interface RemoteRealtimeEvents {
   failed: (reason: string) => void
   /** 声音：playing 在放；blocked 浏览器要先点一下页面才让出声；off 没开 */
   audio: (state: 'off' | 'playing' | 'blocked') => void
+  /** 画面卡在一个怎么要都补不回来的包上：该让对方发一个关键帧了（见 StuckWatch） */
+  stuck: () => void
 }
 
 /** 接上之后这么久还没出第一帧：算接不上 */
@@ -49,6 +51,89 @@ export class StallWatch {
   }
 }
 
+/** 多久看一次"是不是卡在补不回来的包上" */
+const STUCK_POLL_MS = 200
+/** 要了重发，既没补到包、也没解出新的一帧，过了这么久（网络往返慢的话是 3 个往返）：不等了 */
+const STUCK_QUIET_MS = 400
+/** ……而且这期间至少要过这么多次：只要过一两次的，补的包可能还在路上 */
+const STUCK_QUIET_NACKS = 3
+/** 丢包多的网络上别的包一直在补到、唯独卡住的那个补不回来：这么久没解出新的一帧（或 5 个往返）也不等了 */
+const STUCK_LONG_MS = 1_000
+const STUCK_LONG_NACKS = 5
+/** 要过一次关键帧之后，至少隔这么久才再要 */
+const STUCK_COOLDOWN_MS = 1_500
+
+/** 接收统计里和"解不解得出来"有关的几个累计数 */
+export interface DecodeProgress {
+  /** 解出来的帧数 */
+  framesDecoded: number
+  /** 向 SFU 要过几次重发 */
+  nackCount: number
+  /** 补到的包数（浏览器不报这个数时是 0） */
+  retransmitted: number
+  /** 到 SFU 的往返时间，还没量到是 0 */
+  rttMs: number
+}
+
+/**
+ * 判断"画面卡在一个补不回来的包上"。
+ * H.264 的一帧缺一个包就解不出来，后面的帧也跟着解不了。浏览器会向 SFU 要重发，绝大多数时候 0.1 秒内就补到；
+ * 偶尔 SFU 手里没有那个包（真实的 Cloudflare 上几分钟一次），浏览器就一直要、一直要不到，固定等满 3 秒才向发送方要关键帧，画面停 3 秒。
+ * 这里盯着接收统计：要了重发却没有进展，过一小会儿就自己去要关键帧，不陪它等。
+ * 屏幕不动（没有新的一帧，但也没人要重发）、一大帧还在路上（没要重发，或者要了就补到）都不算卡住。
+ */
+export class StuckWatch {
+  private decoded = -1
+  private nacks = 0
+  private retransmitted = 0
+  /** 从什么时候起"要了重发，没补到包也没解出新的一帧"；null：没在等 */
+  private quietSince: number | null = null
+  private quietNacks = 0
+  /** 从什么时候起"要了重发，没解出新的一帧"（中间补到过别的包也算在里面） */
+  private waitingSince: number | null = null
+  private waitingNacks = 0
+  private askedAt = Number.NEGATIVE_INFINITY
+
+  /** 每取到一次接收统计调一次。返回 true：现在该要关键帧 */
+  sample(now: number, s: DecodeProgress): boolean {
+    const first = this.decoded < 0
+    const decodedMore = s.framesDecoded !== this.decoded
+    const recovered = s.retransmitted !== this.retransmitted
+    const asked = Math.max(0, s.nackCount - this.nacks)
+    this.decoded = s.framesDecoded
+    this.nacks = s.nackCount
+    this.retransmitted = s.retransmitted
+    if (first || decodedMore) {
+      this.forget()
+      return false
+    }
+    if (recovered) {
+      this.quietSince = null
+      this.quietNacks = 0
+    } else if (asked > 0) {
+      this.quietSince ??= now
+      this.quietNacks += asked
+    }
+    if (asked > 0) {
+      this.waitingSince ??= now
+      this.waitingNacks += asked
+    }
+    const quiet =
+      this.quietSince !== null && this.quietNacks >= STUCK_QUIET_NACKS && now - this.quietSince >= Math.max(STUCK_QUIET_MS, 3 * s.rttMs)
+    const long =
+      this.waitingSince !== null && this.waitingNacks >= STUCK_LONG_NACKS && now - this.waitingSince >= Math.max(STUCK_LONG_MS, 5 * s.rttMs)
+    if (!(quiet || long) || now - this.askedAt < STUCK_COOLDOWN_MS) return false
+    this.askedAt = now
+    this.forget()
+    return true
+  }
+
+  private forget(): void {
+    this.quietSince = this.waitingSince = null
+    this.quietNacks = this.waitingNacks = 0
+  }
+}
+
 /** 页面现在在前台（没有这个属性的环境当作在前台） */
 export function pageVisible(): boolean {
   return typeof document === 'undefined' || document.visibilityState !== 'hidden'
@@ -71,6 +156,8 @@ export class RemoteRealtime {
   private closed = false
   private started = false
   private readonly stall = new StallWatch()
+  private readonly stuck = new StuckWatch()
+  private stuckTimer: number | undefined
   private lastTime = -1
   private framesSinceReport = 0
   private previous: Sample | null = null
@@ -173,6 +260,7 @@ export class RemoteRealtime {
         if (!this.started) {
           this.started = true
           window.clearTimeout(this.firstTimer)
+          this.stuckTimer = window.setInterval(() => void this.checkStuck(), STUCK_POLL_MS)
           this.applyAudio()
           this.on.first()
         }
@@ -192,6 +280,35 @@ export class RemoteRealtime {
         if (this.pc === pc && pc.connectionState !== 'connected') this.fail('连接断开')
       }, DISCONNECT_TIMEOUT_MS)
     }
+  }
+
+  /**
+   * 出了画面之后隔一小会儿看一眼接收统计：卡在补不回来的包上就报 stuck（由调用方去要关键帧）。
+   * 页面在后台时不看：那时浏览器可能不解画面，会被当成卡住。
+   */
+  private async checkStuck(): Promise<void> {
+    const pc = this.pc
+    if (!pc || this.closed || !pageVisible()) return
+    let framesDecoded = -1
+    let nackCount = 0
+    let retransmitted = 0
+    let rttMs = 0
+    try {
+      const stats = await pc.getStats()
+      stats.forEach((s: Record<string, unknown>) => {
+        if (s.type === 'inbound-rtp' && s.kind === 'video') {
+          framesDecoded = Number(s.framesDecoded ?? 0)
+          nackCount = Number(s.nackCount ?? 0)
+          retransmitted = Number(s.retransmittedPacketsReceived ?? 0)
+        } else if (s.type === 'candidate-pair' && s.nominated && s.currentRoundTripTime !== undefined) {
+          rttMs = Number(s.currentRoundTripTime) * 1000
+        }
+      })
+    } catch {
+      return
+    }
+    if (this.closed || this.pc !== pc || framesDecoded < 0) return
+    if (this.stuck.sample(performance.now(), { framesDecoded, nackCount, retransmitted, rttMs })) this.on.stuck()
   }
 
   /**
@@ -323,6 +440,7 @@ export class RemoteRealtime {
     this.closed = true
     window.clearTimeout(this.firstTimer)
     window.clearTimeout(this.disconnectTimer)
+    window.clearInterval(this.stuckTimer)
     const pc = this.pc
     this.pc = null
     if (pc) {

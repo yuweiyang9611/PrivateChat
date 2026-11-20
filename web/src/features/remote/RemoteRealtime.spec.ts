@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { StallWatch, withStereo } from './RemoteRealtime'
+import { StallWatch, StuckWatch, withStereo } from './RemoteRealtime'
 
 describe('快速线路：很久没有新画面才算断', () => {
   /** 从 from 到 to 每秒查一次，返回第一次判定"断了"的时刻（没有就是 null） */
@@ -67,5 +67,79 @@ describe('快速线路：answer 里声明能收双声道', () => {
   it('没有 Opus 参数行时原样返回', () => {
     expect(withStereo('v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 125\r\n')).toBe('v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 125\r\n')
     expect(withStereo('')).toBe('')
+  })
+})
+
+describe('快速线路：卡在补不回来的包上就自己要关键帧', () => {
+  /**
+   * 每 200 毫秒取一次统计，一步一步喂进去；step 说这一步里解出了几帧、要了几次重发、补到了几个包。
+   * 返回每次判定"该要关键帧了"的时刻。
+   */
+  const run = (steps: { decoded?: number; nacks?: number; recovered?: number }[], rttMs = 10, watch = new StuckWatch()): number[] => {
+    const asked: number[] = []
+    let framesDecoded = 100
+    let nackCount = 0
+    let retransmitted = 0
+    watch.sample(0, { framesDecoded, nackCount, retransmitted, rttMs })
+    steps.forEach((step, i) => {
+      framesDecoded += step.decoded ?? 0
+      nackCount += step.nacks ?? 0
+      retransmitted += step.recovered ?? 0
+      const now = (i + 1) * 200
+      if (watch.sample(now, { framesDecoded, nackCount, retransmitted, rttMs })) asked.push(now)
+    })
+    return asked
+  }
+  const repeat = <T>(n: number, step: T): T[] => Array.from({ length: n }, () => step)
+
+  it('画面一直在出：不要', () => {
+    expect(run(repeat(50, { decoded: 4 }))).toEqual([])
+  })
+
+  it('屏幕不动（没有新的一帧，也没人要重发）：不要', () => {
+    expect(run(repeat(50, {}))).toEqual([])
+    // 两秒一帧的保活
+    expect(run(repeat(5, [...repeat(9, {}), { decoded: 1 }]).flat())).toEqual([])
+  })
+
+  it('丢了包、要一次就补到：不要', () => {
+    expect(run([{ decoded: 4 }, { decoded: 1, nacks: 1 }, { decoded: 3, recovered: 1 }, ...repeat(20, { decoded: 4 })])).toEqual([])
+    // 补到了，但屏幕正好不动、后面没有新的一帧
+    expect(run([{ nacks: 1 }, { recovered: 1 }, ...repeat(20, {})])).toEqual([])
+  })
+
+  it('一直在要重发、补不到、也解不出新的一帧：0.4 秒多就要，不等浏览器的 3 秒', () => {
+    // 每 200 毫秒里要两次（真实情况约 0.1 秒一次）
+    const asked = run([{ decoded: 4 }, ...repeat(10, { nacks: 2 })])
+    expect(asked[0]).toBe(800) // 第一次看到在要是 400，过了 400 毫秒
+  })
+
+  it('要到了关键帧就恢复，不再要', () => {
+    expect(run([...repeat(4, { nacks: 2 }), { decoded: 1 }, ...repeat(20, { decoded: 4 })])).toEqual([600])
+  })
+
+  it('要了关键帧还是解不出来（关键帧也丢了包）：隔一秒半再要，不连着要', () => {
+    const asked = run(repeat(25, { nacks: 2 }))
+    expect(asked).toEqual([600, 2200, 3800])
+  })
+
+  it('只要过一两次重发：补的包可能还在路上，先不要', () => {
+    expect(run([{ nacks: 1 }, {}, { nacks: 1 }, {}, {}, { decoded: 1 }])).toEqual([])
+  })
+
+  it('一大帧还在路上，丢的包一要就补到：不要', () => {
+    // 慢的网络上一帧要传零点几秒，中间丢的包都补到了，这一秒里没有解出新的一帧
+    expect(run([...repeat(4, { nacks: 1, recovered: 1 }), { decoded: 1 }, ...repeat(4, { nacks: 1, recovered: 1 }), { decoded: 1 }])).toEqual([])
+  })
+
+  it('丢包多的网络：别的包一直在补到，唯独卡住的那个补不回来，一秒没有新的一帧也要', () => {
+    const asked = run(repeat(10, { nacks: 2, recovered: 1 }))
+    expect(asked[0]).toBe(1200)
+  })
+
+  it('到 SFU 的往返很慢时多等一会儿（3 个往返）：补的包本来就回来得慢', () => {
+    expect(run(repeat(6, { nacks: 2 }), 300)[0]).toBe(1200) // 200 起算，等 900 毫秒
+    // 慢网络上要了三次、第四个 200 毫秒里补到了
+    expect(run([{ nacks: 1 }, { nacks: 1 }, { nacks: 1 }, { recovered: 1, decoded: 1 }, ...repeat(5, { decoded: 2 })], 300)).toEqual([])
   })
 })
