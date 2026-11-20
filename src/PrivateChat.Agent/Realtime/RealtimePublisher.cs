@@ -45,6 +45,10 @@ public sealed class RealtimePublisher : IDisposable
     /// <summary>SFU 的接收报告：我们发过去的某一路，最近一段丢了多大比例、累计丢了多少个包。</summary>
     public event Action<RealtimeReception>? ReceptionReported;
     public event Action<RealtimeLinkState>? StateChanged;
+    /// <summary>排查用：对面要重发、要关键帧、报丢包时各说一句（平时是 null，什么都不记）。</summary>
+    public Action<string>? Trace { get; set; }
+    /// <summary>排查用：连每一帧发了哪些包也记（一秒二十行，只在要对包的时候开）。</summary>
+    public bool TraceFrames { get; set; }
 
     public RealtimePublisher(IReadOnlyList<RemoteIceServer> iceServers)
     {
@@ -80,6 +84,23 @@ public sealed class RealtimePublisher : IDisposable
 
     /// <summary>到 SFU 的往返时间（取自 RTCP），还没量到时是 0。</summary>
     public int RoundTripMs => (int)(_video.RtcpSession?.RoundTripTime.TotalMilliseconds ?? 0);
+
+    /// <summary>排查用：现在走的是哪一对地址（本机的候选 → 对面的候选）。</summary>
+    public string Path
+    {
+        get
+        {
+            try
+            {
+                var entry = _pc.GetRtpChannel()?.NominatedEntry;
+                return entry is null ? "还没选定" : $"{entry.LocalCandidate.ToShortString()} → {entry.RemoteCandidate.ToShortString()}（ICE {_pc.iceConnectionState}）";
+            }
+            catch (Exception ex)
+            {
+                return $"取不到（{ex.GetType().Name}）";
+            }
+        }
+    }
 
     /// <summary>offer 里的两条轨道（给服务器登记用）。<see cref="CreateOfferAsync"/> 之后才有。</summary>
     public IReadOnlyList<RemoteRealtimeTrack> Tracks { get; private set; } = [];
@@ -121,14 +142,29 @@ public sealed class RealtimePublisher : IDisposable
         var now = _clock.ElapsedMilliseconds;
         try
         {
+            ushort first;
             lock (_send)
+            {
+                first = _videoSequence;
                 foreach (var packet in packets)
                 {
                     var sequence = _videoSequence++;
+                    if (LoseForTest?.Invoke(sequence) == true)
+                    {
+                        _sent[sequence % ResendSlots] = default;
+                        continue;
+                    }
                     _sent[sequence % ResendSlots] = new SentPacket(sequence, packet.Data, timestamp, packet.Marker, now);
                     if (DropForTest?.Invoke(sequence) == true) continue;
                     _pc.SendRtpRaw(SDPMediaTypesEnum.video, packet.Data, timestamp, packet.Marker ? 1 : 0, VideoPayloadType, sequence);
                 }
+            }
+            if (TraceFrames && Trace is { } trace && packets.Count > 0)
+            {
+                var nals = new System.Text.StringBuilder();
+                foreach (var unit in H264.Split(annexB)) nals.Append(annexB[unit.Offset] & 0x1F).Append(':').Append(unit.Length).Append(' ');
+                trace($"帧 {timestampMs}（RTP 时间戳 {timestamp}）：序号 {first}–{(ushort)(first + packets.Count - 1)}，{packets.Count} 包，最大的包 {packets.Max(p => p.Data.Length)} 字节，最小 {packets.Min(p => p.Data.Length)}；NAL（类型:字节）{nals}");
+            }
         }
         catch (Exception ex)
         {
@@ -153,6 +189,12 @@ public sealed class RealtimePublisher : IDisposable
     /// <summary>测试用：返回 true 的包第一次不发出去（模拟丢包，看重发管不管用）。</summary>
     public Func<ushort, bool>? DropForTest { get; set; }
 
+    /// <summary>
+    /// 测试用：返回 true 的包不发、也不留着补发——对面怎么要都补不回来。
+    /// 真实网络上偶尔就有这样的包（SFU 到控制端那一段丢了、SFU 手里又没有可重发的），用它看控制端会不会自己要关键帧。
+    /// </summary>
+    public Func<ushort, bool>? LoseForTest { get; set; }
+
     /// <summary>发一个 Opus 包（20 ms）。时间戳和画面是同一个时钟的毫秒数。</summary>
     public void SendAudio(uint timestampMs, byte[] opus)
     {
@@ -171,18 +213,33 @@ public sealed class RealtimePublisher : IDisposable
     /// <summary>对面报丢的包里，库已经不留的那些（notKept）：这里还留着、也不太旧的就按原样再发一次。</summary>
     private void OnNack(IReadOnlyList<ushort> lost, IReadOnlyList<ushort> notKept)
     {
-        if (notKept.Count == 0 || !_up) return;
+        if (!_up) return;
         var now = _clock.ElapsedMilliseconds;
+        var resent = 0;
         try
         {
-            lock (_send)
-                foreach (var sequence in notKept)
+            if (notKept.Count > 0)
+                lock (_send)
+                    foreach (var sequence in notKept)
+                    {
+                        var packet = _sent[sequence % ResendSlots];
+                        if (packet.Data is null || packet.Sequence != sequence || now - packet.SentAt > ResendWindowMs) continue;
+                        _pc.SendRtpRaw(SDPMediaTypesEnum.video, packet.Data, packet.Timestamp, packet.Marker ? 1 : 0, VideoPayloadType, sequence);
+                        Interlocked.Increment(ref _resentHere);
+                        resent++;
+                    }
+            if (Trace is { } trace && lost.Count > 0)
+            {
+                long age;
+                lock (_send)
                 {
-                    var packet = _sent[sequence % ResendSlots];
-                    if (packet.Data is null || packet.Sequence != sequence || now - packet.SentAt > ResendWindowMs) continue;
-                    _pc.SendRtpRaw(SDPMediaTypesEnum.video, packet.Data, packet.Timestamp, packet.Marker ? 1 : 0, VideoPayloadType, sequence);
-                    Interlocked.Increment(ref _resentHere);
+                    var first = _sent[lost[0] % ResendSlots];
+                    age = first.Data is not null && first.Sequence == lost[0] ? now - first.SentAt : -1;
                 }
+                var m = _video.RetransmissionMetrics;
+                trace($"要重发 {lost.Count} 个包（序号 {lost[0]}–{lost[^1]}，第一个是 {age} ms 前发的）：库里已经不留的 {notKept.Count} 个，其中这里补发了 {resent} 个；" +
+                    $"库累计重发 {m.PacketsRetransmitted}、刚重发过不再发 {m.RetransmissionsSuppressed}、超出重发额度 {m.RetransmissionsOverBudget}、没留 {m.PacketsNotKept}");
+            }
         }
         catch (Exception ex)
         {
@@ -227,11 +284,18 @@ public sealed class RealtimePublisher : IDisposable
         // 一个 RTCP 包里可以有好几条反馈；要关键帧的只可能是冲着唯一的那条画面轨道来的，不用看它标的是哪条流
         if (report.FeedbackMessages.Any(f => f.Header.PacketType == RTCPReportTypesEnum.PSFB
                 && f.Header.PayloadFeedbackMessageType is PSFBFeedbackTypesEnum.PLI or PSFBFeedbackTypesEnum.FIR))
+        {
+            Trace?.Invoke("对面要关键帧");
             KeyFrameRequested?.Invoke();
+        }
 
         var video = _video.LocalTrack?.Ssrc;
         foreach (var sample in report.ReceiverReport?.ReceptionReports ?? report.SenderReport?.ReceptionReports ?? [])
+        {
+            if (sample.SSRC == video)
+                Trace?.Invoke($"SFU 的接收报告（画面）：最近丢 {sample.FractionLost / 256.0:P1}，累计丢 {sample.PacketsLost} 包，收到的最高序号 {sample.ExtendedHighestSequenceNumber & 0xFFFF}");
             ReceptionReported?.Invoke(new RealtimeReception(sample.SSRC == video, sample.FractionLost / 256.0, sample.PacketsLost, sample.Jitter));
+        }
     }
 
     /// <summary>从 SDP 里按顺序取出每个 m= 段的种类和 mid。</summary>

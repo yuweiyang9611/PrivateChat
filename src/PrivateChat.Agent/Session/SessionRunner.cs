@@ -50,6 +50,8 @@ public sealed class SessionRunner : IAsyncDisposable
     public const string RealtimeSwitchVariable = "PRIVATECHAT_AGENT_REALTIME";
     /// <summary>自动化测试用（只在 PRIVATECHAT_AGENT_TEST=1 时生效）：快速线路上故意丢掉这个比例的画面包，看重发管不管用。</summary>
     public const string TestRtpDropVariable = "PRIVATECHAT_AGENT_TEST_RTP_DROP";
+    /// <summary>自动化测试用（只在 PRIVATECHAT_AGENT_TEST=1 时生效）：快速线路上每隔这么多秒丢掉一个画面包，而且不补发（谁也补不回来的包）。</summary>
+    public const string TestRtpLoseVariable = "PRIVATECHAT_AGENT_TEST_RTP_LOSE_EVERY";
     /// <summary>快速线路：发布之后这么久还没连上 Cloudflare 就算了。</summary>
     private static readonly TimeSpan LineConnectTimeout = TimeSpan.FromSeconds(8);
     /// <summary>接通之后控制端这么久还没说收到画面：它那边没接上，回中继。</summary>
@@ -117,6 +119,7 @@ public sealed class SessionRunner : IAsyncDisposable
     /// <summary>第几次接通（发给控制端，它据此知道要重新拉流）。</summary>
     private int _lineGeneration;
     private long _lastLineKeyAt = -10_000;
+    private string _lastLinePath = "";
 
     private sealed class Line(RealtimePublisher publisher, RealtimeRateController rate, long readyAt)
     {
@@ -354,6 +357,7 @@ public sealed class SessionRunner : IAsyncDisposable
                 // 控制端丢掉了解码器里的帧，不会再确认它们：在途的清空，马上发关键帧
                 _net.ForgetInFlight();
                 _keyRequested = true;
+                if (VerboseLine) AgentLog.Info("快速线路：控制端经控制通道要关键帧");
                 return;
             case ControlFrame.SetQuality q:
                 _quality = (int)q.Preset;
@@ -508,8 +512,27 @@ public sealed class SessionRunner : IAsyncDisposable
             var info = await api.GetRealtimeAsync(Id, timeout.Token);
             if (info is not { Available: true }) throw new InvalidOperationException("服务器没有开快速线路");
 
+            if (VerboseLine) LibraryLog.EnableIfAsked();
             publisher = new RealtimePublisher(info.IceServers);
             if (TestDropRate() is > 0 and var drop) publisher.DropForTest = _ => Random.Shared.NextDouble() < drop;
+            if (TestLoseEveryMs() is > 0 and var every)
+            {
+                // 只在采集线程上调（发画面的那把锁里），不用再加锁
+                var next = _clock.ElapsedMilliseconds + every;
+                publisher.LoseForTest = sequence =>
+                {
+                    var now = _clock.ElapsedMilliseconds;
+                    if (now < next) return false;
+                    next = now + every;
+                    AgentLog.Info($"快速线路：测试，故意丢掉一个画面包（序号 {sequence}），不补发");
+                    return true;
+                };
+            }
+            if (VerboseLine)
+            {
+                publisher.Trace = message => AgentLog.Info($"快速线路：{message}");
+                publisher.TraceFrames = Environment.GetEnvironmentVariable("PRIVATECHAT_AGENT_REALTIME_FRAMES") == "1";
+            }
             var offer = await publisher.CreateOfferAsync();
             // 收集候选要一会儿。这期间这次接通作废了的话（控制端改了主意、换了连接，可能已经在接下一次）就不要再去登记：
             // 服务器上一次会话只留一份登记，晚到的这份会把后来那次已经接通的线路顶掉
@@ -573,6 +596,11 @@ public sealed class SessionRunner : IAsyncDisposable
         => Environment.GetEnvironmentVariable("PRIVATECHAT_AGENT_TEST") == "1"
             && double.TryParse(Environment.GetEnvironmentVariable(TestRtpDropVariable), System.Globalization.CultureInfo.InvariantCulture, out var rate) ? rate : 0;
 
+    private static long TestLoseEveryMs()
+        => Environment.GetEnvironmentVariable("PRIVATECHAT_AGENT_TEST") == "1"
+            && double.TryParse(Environment.GetEnvironmentVariable(TestRtpLoseVariable), System.Globalization.CultureInfo.InvariantCulture, out var seconds) && seconds > 0
+            ? (long)(seconds * 1000) : 0;
+
     /// <summary>
     /// 不走快速线路了，画面和声音回到中继（采集线程发现线路变了会从关键帧开始）。
     /// only 不为空时只在当前线路就是它时才停；state 不为空时告诉控制端。
@@ -634,6 +662,11 @@ public sealed class SessionRunner : IAsyncDisposable
         if (_line is not { } line) return;
         var now = _clock.ElapsedMilliseconds;
         line.Rate.SetUpstreamRtt(line.Publisher.RoundTripMs);
+        if (VerboseLine && line.Publisher.Path is var path && path != _lastLinePath)
+        {
+            _lastLinePath = path;
+            AgentLog.Info($"快速线路：走的地址 {path}");
+        }
         if (!line.Confirmed && now - line.ReadyAt > LineConfirmMs) FailRealtime(line, "控制端没有接上快速线路");
         else if (line.Confirmed && now - Math.Max(line.Rate.LastReportAt, line.ReadyAt) > LineSilenceMs) FailRealtime(line, "控制端很久没有回报接收情况");
     }
@@ -966,7 +999,8 @@ public sealed class SessionRunner : IAsyncDisposable
                     else planner.Learn(quality, changed, changedTiles, key || encoded.IsKey, sustained, bytes);
                 }
                 line?.Publisher.SendVideo(ts, encoded.Data);
-                if (!lineOnly && !Send(RemoteFrames.VideoFrame(ts, encoded.IsKey, encoded.Data)))
+                if (VerboseLine && line is not null && encoded.IsKey) AgentLog.Info($"快速线路：发了一个关键帧，{encoded.Data.Length} 字节（时间戳 {ts}）");
+                if (!lineOnly &&!Send(RemoteFrames.VideoFrame(ts, encoded.IsKey, encoded.Data)))
                 {
                     // 发送队列满了（网络发不动）：这一帧丢了，后面的 P 帧解不出来，下一帧从关键帧开始
                     _keyRequested = true;
