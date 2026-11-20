@@ -1,0 +1,28 @@
+# 服务器上的测试栈（node e2e/test-host.cjs up）用的 compose 覆盖文件：和线上那套隔离。
+# 项目名 privatechat-test（由脚本用 -p 指定），镜像标签 :test，端口只绑本机回环，不接隧道，机器重启后不自己起来。
+services:
+  cloudflared:
+    profiles: [disabled]
+
+  web:
+    image: privatechat/web:test
+    restart: "no"
+    ports: !override
+      - "127.0.0.1:3509:8080"   # 局域网那个入口（没有 Access 头，密码登录）：测试经 SSH 隧道连它
+
+  api:
+    image: privatechat/api:test
+    restart: "no"
+
+  postgres:
+    restart: "no"   # 不对外开端口：.NET 集成测试也在这台服务器上跑（node e2e/test-host.cjs dotnet-test），从 compose 网络里连它
+
+  # 假 SFU 跑在发起测试的那台电脑上（它要和被控端、浏览器互通媒体）。api 容器要找它时连的是 host.docker.internal:8799，
+  # 也就是宿主机 docker0 上的 8799；而 SSH 隧道在宿主机上只听 127.0.0.1:8799。这个容器把两头接起来（只绑 docker0，不对局域网开）。
+  sfu-relay:
+    image: privatechat/web:test   # 里面是 nginx，用它的 stream 模块做 TCP 转发
+    restart: "no"
+    network_mode: host
+    entrypoint: ["nginx", "-g", "daemon off;", "-c", "/etc/nginx/sfu-relay.conf"]
+    volumes:
+      - ../web/e2e/test-host.sfu-relay.conf:/etc/nginx/sfu-relay.conf:ro

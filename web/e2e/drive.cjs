@@ -6,7 +6,7 @@ const { chromium } = require('playwright')
 const { execSync } = require('child_process')
 
 const BASE = process.env.E2E_BASE || 'http://localhost:8080'
-const COMPOSE = `docker compose -f "${path.resolve(__dirname, '../../deploy/docker-compose.yml')}"`
+const COMPOSE = process.env.E2E_COMPOSE || `docker compose -f "${path.resolve(__dirname, '../../deploy/docker-compose.yml')}"`
 const VIDEO = path.join(__dirname, 'fixtures', 'hevc-2018.mp4')
 const results = []
 function check(name, ok, detail) {

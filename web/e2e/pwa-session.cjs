@@ -7,7 +7,7 @@ const { chromium } = require('playwright')
 const { execSync } = require('child_process')
 const path = require('path')
 const BASE = process.env.E2E_BASE || 'http://localhost:8080'
-const COMPOSE = `docker compose -f "${path.resolve(__dirname, '../../deploy/docker-compose.yml')}"`
+const COMPOSE = process.env.E2E_COMPOSE || `docker compose -f "${path.resolve(__dirname, '../../deploy/docker-compose.yml')}"`
 /** 模拟发版：给容器里的 sw.js 追加一行注释，浏览器会认为有新版本 */
 // 构建出的 sw.js 是一整行、末尾没有换行：追加块注释（仍是合法 JS）制造新版本；先整份备份，结束时原样拷回
 function bumpServiceWorker(tag) {

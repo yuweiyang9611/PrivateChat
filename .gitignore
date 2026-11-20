@@ -35,3 +35,6 @@ Thumbs.db
 
 # e2e 生成的截图
 web/e2e/fixtures/*.png
+
+# 测试服务器的连接参数（node web/e2e/test-host.cjs 用），每人自己写
+web/e2e/.test-host.json

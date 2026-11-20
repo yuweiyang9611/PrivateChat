@@ -8,7 +8,7 @@ const { chromium } = require('playwright')
 const { execSync } = require('child_process')
 
 const BASE = process.env.E2E_BASE || 'http://localhost:8080'
-const COMPOSE = `docker compose -f "${path.resolve(__dirname, '../../deploy/docker-compose.yml')}"`
+const COMPOSE = process.env.E2E_COMPOSE || `docker compose -f "${path.resolve(__dirname, '../../deploy/docker-compose.yml')}"`
 const BOB_ID = '01a1b1b0-0000-7000-8000-0000000000b0'
 const results = []
 function check(name, ok, detail) {
