@@ -16,7 +16,8 @@ const { sample, summarize } = require('./timecode.cjs')
 const BASE = process.env.E2E_BASE || 'http://localhost:8080'
 const ROOT = path.resolve(__dirname, '../..')
 const COMPOSE = process.env.E2E_COMPOSE || `docker compose -f "${path.resolve(ROOT, 'deploy/docker-compose.yml')}"`
-const AGENT = path.resolve(ROOT, 'src/PrivateChat.Agent/bin/Debug/net11.0-windows/PrivateChat.Agent.exe')
+// E2E_AGENT_EXE=别的 PrivateChat.Agent.exe：拿发布出来的安装包（单文件版）跑，而不是本机的调试版
+const AGENT = process.env.E2E_AGENT_EXE || path.resolve(ROOT, 'src/PrivateChat.Agent/bin/Debug/net11.0-windows/PrivateChat.Agent.exe')
 const SECONDS = Number(process.env.E2E_SECONDS || 30)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 async function until(fn, timeout = 15000, every = 200) {
