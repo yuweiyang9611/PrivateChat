@@ -18,7 +18,7 @@ public sealed class DeviceTokenAuthenticationHandler(
     AppDbContext db)
     : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
 {
-    private static readonly PathString[] AllowedPaths = ["/hubs/agent", "/ws/remote", "/api/remote/sessions", "/api/remote/agent"];
+    private static readonly PathString[] AllowedPaths = ["/hubs/agent", "/ws/remote", "/api/remote/sessions"];
 
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
     {

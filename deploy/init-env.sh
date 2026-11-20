@@ -18,13 +18,6 @@ read -rp "Realtime TURN API Token: " CF_TURN_KEY_API_TOKEN
 echo "远程协助：电脑上的程序过 Access 门禁要用服务令牌（Zero Trust → Access → Service Auth，并在应用上加一条 Service Auth 策略）。没有可以先留空。"
 read -rp "Access 服务令牌 Client ID（可留空）: " REMOTE_AGENT_ACCESS_CLIENT_ID
 read -rp "Access 服务令牌 Client Secret（可留空）: " REMOTE_AGENT_ACCESS_CLIENT_SECRET
-echo "远程协助：被控电脑在家时可以直连服务器、不绕 Cloudflare。填 https://<服务器局域网 IP>:<端口>（如 https://192.168.1.10:8443），不需要可留空。"
-read -rp "局域网直连地址（可留空）: " REMOTE_AGENT_DIRECT_URL
-REMOTE_AGENT_DIRECT_BIND=""
-if [ -n "$REMOTE_AGENT_DIRECT_URL" ]; then
-  REMOTE_AGENT_DIRECT_BIND="${REMOTE_AGENT_DIRECT_URL#https://}"
-  REMOTE_AGENT_DIRECT_BIND="${REMOTE_AGENT_DIRECT_BIND%%/*}"
-fi
 cat > .env <<EOF
 DOMAIN=${DOMAIN}
 ADMIN_EMAIL=${ADMIN_EMAIL}
@@ -37,8 +30,6 @@ CF_TURN_KEY_ID=${CF_TURN_KEY_ID}
 CF_TURN_KEY_API_TOKEN=${CF_TURN_KEY_API_TOKEN}
 REMOTE_AGENT_ACCESS_CLIENT_ID=${REMOTE_AGENT_ACCESS_CLIENT_ID}
 REMOTE_AGENT_ACCESS_CLIENT_SECRET=${REMOTE_AGENT_ACCESS_CLIENT_SECRET}
-REMOTE_AGENT_DIRECT_URL=${REMOTE_AGENT_DIRECT_URL}
-REMOTE_AGENT_DIRECT_BIND=${REMOTE_AGENT_DIRECT_BIND}
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
 EOF
 chmod 600 .env

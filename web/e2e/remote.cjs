@@ -6,16 +6,12 @@
 // 免同意名单（勾上后不经同意直接连、移出后立即结束）、同意窗口没人点时取消 / 改用 PIN（窗口马上收起、PIN 立刻连上）、移除电脑。
 // 加 --agent-tls13：被控端不直连 compose 栈，而是经本机一个只收 TLS 1.3 的入口（e2e/tls13-proxy.cjs），
 // 并强制用程序自带的 TLS 1.3（Windows 10 上的做法）——同一套用例再跑一遍，另外断言三条连接都是 TLS 1.3。
-// 加 --agent-direct：被控端在"家里"——服务器开局域网直连（api 自己的 HTTPS 端口，自签证书，被控端按指纹认），
-// 脚本先把 api 按直连地址重建，同一套用例再跑一遍，另外检查：先经公网拿到指纹再改成直连、直连端口只放行被控端、
-// 记下的指纹不对时不连（改走公网后拿到对的再换回来）、会话中途"离开家"（掐断直连）画面接着走公网、回到家又换回直连。
-// 被控端连的是脚本在直连端口前面放的一个 TCP 中转（TLS 原样透传），掐断它就是"离开家"。
 // 加 --realtime：快速线路——画面和声音经 Cloudflare Realtime（这里是本机的假 SFU，e2e/fake-sfu.cjs，用 Edge 起），不经我们的中继。
 // 脚本先把 api 指到假 SFU 上重建；网页默认选标准线路（原有用例照旧在中继上跑），中间插一段专门测快速线路：
 // 切过去之后画面 / 声音 / 键鼠、中继上不再有画面帧、故意丢包靠重发补上、掐断后自动回到标准线路再自动接回、手动切回。
 // 不加 --realtime 时被控端用 PRIVATECHAT_AGENT_REALTIME=off 关掉快速线路：api 配着真的 Cloudflare 也不会去连。
-// 前提：compose 栈已启动，装有 Edge；用法：cd web && node e2e/remote.cjs [--agent-tls13] [--agent-direct] [--realtime]
-// 对着另一套 compose 栈跑：E2E_BASE（网页地址）、E2E_COMPOSE（docker compose 命令，带 -p / -f）、E2E_DIRECT_PORT（api 直连端口发布在本机的端口）
+// 前提：compose 栈已启动，装有 Edge；用法：cd web && node e2e/remote.cjs [--agent-tls13] [--realtime]
+// 对着另一套 compose 栈跑：E2E_BASE（网页地址）、E2E_COMPOSE（docker compose 命令，带 -p / -f）
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
@@ -27,7 +23,6 @@ const ROOT = path.resolve(__dirname, '../..')
 const COMPOSE = process.env.E2E_COMPOSE || `docker compose -f "${path.resolve(ROOT, 'deploy/docker-compose.yml')}"`
 const AGENT = path.resolve(ROOT, 'src/PrivateChat.Agent/bin/Debug/net11.0-windows/PrivateChat.Agent.exe')
 const TLS13 = process.argv.includes('--agent-tls13')
-const DIRECT = process.argv.includes('--agent-direct')
 const REALTIME = process.argv.includes('--realtime')
 /** --realtime 时：假 SFU 监听的端口，和让 api 连它的环境变量（和 calls.cjs 用的是同一组） */
 const SFU_PORT = Number(process.env.E2E_SFU_PORT || 8788)
@@ -39,15 +34,10 @@ const FAKE_SFU_ENV = {
   CF_TURN_KEY_API_TOKEN: 'e2e-turn-token',
 }
 let sfu = null
-/** --agent-direct 时：api 直连端口在本机发布的端口，和被控端实际去连的中转端口 */
-const DIRECT_PORT = Number(process.env.E2E_DIRECT_PORT || 8443)
-const RELAY_PORT = Number(process.env.E2E_DIRECT_RELAY_PORT || DIRECT_PORT + 1)
-const DIRECT_URL = `https://127.0.0.1:${RELAY_PORT}`
-let relay = null
-/** --agent-tls13 时：本机的 TLS 1.3 入口（被控端连它，它转给 compose 栈） */
-let tls = null
 /** 这个脚本起的被控端进程：出错退出时只收掉它们（不按进程名全杀，别的测试、这台电脑上真在用的被控端不受影响） */
 const agents = new Set()
+/** --agent-tls13 时：本机的 TLS 1.3 入口（被控端连它，它转给 compose 栈） */
+let tls = null
 const results = []
 function check(name, ok, detail) {
   results.push({ name, ok: !!ok })
@@ -74,58 +64,9 @@ async function login(page, who) {
   await page.locator('input[type=password]').waitFor({ state: 'detached', timeout: 15000 })
 }
 
-/** 被控端和 api 直连端口之间的 TCP 中转（TLS 原样透传）。close() 掐断所有连接、不再接受新连接 = 笔记本离开了家 */
-function startRelay(listenPort, targetPort) {
-  const net = require('net')
-  const sockets = new Set()
-  let server = null
-  const open = () => new Promise((resolve, reject) => {
-    server = net.createServer((client) => {
-      const upstream = net.connect(targetPort, '127.0.0.1')
-      for (const s of [client, upstream]) {
-        sockets.add(s)
-        s.on('close', () => sockets.delete(s))
-        s.on('error', () => s.destroy())
-      }
-      client.pipe(upstream)
-      upstream.pipe(client)
-    })
-    server.once('error', reject)
-    server.listen(listenPort, '127.0.0.1', resolve)
-  })
-  const close = () => new Promise((resolve) => {
-    if (!server) return resolve()
-    server.close(() => resolve())
-    for (const s of sockets) s.destroy()
-    sockets.clear()
-    server = null
-  })
-  return { open, close }
-}
-
-/** 直接对 api 的直连端口发请求（不验证书，顺便算出它的指纹）：{ status, pin } */
-function directRequest(method, pathname, headers = {}) {
-  const https = require('https')
-  const crypto = require('crypto')
-  return new Promise((resolve) => {
-    const req = https.request({ host: '127.0.0.1', port: DIRECT_PORT, method, path: pathname, headers, rejectUnauthorized: false }, (res) => {
-      // 指纹按公钥的 SubjectPublicKeyInfo（DER）算；getPeerCertificate().pubkey 对 EC 密钥只是裸的点，不能直接用
-      const raw = res.socket.getPeerCertificate()?.raw
-      const spki = raw ? new crypto.X509Certificate(raw).publicKey.export({ type: 'spki', format: 'der' }) : null
-      const pin = spki ? crypto.createHash('sha256').update(spki).digest('base64') : null
-      const tls = res.socket.getProtocol()
-      res.resume()
-      res.on('end', () => resolve({ status: res.statusCode, pin, tls }))
-    })
-    req.on('error', (e) => resolve({ status: 0, error: e.message }))
-    req.end()
-  })
-}
-
-/** 按给定的直连地址重建 api 容器（空 = 不开直连），等它能用 */
-async function recreateApi(directUrl) {
-  const env = { ...process.env, ...(REALTIME ? FAKE_SFU_ENV : {}), REMOTE_AGENT_DIRECT_URL: directUrl, REMOTE_AGENT_DIRECT_BIND: `127.0.0.1:${DIRECT_PORT}` }
-  execSync(`${COMPOSE} up -d --no-deps api`, { env, stdio: 'ignore' })
+/** --realtime：带着指向假 SFU 的那组环境变量重建 api 容器，等它能用 */
+async function recreateApi() {
+  execSync(`${COMPOSE} up -d --no-deps api`, { env: { ...process.env, ...FAKE_SFU_ENV }, stdio: 'ignore' })
   return until(async () => (await fetch(BASE + '/healthz').catch(() => null))?.ok, 90000, 500)
 }
 
@@ -192,10 +133,9 @@ async function moveOnCanvas(page, fx, fy) {
     for (const d of [dir, dir + '-real']) try { fs.rmSync(d, { recursive: true, force: true }) } catch { /* 进程还占着 */ }
   }
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) process.on(signal, () => { cleanup(); process.exit(1) })
-  // 测完把 api 还原成原来的配置（按 shell 里 / .env 的 REMOTE_AGENT_DIRECT_URL）
+  // 测完把 api 还原成原来的配置（按 .env）
   const restoreApi = async () => {
-    if (!DIRECT && !REALTIME) return
-    await relay?.close()
+    if (!REALTIME) return
     execSync(`${COMPOSE} up -d --no-deps api`, { stdio: 'ignore' })
   }
 
@@ -210,12 +150,7 @@ async function moveOnCanvas(page, fx, fy) {
   if (TLS13) tls = await require('./tls13-proxy.cjs').start(BASE)
   if (REALTIME) {
     sfu = await require('./fake-sfu.cjs').startFakeSfu({ port: SFU_PORT, channel: 'msedge' })
-    if (!DIRECT) check('api 改连本机的假 SFU（当作 Cloudflare Realtime），能用', !!(await recreateApi('')), FAKE_SFU_ENV.CF_REALTIME_BASE_URL)
-  }
-  if (DIRECT) {
-    relay = startRelay(RELAY_PORT, DIRECT_PORT)
-    await relay.open()
-    check('api 按局域网直连地址重建，能用', !!(await recreateApi(DIRECT_URL)), DIRECT_URL)
+    check('api 改连本机的假 SFU（当作 Cloudflare Realtime），能用', !!(await recreateApi()), FAKE_SFU_ENV.CF_REALTIME_BASE_URL)
   }
   agent = startAgent(dir, 'accept')
   const code = (await until(() => agent.out.match(/DEVICE-CODE: (\d{8})/)?.[1]))
@@ -266,26 +201,6 @@ async function moveOnCanvas(page, fx, fy) {
   check('Agent 拿到令牌、连上服务器', !!online, agent.out.slice(-400))
   const configText = fs.readFileSync(path.join(dir, 'config.json'), 'utf8')
   check('config.json 里只有 DPAPI 加密过的令牌，没有明文', configText.includes('DeviceTokenProtected') && !/"DeviceToken"\s*:/.test(configText) && !/"AccessClientSecret"\s*:/.test(configText))
-  if (DIRECT) {
-    // 第一次是经"公网"（配置串里的地址）连上的，拿到直连入口后自己换过去
-    const switched = await until(() => agent.out.includes('已连接服务器（局域网直连）'), 20000)
-    check('Agent 经公网拿到直连入口和证书指纹，换成局域网直连', !!switched && agent.out.includes(`服务器开了局域网直连：${DIRECT_URL}`)
-      && new RegExp(`连接方式 局域网直连 ${DIRECT_URL.replace(/\./g, '\\.')}：`).test(agent.out), agent.out.match(/连接方式[^\r\n]*/g))
-    const saved = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'))
-    const health = await directRequest('GET', '/healthz')
-    check('记下的指纹就是直连端口那张证书的公钥指纹，握手是 TLS 1.3', saved.DirectUrl === DIRECT_URL && !!saved.DirectPin && saved.DirectPin === health.pin && health.tls === 'TLSv1.3',
-      { saved: [saved.DirectUrl, saved.DirectPin], served: health.pin, tls: health.tls })
-    const door = {
-      healthz: health.status,
-      login: (await directRequest('POST', '/api/auth/local/login', { 'Content-Type': 'application/json' })).status,
-      me: (await directRequest('GET', '/api/auth/me')).status,
-      page: (await directRequest('GET', '/')).status,
-      deviceCode: (await directRequest('POST', '/api/auth/device/code')).status,
-      fakeToken: (await directRequest('GET', '/api/devices', { Authorization: 'Bearer x.y' })).status,
-    }
-    check('直连端口只放行被控端：健康检查 200，登录、网页、申请设备码、拿令牌访问别的接口都是 404',
-      door.healthz === 200 && [door.login, door.me, door.page, door.deviceCode, door.fakeToken].every((s) => s === 404), door)
-  }
   const card = admin.locator('[data-testid=device]', { hasText: 'E2E 测试电脑' })
   check('管理员的设备列表里显示爸爸的电脑在线（实时）',
     await card.locator('[data-testid=device-online]', { hasText: '在线' }).waitFor({ timeout: 10000 }).then(() => true, () => false)
@@ -307,7 +222,6 @@ async function moveOnCanvas(page, fx, fy) {
   check('爸爸收到"正在被远程"的提醒', await bob.locator('.el-notification', { hasText: '正在控制你的电脑' }).waitFor({ timeout: 10000 }).then(() => true, () => false))
   check('爸爸的设备卡片上显示谁在远程', await bobCard.locator('[data-testid=device-session]', { hasText: '控制' }).waitFor({ timeout: 10000 }).then(() => true, () => false))
   check('Agent 显示红条', agent.out.includes('红条：正在被 admin 远程控制'))
-  if (DIRECT) check('远程画面的数据通道也走局域网直连', agent.out.includes(`远程数据通道已连接：${sessionId}（局域网直连）`), agent.out.match(/远程数据通道已连接[^\r\n]*/g))
   if (tls) {
     check('被控端用的是程序自带的 TLS 1.3（不是系统的）', /连接方式 https:\/\/localhost:\d+：程序自带的 TLS 1\.3（BouncyCastle \d+\.\d+/.test(agent.out), agent.out.match(/连接方式[^\r\n]*/)?.[0])
     const all = [...tls.seen.requests, ...tls.seen.upgrades]
@@ -318,9 +232,8 @@ async function moveOnCanvas(page, fx, fy) {
       hub: tls.seen.upgrades.some((u) => u.path === '/hubs/agent'),
       video: tls.seen.upgrades.some((u) => u.path.startsWith('/ws/remote/')),
     }
-    const expectedPaths = DIRECT ? paths.code && paths.negotiate && paths.hub && !paths.consent && !paths.video : Object.values(paths).every(Boolean)
-    check(DIRECT ? '经公网 TLS 1.3 登记，切换直连后同意和画面都走局域网' : '申请设备码、长连接、同意、远程画面通道都经过 TLS 入口，而且全是 TLS 1.3',
-      expectedPaths && all.length > 0 && all.every((x) => x.tls === 'TLSv1.3'),
+    check('申请设备码、长连接、同意、远程画面通道都经过 TLS 入口，而且全是 TLS 1.3',
+      Object.values(paths).every(Boolean) && all.length > 0 && all.every((x) => x.tls === 'TLSv1.3'),
       { ...paths, versions: [...new Set(all.map((x) => x.tls))], hosts: [...new Set(all.map((x) => x.host))] })
   }
   const stats = await until(async () => {
@@ -703,67 +616,6 @@ async function moveOnCanvas(page, fx, fy) {
   await admin.locator('[data-testid=remote-end]').click()
   await admin.locator('[data-testid=remote-ended]').waitFor({ timeout: 10000 })
 
-  if (DIRECT) {
-    // ---- 记下的指纹不对（服务器换了证书 / 局域网里有人冒充）：不连，改走公网，拿到对的之后换回来 ----
-    agent.proc.kill()
-    await until(() => agent.proc.exitCode !== null, 5000)
-    const configPath = path.join(dir, 'config.json')
-    const saved = JSON.parse(fs.readFileSync(configPath, 'utf8'))
-    const goodPin = saved.DirectPin
-    fs.writeFileSync(configPath, JSON.stringify({ ...saved, DirectPin: Buffer.alloc(32, 7).toString('base64') }, null, 2))
-    agent = startAgent(dir, 'accept')
-    const healed = await until(() => agent.out.includes('已连接服务器（局域网直连）'), 30000)
-    const firstRoute = agent.out.match(/连接方式[^\r\n]*/)?.[0] ?? ''
-    check('指纹对不上时不经直连连（握手被拒），先走公网；拿到服务器给的指纹后换回直连',
-      !!healed && firstRoute.includes('局域网直连不通') && JSON.parse(fs.readFileSync(configPath, 'utf8')).DirectPin === goodPin,
-      { firstRoute, connected: agent.out.match(/已连接服务器[^\r\n]*/g) })
-
-    // ---- 会话中途离开家：掐断直连，画面接着经公网传，会话不断 ----
-    await admin.goto(BASE + '/devices')
-    await card.locator('[data-testid=device-online]', { hasText: '在线' }).waitFor({ timeout: 10000 })
-    await card.locator('[data-testid=device-control]').click()
-    await admin.waitForURL(/\/remote\//, { timeout: 10000 })
-    const awaySession = admin.url().split('/remote/')[1]
-    await until(async () => (await admin.locator('[data-testid=remote-stats]').textContent().catch(() => '')).includes('fps'), 20000)
-    const viaDirect = agent.out.includes(`远程数据通道已连接：${awaySession}（局域网直连）`)
-    let mark = agent.out.length
-    const leftAt = Date.now()
-    await relay.close()
-    const fellBack = await until(() => {
-      const after = agent.out.slice(mark)
-      return after.includes('远程数据通道经局域网直连连不上，改走公网') && new RegExp(`远程数据通道已连接：${awaySession}(?!（局域网直连）)`).test(after) ? Date.now() - leftAt : null
-    }, 30000)
-    // 断开之后又出了新画面：等解码帧率回到 5 以上
-    await sleep(3000)
-    const stillStreaming = await until(async () => {
-      const t = await admin.locator('[data-testid=remote-stats]').textContent().catch(() => '')
-      return Number(t.match(/(\d+) fps/)?.[1] ?? 0) >= 5 ? t : null
-    }, 15000)
-    const stillOn = !(await admin.locator('[data-testid=remote-ended]').isVisible().catch(() => false)) && !agent.out.slice(mark).includes('远程会话结束')
-    check('会话中途掐断直连：数据通道马上改走公网，画面接着出，会话不断', viaDirect && !!fellBack && !!stillStreaming && stillOn,
-      { viaDirect, fellBackMs: fellBack, stats: stillStreaming, stillOn })
-    const afterFallback = (await audioNow()).scheduled
-    const audioResumed = await until(async () => (await audioNow()).scheduled > afterFallback + 24000, 10000)
-    check('直连切回公网后继续收到声音', !!audioResumed)
-    const hubBack = await until(() => /连接方式 [^\r\n]*局域网直连不通/.test(agent.out.slice(mark)) && agent.out.slice(mark).includes('已连接服务器，等待远程请求'), 30000)
-    const state = fs.readFileSync(path.join(dir, 'state.txt'), 'utf8')
-    check('长连接改走公网期间，本机始终显示正在被远程并保留断开入口',
-      !!hubBack && state === 'InSession' && !/远程会话结束|状态：(Connecting|Online)/.test(agent.out.slice(mark)),
-      { state, routes: agent.out.slice(mark).match(/(连接方式|已连接服务器)[^\r\n]*/g) })
-    await admin.locator('[data-testid=remote-end]').click()
-    await admin.locator('[data-testid=remote-ended]').waitFor({ timeout: 10000 })
-    check('记录里这次会话是正常结束的（不是断线）', sql(`select end_reason from remote_sessions where id = '${awaySession}'`) === 'controller')
-
-    // ---- 回到家：直连又通了，空闲时（最多约一分钟）自己换回直连 ----
-    mark = agent.out.length
-    await relay.open()
-    const backAt = Date.now()
-    const home = await until(() => agent.out.slice(mark).includes('能直连服务器了，改走局域网直连') && agent.out.slice(mark).includes('已连接服务器（局域网直连）') ? Date.now() - backAt : null, 80000, 500)
-    check('回到家：不用重启，空闲时自己换回局域网直连', !!home, { afterMs: home })
-    await admin.goto(BASE + '/devices')
-    await card.locator('[data-testid=device-online]', { hasText: '在线' }).waitFor({ timeout: 10000 })
-  }
-
   // ---- 移除电脑：Agent 回到设备码登记 ----
   await admin.goto(BASE + '/devices')
   await card.locator('[data-testid=device-more]').click()
@@ -823,7 +675,7 @@ async function moveOnCanvas(page, fx, fy) {
 })().catch((e) => {
   console.error(e)
   for (const proc of agents) try { proc.kill() } catch { /* 已退出 */ }
-  if (DIRECT || REALTIME) try { execSync(`${COMPOSE} up -d --no-deps api`, { stdio: 'ignore' }) } catch { /* 还原不了就算了 */ }
+  if (REALTIME) try { execSync(`${COMPOSE} up -d --no-deps api`, { stdio: 'ignore' }) } catch { /* 还原不了就算了 */ }
   try { void sfu?.close() } catch { /* 已关 */ }
   process.exit(1)
 })

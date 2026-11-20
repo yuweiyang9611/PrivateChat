@@ -12,14 +12,9 @@ public sealed record DeviceCode(string Code, string PollToken, int ExpiresInSeco
 public sealed record DevicePoll(string Status, string? DeviceToken, Guid? DeviceId);
 public sealed record SessionInfo(Guid Id, RemoteSessionState State, RemoteSessionMode Mode, string? EndReason);
 
-/// <summary>
-/// 服务器连接参数：每个请求都带 Access 服务令牌头（过 Cloudflare Access 门禁），有设备令牌时再带 Bearer。
-/// Pin 不为空 = 局域网直连这条路（地址是服务器给的直连入口，证书按指纹认，没有 Access 头）。
-/// </summary>
-public sealed record ServerInfo(string Url, string AccessClientId, string AccessClientSecret, string DeviceToken, string? Pin = null)
+/// <summary>服务器连接参数：每个请求都带 Access 服务令牌头（过 Cloudflare Access 门禁），有设备令牌时再带 Bearer。</summary>
+public sealed record ServerInfo(string Url, string AccessClientId, string AccessClientSecret, string DeviceToken)
 {
-    public bool IsDirect => Pin is not null;
-
     public void Apply(HttpHeaders headers, bool withToken = true)
     {
         if (AccessClientId.Length > 0 && AccessClientSecret.Length > 0)
@@ -56,7 +51,7 @@ public sealed class ServerApi(ServerInfo server) : IDisposable
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
 
     // 系统有 TLS 1.3 时和默认的 HttpClient 一样（只多记一下没通过校验的证书）；没有时走程序自带的 TLS 1.3
-    private readonly HttpClient _http = new(AgentTransport.CreateHandler(new Uri(server.Url), server.Pin))
+    private readonly HttpClient _http = new(AgentTransport.CreateHandler(new Uri(server.Url)))
     {
         BaseAddress = AgentTransport.Address(new Uri(server.Url.TrimEnd('/') + "/")),
         Timeout = TimeSpan.FromSeconds(20),
@@ -101,15 +96,6 @@ public sealed class ServerApi(ServerInfo server) : IDisposable
         if (res.StatusCode != HttpStatusCode.NotFound) await EnsureAsync(res);
     }
 
-    /// <summary>局域网直连的入口（地址 + 证书指纹）；服务器没开直连时 null（旧版服务器没有这个接口，也是 null）。</summary>
-    public async Task<AgentDirectInfo?> GetDirectAsync(CancellationToken ct)
-    {
-        using var res = await _http.SendAsync(Request(HttpMethod.Get, "api/remote/agent/direct"), ct);
-        if (res.StatusCode is HttpStatusCode.NoContent or HttpStatusCode.NotFound) return null;
-        await EnsureAsync(res);
-        return await res.Content.ReadFromJsonAsync<AgentDirectInfo>(Json, ct);
-    }
-
     /// <summary>
     /// 这次远程能不能走快速线路（画面和声音经 Cloudflare Realtime），以及连过去用的 ICE 服务器。
     /// 旧版服务器没有这个接口、或会话已经不在进行中时 null。
@@ -128,12 +114,6 @@ public sealed class ServerApi(ServerInfo server) : IDisposable
         using var res = await _http.SendAsync(Request(HttpMethod.Post, $"api/remote/sessions/{sessionId}/realtime/publish", request), ct);
         await EnsureAsync(res);
         return (await res.Content.ReadFromJsonAsync<RemoteRealtimePublishResponse>(Json, ct))!;
-    }
-
-    /// <summary>试一下这条路通不通：拿到服务器的应答就算通（直连时证书指纹已经对上了）；连不上、证书不对都会抛出来。</summary>
-    public async Task ProbeAsync(CancellationToken ct)
-    {
-        using var res = await _http.SendAsync(Request(HttpMethod.Get, "healthz", withToken: false), ct);
     }
 
     private static async Task EnsureAsync(HttpResponseMessage res)

@@ -1,4 +1,3 @@
-using System.Net.NetworkInformation;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Microsoft.AspNetCore.SignalR.Client;
@@ -52,16 +51,6 @@ public sealed class AgentService
     private string? _lastProblem;
     private int _sameProblem;
     private string? _transportLogged;
-
-    /// <summary>试局域网直连通不通的超时（家里的服务器正常几毫秒就应答；不在家时别让每次连接都白等）。</summary>
-    private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(3);
-    /// <summary>走公网时多久看一次能不能改成局域网直连（另外网络一变就看）。</summary>
-    private static readonly TimeSpan RouteCheckInterval = TimeSpan.FromMinutes(1);
-    /// <summary>直连试得通、长连接却连不上时，这么久之内先不试直连，免得来回折腾。</summary>
-    private static readonly TimeSpan DirectCooldown = TimeSpan.FromMinutes(2);
-    private DateTime _skipDirectUntil;
-    /// <summary>"现在就看看能不能直连"：网络变了、刚拿到直连入口时放一个信号。</summary>
-    private readonly SemaphoreSlim _routeCheck = new(0, 1);
 
     public AgentService(AgentOptions options, IAgentUi ui)
     {
@@ -121,7 +110,6 @@ public sealed class AgentService
                     AgentLog.Warn("设备已被移除（或令牌失效），回到设备码登记");
                     await StopRunnerAsync(revoked: true);
                     _config.DeviceTokenProtected = "";
-                    _config.DirectUrl = _config.DirectPin = "";
                     _config.DeviceId = null;
                     _config.Save(_options.DataDir);
                 }
@@ -234,14 +222,6 @@ public sealed class AgentService
 
     private ServerInfo ServerFromConfig() => new(_config.ServerUrl, _config.AccessClientId, _config.AccessClientSecret, _config.DeviceToken);
 
-    /// <summary>局域网直连这条路（服务器给过入口、而且是 https）：没有 Access 头，证书按指纹认。</summary>
-    private ServerInfo? DirectFromConfig()
-        => _config.DirectPin.Length > 0 && Uri.TryCreate(_config.DirectUrl, UriKind.Absolute, out var url) && url.Scheme == Uri.UriSchemeHttps
-            ? new ServerInfo(_config.DirectUrl, "", "", _config.DeviceToken, _config.DirectPin)
-            : null;
-
-    private string OnlineText => _server?.IsDirect == true ? "在线（局域网直连）" : "在线";
-
     /// <summary>
     /// 连不上服务器：认出原因（加密握手失败的真正原因在异常的里层），写进日志。
     /// 每 10 秒重试一次，同一个原因只在第一次记全，之后每 30 次（约 5 分钟）再记一次，免得把日志刷满。
@@ -265,131 +245,13 @@ public sealed class AgentService
         return problem;
     }
 
-    /// <summary>走哪条路、用哪一种加密连服务器：第一次用到、或者变了的时候记一笔。</summary>
-    private void LogTransport(ServerInfo? server = null, string? directProblem = null)
+    /// <summary>用哪一种加密连服务器：第一次用到、或者换了服务器时记一笔。</summary>
+    private void LogTransport()
     {
-        server ??= ServerFromConfig();
-        var uri = new Uri(server.Url);
-        var text = server.IsDirect
-            ? $"局域网直连 {server.Url}：{AgentTransport.Describe(uri)}，只认服务器那张证书"
-            : $"{server.Url}：{AgentTransport.Describe(uri)}{(directProblem is null ? "" : $"（局域网直连不通：{directProblem}）")}";
+        var text = $"{_config.ServerUrl}：{AgentTransport.Describe(new Uri(_config.ServerUrl))}";
         if (text == _transportLogged) return;
         _transportLogged = text;
         AgentLog.Info($"连接方式 {text}");
-    }
-
-    // ---- 选路：在家时局域网直连，不在家走公网 ----
-
-    /// <summary>这次走哪条路：局域网直连试得通就用它，否则走配置里的服务器地址（公网）。第二项是直连不通的原因。</summary>
-    private async Task<(ServerInfo Server, string? DirectProblem)> ChooseRouteAsync(CancellationToken ct)
-    {
-        var server = ServerFromConfig();
-        if (DirectFromConfig() is not { } direct) return (server, null);
-        if (DateTime.UtcNow < _skipDirectUntil) return (server, "刚才连不上，过一会儿再试");
-        return await ProbeAsync(direct, ct) is { } problem ? (server, problem) : (direct, null);
-    }
-
-    /// <summary>试一下局域网直连：通了返回 null，不通返回原因。</summary>
-    private static async Task<string?> ProbeAsync(ServerInfo direct, CancellationToken ct)
-    {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(ProbeTimeout);
-        try
-        {
-            using var api = new ServerApi(direct);
-            await api.ProbeAsync(timeout.Token);
-            return null;
-        }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            return timeout.IsCancellationRequested ? "超时" : Innermost(ex).Message;
-        }
-    }
-
-    private static Exception Innermost(Exception ex)
-    {
-        while (ex.InnerException is { } inner) ex = inner;
-        return ex;
-    }
-
-    private void CheckRouteSoon()
-    {
-        try
-        {
-            _routeCheck.Release();
-        }
-        catch (SemaphoreFullException)
-        {
-            // 已经有一个信号在等着了
-        }
-    }
-
-    /// <summary>
-    /// 走公网时盯着能不能改成局域网直连：网络变了（笔记本回到家、连上家里的 Wi-Fi）马上看，平时每分钟看一次。
-    /// 正在被远程、正在问要不要同意时不换（换路要断开重连）。返回 = 该换了。走直连时什么都不做：直连断了自然会重连、重新选路。
-    /// </summary>
-    private async Task WatchRouteAsync(ServerInfo current, CancellationToken ct)
-    {
-        if (current.IsDirect)
-        {
-            await Task.Delay(Timeout.Infinite, ct);
-            return;
-        }
-        while (true)
-        {
-            // 网络刚变：等几秒，地址、路由就绪了再试
-            if (await _routeCheck.WaitAsync(RouteCheckInterval, ct)) await Task.Delay(TimeSpan.FromSeconds(3), ct);
-            if (_runner is not null || _consent is { IsCancellationRequested: false } || DateTime.UtcNow < _skipDirectUntil) continue;
-            if (DirectFromConfig() is { } direct && await ProbeAsync(direct, ct) is null) return;
-        }
-    }
-
-    /// <summary>向服务器要局域网直连的入口（地址 + 证书指纹）记下来；有了新的就马上看看能不能直连。</summary>
-    private async Task RefreshDirectAsync(ServerInfo server, CancellationToken ct)
-    {
-        AgentDirectInfo? info;
-        try
-        {
-            using var api = new ServerApi(server);
-            info = await api.GetDirectAsync(ct);
-        }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            AgentLog.Warn($"查询局域网直连入口失败：{ex.Message}");
-            return;
-        }
-        // 只认 https 的入口：直连靠的就是 TLS + 证书指纹
-        var url = info is { Pin.Length: > 0 } && Uri.TryCreate(info.Url, UriKind.Absolute, out var parsed) && parsed.Scheme == Uri.UriSchemeHttps
-            ? info.Url.TrimEnd('/')
-            : "";
-        var pin = url.Length > 0 ? info!.Pin : "";
-        if (url == _config.DirectUrl && pin == _config.DirectPin) return;
-        _config.DirectUrl = url;
-        _config.DirectPin = pin;
-        _config.Save(_options.DataDir);
-        AgentLog.Info(url.Length > 0 ? $"服务器开了局域网直连：{url}" : "服务器没开局域网直连");
-        if (url.Length == 0) return;
-        _skipDirectUntil = default;
-        CheckRouteSoon();
-    }
-
-    /// <summary>
-    /// 发给服务器的请求（回复同意、挂断）：走现在这条路；局域网直连恰好断了（刚离开家）就改走公网再试一次。
-    /// 服务器已经应答了的（ServerException）不重试。
-    /// </summary>
-    private async Task<T> CallAsync<T>(ServerInfo server, Func<ServerApi, Task<T>> call)
-    {
-        try
-        {
-            using var api = new ServerApi(server);
-            return await call(api);
-        }
-        catch (Exception ex) when (server.IsDirect && ex is not ServerException)
-        {
-            AgentLog.Warn($"经局域网直连发请求失败，改走公网：{ex.Message}");
-            using var api = new ServerApi(ServerFromConfig());
-            return await call(api);
-        }
     }
 
     private async Task RegisterAsync(CancellationToken ct)
@@ -460,28 +322,23 @@ public sealed class AgentService
 
     private enum Outcome { Revoked, Retry }
 
-    /// <summary>
-    /// SignalR 自带的重连试 1 分钟左右就放弃，交给外层：外层重新选路、重新 Start，能分辨出令牌是否已被吊销（401）。
-    /// 局域网直连只重试两次（不到 10 秒）：多半是离开家了，早点交给外层改走公网。
-    /// </summary>
-    private sealed class RetryPolicy(bool direct) : IRetryPolicy
+    /// <summary>SignalR 自带的重连试 1 分钟左右就放弃，交给外层：外层重新 Start，能分辨出令牌是否已被吊销（401）。</summary>
+    private sealed class RetryPolicy : IRetryPolicy
     {
-        private readonly int[] _delays = direct ? [0, 2] : [0, 2, 5, 10, 20, 30];
+        private static readonly int[] Delays = [0, 2, 5, 10, 20, 30];
         public TimeSpan? NextRetryDelay(RetryContext context)
-            => context.PreviousRetryCount < _delays.Length ? TimeSpan.FromSeconds(_delays[context.PreviousRetryCount]) : null;
+            => context.PreviousRetryCount < Delays.Length ? TimeSpan.FromSeconds(Delays[context.PreviousRetryCount]) : null;
     }
 
     private async Task<Outcome> ConnectAsync(CancellationToken ct)
     {
-        // 会话还在进行（直连断了、数据通道已经改走公网）：托盘照旧显示"正在被远程"
+        // 会话还在进行时托盘照旧显示"正在被远程"（见 SetConnectionStateAsync）
         await SetConnectionStateAsync(AgentState.Connecting, "正在连接");
-        var (server, directProblem) = await ChooseRouteAsync(ct);
-        _server = server;
-        LogTransport(server, directProblem);
+        var server = _server = ServerFromConfig();
+        LogTransport();
         var serverUri = new Uri(server.Url);
-        // 系统没有 TLS 1.3 时：SignalR 的 HTTP 请求和 WebSocket 都经程序自带的 TLS 1.3（地址改成 http://，见 AgentTransport）；
-        // 局域网直连时也自己建连接（证书按指纹认、不经代理）
-        using var invoker = AgentTransport.CreateInvoker(serverUri, server.Pin);
+        // 系统没有 TLS 1.3 时：SignalR 的 HTTP 请求和 WebSocket 都经程序自带的 TLS 1.3（地址改成 http://，见 AgentTransport）
+        using var invoker = AgentTransport.CreateInvoker(serverUri);
         await using var hub = new HubConnectionBuilder()
             .WithUrl(AgentTransport.Address(new Uri(server.Url.TrimEnd('/') + "/hubs/agent")), o =>
             {
@@ -493,7 +350,7 @@ public sealed class AgentService
                 o.AccessTokenProvider = () => Task.FromResult<string?>(server.DeviceToken);
                 if (invoker is not null)
                 {
-                    o.HttpMessageHandlerFactory = _ => AgentTransport.CreateHandler(serverUri, server.Pin);
+                    o.HttpMessageHandlerFactory = _ => AgentTransport.CreateHandler(serverUri);
                     // 自己建 WebSocket：SignalR 默认的做法会走系统 TLS。请求头和令牌照它原来的样子带上
                     o.WebSocketFactory = async (context, cancel) =>
                     {
@@ -525,7 +382,7 @@ public sealed class AgentService
                 }
             })
             .AddJsonProtocol(o => o.PayloadSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()))
-            .WithAutomaticReconnect(new RetryPolicy(server.IsDirect))
+            .WithAutomaticReconnect(new RetryPolicy())
             .Build();
         var revoked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -538,7 +395,7 @@ public sealed class AgentService
         hub.Reconnecting += _ => SetConnectionStateAsync(AgentState.Connecting, "网络断开，正在重新连接");
         hub.Reconnected += async _ =>
         {
-            await SetConnectionStateAsync(AgentState.Online, OnlineText);
+            await SetConnectionStateAsync(AgentState.Online, "在线");
             await ReportAsync(hub);
         };
         hub.Closed += _ =>
@@ -555,54 +412,32 @@ public sealed class AgentService
         {
             return Outcome.Revoked;
         }
-        catch (Exception ex) when (!ct.IsCancellationRequested && server.IsDirect)
-        {
-            // 直连试得通、长连接却没连上（比如恰好在这时断了）：一会儿之内先不试直连，马上改走公网
-            _skipDirectUntil = DateTime.UtcNow + DirectCooldown;
-            AgentLog.Warn($"局域网直连连不上，改走公网：{Innermost(ex).Message}");
-            return Outcome.Retry;
-        }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            // 已经添加过的电脑：断网、服务器重启都会到这里，不弹窗，原因写在托盘上。10 秒后外层重新选路再连
+            // 已经添加过的电脑：断网、服务器重启都会到这里，不弹窗，原因写在托盘上。10 秒后外层重新连
             var problem = Diagnose("连接服务器失败", ex);
             await SetConnectionStateAsync(AgentState.Connecting, $"连不上服务器：{problem.Summary}");
             await Task.Delay(TimeSpan.FromSeconds(10), ct);
             return Outcome.Retry;
         }
         _lastProblem = null;
-        AgentLog.Info(server.IsDirect ? "已连接服务器（局域网直连），等待远程请求" : "已连接服务器，等待远程请求");
+        AgentLog.Info("已连接服务器，等待远程请求");
         try { _updateSignal.Release(); } catch (SemaphoreFullException) { } // 顺便查一下有没有新版本
-        await SetConnectionStateAsync(AgentState.Online, OnlineText);
+        await SetConnectionStateAsync(AgentState.Online, "在线");
         await ReportAsync(hub);
         EventHandler displayChanged = (_, _) => _ = ReportAsync(hub);
         if (!_options.Headless) SystemEvents.DisplaySettingsChanged += displayChanged;
-        NetworkAddressChangedEventHandler networkChanged = (_, _) => CheckRouteSoon();
-        NetworkChange.NetworkAddressChanged += networkChanged;
-        using var watching = CancellationTokenSource.CreateLinkedTokenSource(ct);
         try
         {
-            _ = RefreshDirectAsync(server, watching.Token);
-            var betterRoute = WatchRouteAsync(server, watching.Token);
-            var done = await Task.WhenAny(revoked.Task, closed.Task, betterRoute, Task.Delay(Timeout.Infinite, ct));
+            var done = await Task.WhenAny(revoked.Task, closed.Task, Task.Delay(Timeout.Infinite, ct));
             await done; // 取消时抛出
-            if (done == betterRoute)
-            {
-                // 回到家了：断开公网这条，外层重新选路就是局域网直连。正在进行的会话（万一恰好开始了）走它自己的数据通道，不受影响
-                AgentLog.Info("能直连服务器了，改走局域网直连");
-                await hub.StopAsync(CancellationToken.None);
-                return Outcome.Retry;
-            }
-            // 走公网的长连接试了一分钟都没连上：正在进行的会话收掉（服务器那边早就结束了）。
-            // 走直连的断了多半是离开了家：会话的数据通道自己会改走公网接着传，不跟着停
+            // 长连接试了一分钟都没连上：正在进行的会话收掉（服务器那边早就结束了）
             if (done == revoked.Task) return Outcome.Revoked;
-            if (!server.IsDirect) await StopRunnerAsync();
+            await StopRunnerAsync();
             return Outcome.Retry;
         }
         finally
         {
-            await watching.CancelAsync();
-            NetworkChange.NetworkAddressChanged -= networkChanged;
             if (!_options.Headless) SystemEvents.DisplaySettingsChanged -= displayChanged;
         }
     }
@@ -663,7 +498,8 @@ public sealed class AgentService
 
         try
         {
-            var info = await CallAsync(server, api => api.ConsentAsync(request.SessionId, answer.Value, CancellationToken.None));
+            using var api = new ServerApi(server);
+            var info = await api.ConsentAsync(request.SessionId, answer.Value, CancellationToken.None);
             AgentLog.Info($"已{(answer.Value ? "同意" : "拒绝")} {request.ControllerName} 的远程请求");
             if (answer.Value && info?.State == RemoteSessionState.Active)
             {
@@ -688,10 +524,7 @@ public sealed class AgentService
 
     private void StartRunner(AgentSessionRequest request)
     {
-        // 走局域网直连时，数据通道连不上就改走公网（比如会话中途离开了家）
-        var server = _server!;
-        var runner = new SessionRunner(request, server, server.IsDirect ? ServerFromConfig() : null,
-            CreateSource, CreateAudioSource, _input, _ui);
+        var runner = new SessionRunner(request, _server!, CreateSource, CreateAudioSource, _input, _ui);
         _runner = runner;
         runner.Start();
         _ui.ShowBanner(request);
@@ -724,7 +557,8 @@ public sealed class AgentService
         {
             try
             {
-                await CallAsync(server, async api => { await api.EndAsync(runner.Id, CancellationToken.None); return true; });
+                using var api = new ServerApi(server);
+                await api.EndAsync(runner.Id, CancellationToken.None);
             }
             catch (Exception ex)
             {
@@ -778,7 +612,8 @@ public sealed class AgentService
         {
             try
             {
-                await CallAsync(server, async api => { await api.EndAsync(sessionId, CancellationToken.None); return true; });
+                using var api = new ServerApi(server);
+                await api.EndAsync(sessionId, CancellationToken.None);
             }
             catch (Exception ex)
             {

@@ -13,7 +13,6 @@ using Microsoft.Extensions.DependencyInjection;
 using PrivateChat.Api.Domain;
 using PrivateChat.Api.Features.Auth;
 using PrivateChat.Api.Features.Remote;
-using PrivateChat.Api.Infrastructure.Keys;
 using PrivateChat.Contracts.Remote;
 
 namespace PrivateChat.Api.Tests.Integration;
@@ -26,9 +25,9 @@ public class RemoteTests
         public ValueTask DisposeAsync() => App.DisposeAsync();
     }
 
-    private static async Task<Ctx> SetupAsync(string? directUrl = null, bool realtimeConfigured = true)
+    private static async Task<Ctx> SetupAsync(bool realtimeConfigured = true)
     {
-        var app = new ApiFactory(realtimeConfigured: realtimeConfigured, directUrl: directUrl);
+        var app = new ApiFactory(realtimeConfigured: realtimeConfigured);
         var admin = await app.LoginAsync("admin@example.com");
         var adminId = (await (await admin.GetAsync("/api/auth/me")).ReadAsync<UserDto>()).Id;
         var bob = await app.AddUserAsync("bob", UserRole.Member);
@@ -682,80 +681,6 @@ public class RemoteTests
         Assert.Equal(HttpStatusCode.OK, (await anon.GetAsync($"/api/auth/device/poll?code={codes[5].Code}&pollToken={codes[5].PollToken}")).StatusCode);
         // 轮询凭证不对：当作不存在
         Assert.Equal(HttpStatusCode.NotFound, (await anon.GetAsync($"/api/auth/device/poll?code={codes[5].Code}&pollToken=nope")).StatusCode);
-    }
-
-    // ---- 局域网直连入口 ----
-
-    [PgFact]
-    public async Task Direct_entrance_hands_its_address_and_certificate_pin_only_to_devices()
-    {
-        await using var x = await SetupAsync(directUrl: "https://192.168.1.10:3508/");
-        var agent = await RegisterAsync(x, x.Admin, x.Bob.Id);
-
-        var info = await (await agent.Http.GetAsync("/api/remote/agent/direct")).ReadAsync<AgentDirectInfo>();
-        Assert.Equal("https://192.168.1.10:3508", info.Url);
-        var cert = x.App.Services.GetRequiredService<KeyStore>().DirectCertificate;
-        Assert.True(cert.HasPrivateKey);
-        Assert.Equal(CertificatePin.Of(cert), info.Pin);
-        Assert.True(CertificatePin.Matches(cert, info.Pin));
-        // 证书存在数据目录里：服务重启后还是同一张，被控端记下的指纹不会失效
-        Assert.Equal(info.Pin, CertificatePin.Of(new KeyStore(Path.Combine(x.App.DataRoot, "keys")).DirectCertificate));
-
-        // 只给被控端：网页登录的人拿不到，没登录的更不行
-        Assert.Equal(HttpStatusCode.Forbidden, (await x.BobClient.GetAsync("/api/remote/agent/direct")).StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await x.App.Anonymous().GetAsync("/api/remote/agent/direct")).StatusCode);
-    }
-
-    [PgFact]
-    public async Task Without_a_direct_address_the_agent_is_told_there_is_no_direct_entrance()
-    {
-        await using var x = await SetupAsync();
-        var agent = await RegisterAsync(x, x.Admin, x.Bob.Id);
-        Assert.Equal(HttpStatusCode.NoContent, (await agent.Http.GetAsync("/api/remote/agent/direct")).StatusCode);
-    }
-
-    [PgFact]
-    public async Task Direct_port_only_lets_the_agent_in()
-    {
-        await using var x = await SetupAsync(directUrl: "https://192.168.1.10:3508");
-        var agent = await RegisterAsync(x, x.Admin, x.Bob.Id);
-        var cookie = await CookieAsync(x.App, "bob");
-
-        var door = x.App.Anonymous();
-        door.DefaultRequestHeaders.Add(ApiFactory.DirectPortHeader, "1");
-        // 被控端试通不通用的健康检查：谁都能访问
-        Assert.Equal(HttpStatusCode.OK, (await door.GetAsync("/healthz")).StatusCode);
-        // 网页、密码登录、申请设备码、带 Cookie 的请求：一律当作不存在
-        Assert.Equal(HttpStatusCode.NotFound, (await door.PostAsJsonAsync("/api/auth/local/login", new { usernameOrEmail = "bob", password = ApiFactory.Password })).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await door.PostJsonAsync("/api/auth/device/code", new { name = "冒充的电脑" })).StatusCode);
-        using (var withCookie = new HttpRequestMessage(HttpMethod.Get, "/api/devices"))
-        {
-            withCookie.Headers.Add("Cookie", cookie);
-            Assert.Equal(HttpStatusCode.NotFound, (await door.SendAsync(withCookie)).StatusCode);
-        }
-        // 同一个 Cookie 从正常的端口进来是好的（上面的 404 是门口拦的，不是 Cookie 不对）
-        using (var normal = new HttpRequestMessage(HttpMethod.Get, "/api/devices"))
-        {
-            normal.Headers.Add("Cookie", cookie);
-            Assert.Equal(HttpStatusCode.OK, (await x.App.Anonymous().SendAsync(normal)).StatusCode);
-        }
-
-        // 带设备令牌：被控端的接口照常可用
-        var agentDoor = x.App.Anonymous();
-        agentDoor.DefaultRequestHeaders.Add(ApiFactory.DirectPortHeader, "1");
-        agentDoor.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", agent.Token);
-        Assert.Equal(HttpStatusCode.OK, (await agentDoor.GetAsync("/api/remote/agent/direct")).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await agentDoor.PostAsync("/hubs/agent/negotiate?negotiateVersion=1", null)).StatusCode);
-        // 设备令牌用在别的接口上：门口就拦了（从正常端口进来是认证那一步拒绝）
-        Assert.Equal(HttpStatusCode.NotFound, (await agentDoor.GetAsync("/api/conversations")).StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await agent.Http.GetAsync("/api/conversations")).StatusCode);
-
-        // 经直连端口回复同意：会话照常开始
-        await using var hub = await OnlineAsync(x, agent);
-        var session = await StartAsync(x.BobClient, agent.DeviceId);
-        Assert.Equal(RemoteSessionState.Pending, session.State);
-        var accepted = await (await agentDoor.PostJsonAsync($"/api/remote/sessions/{session.Id}/consent", new { accept = true })).ReadAsync<RemoteSessionDto>();
-        Assert.Equal(RemoteSessionState.Active, accepted.State);
     }
 
     // ---- 快速线路：画面和声音经 Cloudflare Realtime（信令经我们的接口）----

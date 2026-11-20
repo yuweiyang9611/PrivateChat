@@ -12,7 +12,6 @@
 - 被控端程序在 `src/PrivateChat.Agent`（WinForms 托盘：GDI 截屏 + Media Foundation H.264 + SendInput），web 镜像构建时交叉编译成单文件 exe 放在 `/downloads/`。
   安装包旁边有一份清单 `/downloads/PrivateChat.Agent.json`（版本、大小、SHA-256，镜像构建时生成）：已经装出去的程序（0.6.2 起）靠它自动升级（`Updater`）。
   系统没有 TLS 1.3（Windows 10 及更早）时它用程序自带的 TLS 1.3 连服务器（`AgentTransport`，BouncyCastle；证书仍由 Windows 校验），所以服务器可以只收 TLS 1.3。
-- `DirectEntrance` + `AgentDirectController`（`/api/remote/agent/direct`）：局域网直连入口。配了 `Remote:DirectUrl` 时 api 多听一个 HTTPS 端口（`Remote:DirectPort`，默认 8443，自签证书在 `KeyStore.DirectCertificate`），只放行被控端的接口；被控端经公网拿到地址和证书指纹（`PrivateChat.Contracts` 的 `CertificatePin`），在家时直连、只认这张证书，连不上就走公网。
 
 Agent 和网页通过同一个中继传送画面、反馈和系统声音。Agent 的 `NetworkEstimator` 根据画面确认和探测包往返时间调整发送预算，`QualityPlanner` 根据画面变化选择 H.264 编码质量。网页开启声音后，Agent 从 Windows 默认播放设备采集并发送 Opus，关闭后释放设备。中继按原有转发规则处理这些帧。
 

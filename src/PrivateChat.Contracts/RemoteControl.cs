@@ -1,6 +1,4 @@
 using System.Buffers.Binary;
-using System.Security.Cryptography;
-using System.Security.Cryptography.X509Certificates;
 using System.Text;
 
 namespace PrivateChat.Contracts.Remote;
@@ -336,13 +334,6 @@ public sealed record AgentSessionEnded(Guid SessionId, string Reason);
 public sealed record AgentScreen(int Width, int Height, bool Primary);
 public sealed record AgentReport(string Version, string Os, IReadOnlyList<AgentScreen> Screens);
 
-/// <summary>
-/// 被控端在局域网里直连服务器的入口（GET /api/remote/agent/direct，只给设备令牌）：
-/// Url 是被控端去连的地址（如 https://192.168.88.3:3508），Pin 是入口证书的指纹（<see cref="CertificatePin"/>）。
-/// 证书是服务器自己生成的自签证书，被控端经公网（证书由正规机构签发、过 Access）拿到指纹，之后直连时只认这一张。
-/// </summary>
-public sealed record AgentDirectInfo(string Url, string Pin);
-
 /// <summary>ICE 服务器，和浏览器的 RTCIceServer 一个形状。</summary>
 public sealed record RemoteIceServer(IReadOnlyList<string> Urls, string? Username = null, string? Credential = null);
 
@@ -361,32 +352,6 @@ public sealed record RemoteRealtimePublishRequest(string Offer, IReadOnlyList<Re
 public sealed record RemoteRealtimePublishResponse(string Answer);
 public sealed record RemoteRealtimePullResponse(string Offer, IReadOnlyList<RemoteRealtimeTrack> Tracks);
 public sealed record RemoteRealtimeAnswerRequest(string Answer);
-
-/// <summary>证书指纹：公钥（SubjectPublicKeyInfo，DER）的 SHA-256，base64。服务器和被控端用同一份算法。</summary>
-public static class CertificatePin
-{
-    public static string Of(X509Certificate certificate)
-    {
-        if (certificate is X509Certificate2 cert) return Hash(cert);
-        using var copy = new X509Certificate2(certificate);
-        return Hash(copy);
-    }
-
-    private static string Hash(X509Certificate2 cert) => Convert.ToBase64String(SHA256.HashData(cert.PublicKey.ExportSubjectPublicKeyInfo()));
-
-    public static bool Matches(X509Certificate? certificate, string pin)
-    {
-        if (certificate is null || pin.Length == 0) return false;
-        try
-        {
-            return string.Equals(Of(certificate), pin, StringComparison.Ordinal);
-        }
-        catch (CryptographicException)
-        {
-            return false;
-        }
-    }
-}
 
 /// <summary>中继发给两端的文本消息（WebSocket 文本帧，JSON）：对端连上 / 断开。</summary>
 public sealed record RelayNotice(string Type, bool Connected);
