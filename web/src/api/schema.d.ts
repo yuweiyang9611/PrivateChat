@@ -383,7 +383,9 @@ export interface paths {
         };
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    ice?: boolean;
+                };
                 header?: never;
                 path: {
                     id: string;

@@ -88,11 +88,15 @@ public sealed class RemoteRealtimeService(AppDbContext db, CloudflareRealtimeCli
 
     private enum Party { Agent, Controller }
 
-    /// <summary>这台服务器能不能走快速线路，以及连 Cloudflare 用的 ICE 服务器。被控端和控制端都要先问一下。</summary>
-    public async Task<RemoteRealtimeInfo> InfoAsync(ClaimsPrincipal user, Guid id, CancellationToken ct)
+    /// <summary>
+    /// 这台服务器能不能走快速线路，以及连 Cloudflare 用的 ICE 服务器。被控端和控制端都要先问一下。
+    /// includeIce = false：只问能不能，不去 Cloudflare 签发 TURN 凭据（被控端一连上就要问，它在等这个结果才发第一份配置）。
+    /// </summary>
+    public async Task<RemoteRealtimeInfo> InfoAsync(ClaimsPrincipal user, Guid id, bool includeIce, CancellationToken ct)
     {
         await ActiveAsync(user, id, null, ct);
         if (!realtime.IsConfigured) return new RemoteRealtimeInfo(false, []);
+        if (!includeIce) return new RemoteRealtimeInfo(true, []);
         var servers = await realtime.GenerateIceServersAsync(ct);
         return new RemoteRealtimeInfo(true, [.. servers.Select(s => new RemoteIceServer(s.Urls, s.Username, s.Credential))]);
     }

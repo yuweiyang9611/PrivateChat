@@ -105,7 +105,7 @@
   （原计划 v1 用 ffmpeg 子进程；实测 Media Foundation 编码 1080p 每帧 2–3 ms，省掉随包分发 100 MB 的 ffmpeg 和 GPL 的 libx264，就直接做了进程内。）
 - RustDesk 自托管作为过渡与兜底（compose 里一个可选 profile），网页里记录成员的 RustDesk ID 一键唤起。
 - 入口换成 Cloudflare Tunnel 后这个选择更顺：隧道只代理 HTTP / WebSocket，中继方案原样可用；WebRTC P2P 反而要另开端口。
-- 后来（被控端 0.8.0）加了第二条线路：中继方案的画面要在家里的宽带上来回绕，实际用起来慢。画面和声音可以改经 Cloudflare Realtime（通话已经在用的 SFU）从被控端直接到浏览器，走 UDP、不回家里；键鼠等控制帧仍走中继，接不上就退回中继。服务器照样不用开端口。见 4.8 的"快速线路"。
+- 后来（被控端 0.8.0）加了第二条线路：中继方案的画面要在家里的宽带上来回绕，实际用起来慢。画面和声音可以改经 Cloudflare Realtime（通话已经在用的 SFU）从被控端直接到浏览器，走 UDP、不回家里；键鼠等控制帧仍走中继。走哪条线路由用户选（默认新的这条），两条之间不自动互换。服务器照样不用开端口。见 4.8 的"快速线路"。
 
 ---
 
@@ -481,17 +481,18 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 - v2：桌面复制（DXGI Desktop Duplication）+ 硬件编码（异步 MFT），SYSTEM 服务 + 用户会话助手进程解决 UAC / 锁屏 / Ctrl+Alt+Del。
 - **快速线路**（0.8.0 起，服务器配了 Cloudflare Realtime 才有）：画面和声音不经我们的中继，经 Cloudflare Realtime 的 SFU 从被控端到浏览器。
   - 为什么：中继这条路是 被控端 → Cloudflare → 隧道 → 小主机 → 隧道 → Cloudflare → 浏览器，全程 TCP，画面在家里的宽带上来回各跑一遍。快速线路是 被控端 → Cloudflare 最近的节点 → 浏览器，走 UDP（SRTP），丢一个包只重发那一个包，不会把后面的都堵住。
-  - 只搬画面和声音。键鼠、剪贴板、显示器、统计、会话的开始结束仍走 `/ws/remote`：只看模式的输入过滤、缺席清理、审计都不用改，退回中继也只是把画面切回去。
+  - 只搬画面和声音。键鼠、剪贴板、显示器、统计、会话的开始结束仍走 `/ws/remote`：只看模式的输入过滤、缺席清理、审计都不用改，切到标准线路也只是把画面切回去。
   - 信令和通话一样：两边都不直接碰 Cloudflare 的接口，SDP 经我们的接口转手（`/api/remote/sessions/{id}/realtime`、`…/publish`、`…/pull`、`…/renegotiate`，见 `RemoteRealtimeService`），App Secret 和 Cloudflare 的会话 ID 不出服务器。Cloudflare 那边的状态只放内存（`RemoteRealtimeStore`），会话结束时关掉。
   - 被控端用 SIPSorcery（纯 C# 的 WebRTC，DTLS / SRTP 用的就是那份 BouncyCastle；许可证是 BSD-3 加一条地域限制）。编码器、画质规划照旧，只是编好的帧不包成 `VideoFrame` 而是拆成 RTP 包（`H264Rtp`，RFC 6184 的单 NAL / FU-A，自己拆是为了自己编序号）交给 `RealtimePublisher`。SFU 转达的 PLI / FIR → 出关键帧；NACK → 库重发留着的包，库不留的从发布器自己留的最近 1024 个里补。Cloudflare 不支持 trickle，offer 等候选收集完才发。
   - 版本：SIPSorcery 用的是预发布版 10.0.19-pre。稳定版 10.0.17 接不住 SFU 的反馈（只带 PLI 的 RTCP 包被丢、一个复合包只留一条反馈），中途加入的浏览器一帧都解不出来；等 10.0.18 以后的稳定版出来就换。
-  - 切换不黑屏：控制端发 `SetTransport` → 被控端发布、连上后回 `Transport`（带第几次发布）→ 控制端拉流。这期间画面两条线路都发；控制端在快速线路上出了第一帧就开始每秒发 `ReceiverReport`，被控端收到第一份才停掉中继上的画面，声音也从这时起改走快速线路（之前只走中继，两边同时放会听到两遍）。
-  - 退回中继：发布失败、8 秒没连上 Cloudflare、连接断开 5 秒、控制端 12 秒没接上或 10 秒没汇报（被控端判断）；10 秒没出第一帧、7 秒没有新帧、连接断开（控制端判断）。退回后控制端过 15 / 30 秒各自动再试一次，之后留在中继上等用户自己点。换了控制端（另一个标签页接手）先回到中继，新来的想用再说。
+  - 接通：控制端发 `SetTransport` → 被控端发布、连上后回 `Transport`（带第几次发布）→ 控制端拉流。控制端在快速线路上出了第一帧就开始每秒发 `ReceiverReport`；被控端收到第一份之前两条线路都发画面（中继上的码率估计照常有确认可用），之后只走快速线路，声音也从这时起改走这边。
+  - **线路不自动换**（0.8.2 起）：选哪条就只用哪条，默认快速。选了快速线路的控制端从头到尾只解、只画这条线路上的画面和声音——接上之前没有画面，不先拿中继的顶上；中继上这期间来的帧只确认、不解。被控端的第一份 `VideoConfig` 会等问到服务器有没有快速线路再发（`GET …/realtime?ice=false`，只问有没有、不签发 TURN 凭据；最多等 2 秒），所以控制端一开始就知道该等哪条线路。
+  - 快速线路出了问题：发布失败、8 秒没连上 Cloudflare、连接断开 5 秒、控制端 12 秒没接上或 10 秒没汇报（被控端判断，回 `Transport` 的"失败"）；10 秒没出第一帧、7 秒没有新帧、连接断开（控制端判断）。控制端不换线路，只是收掉这次的连接，把原因摆在画面上，隔 2 / 5 / 10 / 15 / 15 秒重新接这条线路；都不行就停下来，等用户点"重试"或者"切到标准线路"。页面在后台时不重新接，回到前台再接。换了控制端（另一个标签页接手）被控端先回到中继，新来的按它自己选的线路重新接。
   - 保活：Cloudflare 会回收 30 秒没有数据的轨道，而屏幕不动时本来一帧都不编。快速线路上每 2 秒至少发一帧（内容没变，很小），没开声音或没声音时每 2 秒发一个 Opus 静音包。
-  - 码率：这条线路上没有逐帧确认，SFU 也不替我们限速。靠控制端每秒汇报的丢包、收到的码率、浏览器里的缓冲深度，加上 SFU 的 RTCP 接收报告（`RealtimeRateController`）：丢包超过一成按比例降，连续两次收到的明显少于发出的就降到收到的九成，连续两次缓冲很深降一成半；没有这些迹象且画面在动时逐步升到档位上限。记账和一帧能花多少与中继共用一套算法（`IRateController`）。比浏览器自己的拥塞控制粗，所以保留开关和自动退回。
+  - 码率：这条线路上没有逐帧确认，SFU 也不替我们限速。靠控制端每秒汇报的丢包、收到的码率、浏览器里的缓冲深度，加上 SFU 的 RTCP 接收报告（`RealtimeRateController`）：丢包超过一成按比例降，连续两次收到的明显少于发出的就降到收到的九成，连续两次缓冲很深降一成半；没有这些迹象且画面在动时逐步升到档位上限。记账和一帧能花多少与中继共用一套算法（`IRateController`）。比浏览器自己的拥塞控制粗，所以保留手动切到标准线路的开关。
   - 浏览器这边：用一个不挂到页面上的 `<video>` 解码，每出一帧（`requestVideoFrameCallback`）画到和中继共用的那块 canvas 上——布局、键鼠坐标、全屏都不用管画面从哪条线路来；`jitterBufferTarget = 0`。声音用单独的 `<audio>` 放。
-  - 开关：工具栏"快速线路 / 标准线路"，默认快速，记在本机浏览器里（`remote.transport`）。被控端用环境变量 `PRIVATECHAT_AGENT_REALTIME=off` 可以关掉。
-  - 测试：`H264RtpTests`、`RealtimeRateControlTests`、`RemoteTests` 里的 Fast_line_*（接口、权限、清理，用 `FakeRealtime`）；`web/e2e/remote.cjs --realtime` 用假 SFU（`fake-sfu.cjs`，Edge）跑完整流程：切过去后的画面 / 声音 / 键鼠、中继上不再有画面帧、故意丢 2% 的包靠重发补上、掐断后自动退回再自动接回、手动切回。
+  - 开关：工具栏"快速线路 / 标准线路"，默认快速，记在本机浏览器里（`remote.transport`）；只有用户点它（或者点出问题时画面上的"切到标准线路"）才换线路。被控端用环境变量 `PRIVATECHAT_AGENT_REALTIME=off` 可以关掉。
+  - 测试：`H264RtpTests`、`RealtimeRateControlTests`、`RemoteTests` 里的 Fast_line_*（接口、权限、清理，用 `FakeRealtime`）；`web/e2e/remote.cjs --realtime` 用假 SFU（`fake-sfu.cjs`，Edge）跑完整流程：切过去后的画面 / 声音 / 键鼠、中继上不再有画面帧、故意丢 2% 的包靠重发补上、掐断后不换线路而是自己重新接上、接不上时提示并手动切到标准线路。
   - 没做：键鼠改走 Realtime 的数据通道（SIPSorcery 的数据通道只有可靠有序而且慢）；UDP 弱网的自动化测试（`slow-link.cjs` 只能限 TCP）。
 - v3（可选）：WebRTC P2P + Cloudflare TURN，两边在同一个局域网时画面不出家门。
 

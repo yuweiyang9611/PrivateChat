@@ -100,9 +100,10 @@ public sealed class ServerApi(ServerInfo server) : IDisposable
     /// 这次远程能不能走快速线路（画面和声音经 Cloudflare Realtime），以及连过去用的 ICE 服务器。
     /// 旧版服务器没有这个接口、或会话已经不在进行中时 null。
     /// </summary>
-    public async Task<RemoteRealtimeInfo?> GetRealtimeAsync(Guid sessionId, CancellationToken ct)
+    /// <param name="withIce">false：只问有没有，不要 ICE 服务器（服务器不用去签发 TURN 凭据，答得快）。</param>
+    public async Task<RemoteRealtimeInfo?> GetRealtimeAsync(Guid sessionId, CancellationToken ct, bool withIce = true)
     {
-        using var res = await _http.SendAsync(Request(HttpMethod.Get, $"api/remote/sessions/{sessionId}/realtime"), ct);
+        using var res = await _http.SendAsync(Request(HttpMethod.Get, $"api/remote/sessions/{sessionId}/realtime{(withIce ? "" : "?ice=false")}"), ct);
         if (res.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Conflict or HttpStatusCode.MethodNotAllowed) return null;
         await EnsureAsync(res);
         return await res.Content.ReadFromJsonAsync<RemoteRealtimeInfo>(Json, ct);

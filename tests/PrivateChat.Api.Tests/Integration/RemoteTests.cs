@@ -728,6 +728,12 @@ public class RemoteTests
             Assert.Equal("turn-pass", turn.Credential);
             Assert.DoesNotContain(turn.Urls, u => u.Contains(":53"));
         }
+        // 只问有没有（被控端一连上就问，等着这个结果发第一份配置）：不去 Cloudflare 签发 TURN 凭据
+        var turnCalls = x.App.Realtime.CallsTo("/generate-ice-servers").Count();
+        var probe = await (await agent.Http.GetAsync(url + "?ice=false")).ReadAsync<RemoteRealtimeInfo>();
+        Assert.True(probe.Available);
+        Assert.Empty(probe.IceServers);
+        Assert.Equal(turnCalls, x.App.Realtime.CallsTo("/generate-ice-servers").Count());
         // 不是这次会话的两方：当作没有这个会话（管理员、电脑的主人以外的人都一样）
         Assert.Equal(HttpStatusCode.NotFound, (await x.CarolClient.GetAsync(url)).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await x.Admin.GetAsync(url)).StatusCode);

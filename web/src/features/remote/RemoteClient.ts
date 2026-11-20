@@ -16,13 +16,16 @@ export interface RemoteStats { fps: number; kbps: number; cpu: number; rtt: numb
 export type AudioState = 'off' | 'playing' | 'blocked' | 'unsupported'
 
 /**
- * 画面和声音现在走哪条线路：relay 经我们的服务器中继；realtime 经 Cloudflare Realtime（快速线路）；
- * connecting 正在接快速线路（这期间画面仍从中继来）。
+ * 画面和声音现在走哪条线路：relay 经我们的服务器中继（标准线路）；realtime 经 Cloudflare Realtime（快速线路）；
+ * connecting 选的是快速线路，但它还没接上（或者出了问题、正在重新接）——这期间没有画面，不拿中继的顶上。
  */
 export type LineState = 'relay' | 'connecting' | 'realtime'
 
-/** 快速线路接不上时自动再试几次；之后留在中继上，等用户自己再点 */
-const REALTIME_AUTO_RETRIES = 2
+/** 快速线路出了什么问题；retrying：还在自己重新接（false = 试过几次停下来了，等用户点重试或者切到标准线路） */
+export interface LineProblem { reason: string; retrying: boolean }
+
+/** 快速线路出问题后隔多久重新接一次（接的还是这条线路）。都试完还不行就停下来，等用户决定 */
+const REALTIME_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 15_000, 15_000]
 /** 让被控端接快速线路，这么久没有回音就算了 */
 const REALTIME_REQUEST_TIMEOUT_MS = 30_000
 
@@ -37,8 +40,8 @@ export interface RemoteClientEvents {
   ended: (why: 'ended' | 'replaced') => void
   unsupported: () => void
   audio: (s: AudioState) => void
-  /** 线路变了。从快速线路退回中继时 reason 是原因（用户自己切回来的没有） */
-  line: (s: LineState, reason?: string) => void
+  /** 线路的状态变了。线路只由用户切；快速线路出了问题时带着 problem，页面据此提示用户 */
+  line: (s: LineState, problem?: LineProblem) => void
 }
 
 /**
@@ -47,7 +50,8 @@ export interface RemoteClientEvents {
  * 声音（Opus）交给 {@link RemoteAudio} 播放。
  * 断线自动重连（会话是否结束由页面根据 SignalR 判断后调用 close）。
  * 快速线路：被控端支持时（VideoConfig 的功能位），可以让画面和声音改经 Cloudflare Realtime 过来（{@link RemoteRealtime}），
- * 画到同一块 canvas 上；键鼠、剪贴板这些仍走这条 WebSocket。接不上、中途断了都会自己回到中继。
+ * 画到同一块 canvas 上；键鼠、剪贴板这些仍走这条 WebSocket。走哪条线路由用户选，两条线路之间不自动换：
+ * 选了快速线路就只用它，接不上、中途断了都只是重新接它并提示用户，不拿中继的画面顶上。
  */
 export class RemoteClient {
   private ws: WebSocket | null = null
@@ -70,6 +74,8 @@ export class RemoteClient {
   private wantRealtime = false
   private realtime: RemoteRealtime | null = null
   private realtimeGeneration = -1
+  /** 已经让被控端去接快速线路，还在等它回话 */
+  private realtimeAsked = false
   private realtimeFailures = 0
   private realtimeTimer: number | undefined
   private reportTimer: number | undefined
@@ -92,7 +98,7 @@ export class RemoteClient {
     document.addEventListener('visibilitychange', this.onVisibility)
   }
 
-  /** 页面回到前台：在后台时没去接的快速线路，现在接 */
+  /** 页面回到前台：在后台时没去接（重新接）的快速线路，现在接 */
   private readonly onVisibility = (): void => {
     if (pageVisible()) this.requestRealtime()
   }
@@ -170,9 +176,10 @@ export class RemoteClient {
   /** 要不要听对方电脑的声音。关掉时被控端就不采集了（不占流量） */
   setAudio(on: boolean): void {
     this.wantAudio = on
-    if (this.realtime?.active) {
-      // 画面在快速线路上：声音也从那边来
-      this.realtime.setAudio(on)
+    if (this.onFastLine) {
+      // 选的是快速线路：声音也只从那边来（还没接上时先记着，接上了再放）
+      this.realtime?.setAudio(on)
+      if (!on) this.on.audio?.('off')
       this.send(encode.setAudio(on))
       return
     }
@@ -207,7 +214,7 @@ export class RemoteClient {
 
   /** 测试用：已经排上去播放的声音采样点数、最近一块的峰值 */
   get audioProgress(): { scheduled: number; peak: number } {
-    if (this.realtime?.active) return { scheduled: this.realtime.scheduled, peak: this.realtime.peak }
+    if (this.onFastLine) return { scheduled: this.realtime?.scheduled ?? 0, peak: this.realtime?.peak ?? 0 }
     return { scheduled: this.audio?.scheduled ?? 0, peak: this.audio?.peak ?? 0 }
   }
 
@@ -219,27 +226,61 @@ export class RemoteClient {
   }
 
   /**
-   * 画面和声音想走哪条线路。选快速线路时：被控端支持就去接，接上之前画面照旧从中继来；
-   * 接不上或中途断了自己回到中继（line 事件里带原因），过后再自动试几次。
+   * 这次远程的画面和声音只从快速线路来：用户选了它，而且被控端和这个浏览器都支持。
+   * 线路不自动换——这条线路没接上、出了问题的时候也不解、不画、不放中继上的画面和声音。
+   */
+  private get onFastLine(): boolean {
+    return this.wantRealtime && this.realtimeAvailable
+  }
+
+  /**
+   * 画面和声音走哪条线路，由用户定。选快速线路时（被控端支持的话）只用它：接上之前没有画面；
+   * 接不上、中途断了就重新接这条线路并在 line 事件里带上原因，要不要切到标准线路由用户决定。
    */
   setTransport(realtime: boolean): void {
     this.wantRealtime = realtime
     this.realtimeFailures = 0
-    if (realtime) this.requestRealtime()
-    else {
-      const was = this.line
-      this.dropRealtime()
-      if (was !== 'relay') this.send(encode.setTransport(Transport.Relay))
-      this.setLine('relay')
+    this.applyTransport()
+  }
+
+  /** 快速线路试了几次都没接上、停下来之后，用户点了"重试" */
+  retryRealtime(): void {
+    if (!this.onFastLine || this.realtime || this.realtimeAsked) return
+    window.clearTimeout(this.realtimeTimer)
+    this.realtimeFailures = 0
+    this.on.line?.('connecting')
+    this.requestRealtime()
+  }
+
+  /** 按用户选的线路（和被控端支不支持）把这边摆对。选择变了、被控端报上来支不支持的时候调 */
+  private applyTransport(): void {
+    if (this.onFastLine) {
+      if (this.line === 'relay') {
+        // 从标准线路换过来：中继那边的声音停掉，画面也不再解（见 onVideo）
+        this.audio?.close()
+        this.audio = null
+        this.setLine('connecting')
+      }
+      this.requestRealtime()
+      return
     }
+    if (this.line === 'relay') return
+    // 换到标准线路：收掉快速线路，中继这边从关键帧重新开始，声音也接回来
+    this.dropRealtime()
+    this.send(encode.setTransport(Transport.Relay))
+    this.setLine('relay')
+    this.needKey = true
+    if (this.wantAudio) this.setAudio(true)
+    else this.on.audio?.('off')
   }
 
   private requestRealtime(): void {
-    if (!this.wantRealtime || this.closed || !this.peer || !this.realtimeAvailable) return
-    if (this.line !== 'relay' || this.realtimeFailures > REALTIME_AUTO_RETRIES) return
+    if (!this.onFastLine || this.closed || !this.peer) return
+    // 已经在接了；或者试过几次停下来了（等用户点重试）
+    if (this.realtime || this.realtimeAsked || this.realtimeFailures > REALTIME_RETRY_DELAYS_MS.length) return
     // 页面在后台时不接：浏览器这时不回调"出了一帧"，接上了也等不到第一帧，白白算一次失败。回到前台再接（onVisibility）
     if (!pageVisible()) return
-    this.setLine('connecting')
+    this.realtimeAsked = true
     this.send(encode.setTransport(Transport.Realtime))
     window.clearTimeout(this.realtimeTimer)
     this.realtimeTimer = window.setTimeout(() => this.failRealtime('对方电脑没有回应'), REALTIME_REQUEST_TIMEOUT_MS)
@@ -247,21 +288,18 @@ export class RemoteClient {
 
   /** 被控端说它发布好了（或者重新发布了）：去拉流 */
   private pullRealtime(generation: number): void {
-    if (!this.wantRealtime || this.closed) {
+    if (!this.onFastLine || this.closed) {
       this.send(encode.setTransport(Transport.Relay))
       return
     }
     if (this.realtime && this.realtimeGeneration === generation) return
     this.dropRealtime()
     this.realtimeGeneration = generation
-    this.setLine('connecting')
     const realtime = new RemoteRealtime(this.sessionId, (video) => this.paint(video), {
       first: () => {
         if (this.realtime !== realtime) return
         window.clearTimeout(this.realtimeTimer)
-        // 从这一帧起画面和声音都从快速线路来：中继那边的解码器和声音停掉
-        this.audio?.close()
-        this.audio = null
+        this.realtimeFailures = 0
         realtime.setAudio(this.wantAudio)
         this.setLine('realtime')
         this.sendReport(realtime)
@@ -284,38 +322,36 @@ export class RemoteClient {
     })
   }
 
-  /** 快速线路不行了：回到中继，告诉被控端，过一会儿再试（次数有限） */
+  /**
+   * 快速线路没接上，或者接上以后断了：不换到标准线路。收掉这次的连接，把原因告诉页面，过一会儿重新接这条线路；
+   * 连着几次都不行就停下来，等用户点"重试"或者自己切到标准线路。
+   */
   private failRealtime(reason: string, tellAgent = true): void {
-    if (this.line === 'relay' && !this.realtime) return
+    // 用户已经切走了；或者这次失败已经算过了（两边各报一次）
+    if (!this.onFastLine || (!this.realtime && !this.realtimeAsked)) return
     this.dropRealtime()
     if (tellAgent) this.send(encode.setTransport(Transport.Relay))
     this.realtimeFailures++
-    this.setLine('relay', reason)
-    if (this.wantRealtime && this.realtimeFailures <= REALTIME_AUTO_RETRIES) {
-      this.realtimeTimer = window.setTimeout(() => this.requestRealtime(), 15_000 * this.realtimeFailures)
-    }
+    const delay = REALTIME_RETRY_DELAYS_MS[this.realtimeFailures - 1]
+    this.setLine('connecting', { reason, retrying: delay !== undefined })
+    if (delay !== undefined) this.realtimeTimer = window.setTimeout(() => this.requestRealtime(), delay)
   }
 
-  /** 收掉快速线路这边的东西；画面本来在那上面的话，中继这边从关键帧重新开始、声音也接回来 */
+  /** 收掉快速线路这边正在接 / 已经接上的连接 */
   private dropRealtime(): void {
     window.clearTimeout(this.realtimeTimer)
     window.clearInterval(this.reportTimer)
+    this.realtimeAsked = false
     const realtime = this.realtime
     this.realtime = null
     this.realtimeGeneration = -1
-    if (!realtime) return
-    const wasActive = realtime.active
-    realtime.close()
-    if (!wasActive || this.closed) return
-    this.needKey = true
-    if (this.wantAudio) this.setAudio(true)
-    else this.on.audio?.('off')
+    realtime?.close()
   }
 
-  private setLine(line: LineState, reason?: string): void {
-    if (this.line === line && !reason) return
+  private setLine(line: LineState, problem?: LineProblem): void {
+    if (this.line === line && !problem) return
     this.line = line
-    this.on.line?.(line, reason)
+    this.on.line?.(line, problem)
   }
 
   /** 快速线路出了一帧：画到同一块 canvas 上 */
@@ -335,9 +371,11 @@ export class RemoteClient {
       if (notice.type !== 'peer') return
       this.peer = !!notice.connected
       this.on.state?.(this.peer ? 'streaming' : 'waiting-agent')
-      // 对面换了一条连接（或者走了）：它那边的快速线路已经收掉，这边也回到中继
+      // 对面换了一条连接（或者走了）：它那边的快速线路已经收掉，这边的也收掉；等它回来再按选的线路接
       this.dropRealtime()
-      this.setLine('relay')
+      this.realtimeFailures = 0
+      this.line = this.onFastLine ? 'connecting' : 'relay'
+      this.on.line?.(this.line) // 之前提示过的问题也一并清掉
       if (this.peer) {
         // Agent（重新）连上：它会从关键帧开始；把这边选过的画质、显示器、要不要声音再告诉它一遍
         this.needKey = true
@@ -371,15 +409,12 @@ export class RemoteClient {
           }
         }
         this.on.config?.(f)
-        this.requestRealtime()
+        this.applyTransport()
         return
       case 'transport':
         if (f.state === TransportState.Realtime) this.pullRealtime(f.generation)
         else if (f.state === TransportState.RealtimeFailed) this.failRealtime(f.detail || '对方电脑接不上快速线路', false)
-        else if (this.line !== 'relay') {
-          this.dropRealtime()
-          this.setLine('relay')
-        }
+        // Relay：被控端回应"改回中继"（这边切到了标准线路，或者刚告诉它这条线路断了），不用再做什么
         return
       case 'video':
         this.onVideo(f.timestamp, f.key, f.data)
@@ -395,8 +430,8 @@ export class RemoteClient {
         this.send(encode.pong(f.sequence))
         return
       case 'audio':
-        // 画面已经在快速线路上：声音也从那边来，中继上晚到的这几包不放
-        if (!this.realtime?.active) this.audio?.push(f.codec, f.channels, f.timestamp, f.data)
+        // 选的是快速线路：声音只从那边来，中继上的不放
+        if (!this.onFastLine) this.audio?.push(f.codec, f.channels, f.timestamp, f.data)
         return
       case 'status':
         this.on.status?.(f.code, f.message)
@@ -409,8 +444,10 @@ export class RemoteClient {
 
   private onVideo(timestamp: number, key: boolean, data: Uint8Array): void {
     if (this.closed) return
-    if (this.realtime?.active) {
-      // 画面已经在快速线路上：中继上晚到的帧不解了，但照样确认（被控端的码率估计还在等它）
+    if (this.onFastLine) {
+      // 选的是快速线路：中继上的画面不解、不画（线路不自动换），但照样确认（被控端的码率估计还在等它）。
+      // 以后用户切到标准线路时，中继这边要从关键帧开始
+      this.needKey = true
       this.send(encode.frameAck(timestamp))
       return
     }
@@ -483,8 +520,8 @@ export class RemoteClient {
   private draw(frame: VideoFrame): void {
     try {
       this.send(encode.frameAck(Math.round(frame.timestamp / 1000)))
-      // 解到一半时画面切到了快速线路：这一帧不画（不然会闪回旧画面）
-      if (this.realtime?.active) return
+      // 解到一半时用户切到了快速线路：这一帧不画
+      if (this.onFastLine) return
       if (this.canvas.width !== frame.displayWidth || this.canvas.height !== frame.displayHeight) {
         this.canvas.width = frame.displayWidth
         this.canvas.height = frame.displayHeight

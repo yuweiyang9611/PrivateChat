@@ -102,6 +102,11 @@ public sealed class SessionRunner : IAsyncDisposable
 
     /// <summary>服务器能用快速线路、这台电脑也没关掉它：在 VideoConfig 里告诉控制端，由它决定用不用。</summary>
     private volatile bool _realtimeOffered;
+    /** 已经问过服务器这次能不能走快速线路（不管问没问到）。 */
+    private volatile bool _realtimeProbed;
+    /** 等上面那个结果最晚等到什么时候（会话时钟的毫秒数）：到点了就先按"没有快速线路"发配置。 */
+    private long _probeDeadline = long.MaxValue;
+    private const int ProbeWaitMs = 2000;
     private volatile bool _resendConfig;
     /// <summary>已经接通的快速线路；null 表示画面和声音只走中继。</summary>
     private volatile Line? _line;
@@ -168,7 +173,8 @@ public sealed class SessionRunner : IAsyncDisposable
         var ct = _cts.Token;
         var lastUp = DateTime.UtcNow;
         var delay = 500;
-        var probed = false;
+        // 一开始就问服务器这次能不能走快速线路，和连数据通道同时进行：采集线程要等这个结果才发第一份 VideoConfig
+        _ = ProbeRealtimeAsync(ct);
         try
         {
             while (!ct.IsCancellationRequested)
@@ -206,11 +212,6 @@ public sealed class SessionRunner : IAsyncDisposable
                 AgentLog.Info($"远程数据通道已连接：{Id}");
                 var connection = new Connection(socket);
                 _connection = connection;
-                if (!probed)
-                {
-                    probed = true;
-                    _ = ProbeRealtimeAsync(ct);
-                }
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 var sender = SendLoopAsync(connection, linked.Token);
                 var stats = StatsLoopAsync(linked.Token);
@@ -441,9 +442,11 @@ public sealed class SessionRunner : IAsyncDisposable
     /// <summary>问一次服务器这次远程能不能走快速线路；能的话补发一次 VideoConfig 告诉控制端。</summary>
     private async Task ProbeRealtimeAsync(CancellationToken ct)
     {
+        Interlocked.Exchange(ref _probeDeadline, _clock.ElapsedMilliseconds + ProbeWaitMs);
         if (Environment.GetEnvironmentVariable(RealtimeSwitchVariable)?.Trim().ToLowerInvariant() is "off" or "0" or "false")
         {
             AgentLog.Info($"快速线路已用环境变量 {RealtimeSwitchVariable} 关闭，画面只走中继");
+            _realtimeProbed = true;
             return;
         }
         try
@@ -451,13 +454,22 @@ public sealed class SessionRunner : IAsyncDisposable
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(TimeSpan.FromSeconds(10));
             using var api = new ServerApi(_server);
-            if (await api.GetRealtimeAsync(Id, timeout.Token) is not { Available: true }) return;
+            // 只问有没有（采集线程在等这个结果）；真要接的时候再要 ICE 服务器
+            var asked = _clock.ElapsedMilliseconds;
+            var offered = await api.GetRealtimeAsync(Id, timeout.Token, withIce: false) is { Available: true };
+            AgentLog.Info($"服务器{(offered ? "开了" : "没开")}快速线路（问了 {_clock.ElapsedMilliseconds - asked} ms）");
+            if (!offered) return;
             _realtimeOffered = true;
+            // 采集线程等到了这个结果的话，第一份配置里就带着；没等到（超过 2 秒）才需要补发
             _resendConfig = true;
         }
         catch (Exception ex)
         {
             if (!ct.IsCancellationRequested) AgentLog.Warn($"问不到服务器有没有快速线路，这次只走中继：{ex.Message}");
+        }
+        finally
+        {
+            _realtimeProbed = true;
         }
     }
 
@@ -755,6 +767,13 @@ public sealed class SessionRunner : IAsyncDisposable
                     Thread.Sleep(50);
                     continue;
                 }
+                // 第一份 VideoConfig 就要说清这次能不能走快速线路：控制端选了快速线路时只等那条线路的画面，
+                // 不先从中继出画面再换过去。问服务器一般几百毫秒；问不到也最多等 2 秒，之后问到了再补发一次配置
+                if (!_realtimeProbed && _clock.ElapsedMilliseconds < Interlocked.Read(ref _probeDeadline))
+                {
+                    Thread.Sleep(20);
+                    continue;
+                }
 
                 var preset = Presets[Math.Clamp(_quality, 0, Presets.Length - 1)];
                 var frameMs = 1000 / preset.Fps;
@@ -874,8 +893,9 @@ public sealed class SessionRunner : IAsyncDisposable
                 }
                 else if (_resendConfig)
                 {
-                    // 刚问到服务器有快速线路：补发一次配置，控制端才知道可以切过去
+                    // 问到服务器有快速线路时第一份配置已经发出去了（问得太慢，没等到）：补发一次，控制端才知道有这条线路
                     _resendConfig = false;
+                    AgentLog.Info("补发一次画面配置：服务器有快速线路");
                     Send(RemoteFrames.VideoConfig(new VideoConfigFrame(RemoteVideoCodec.H264, width, height, preset.Fps, screen.Index, Features())));
                 }
 

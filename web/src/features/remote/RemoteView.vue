@@ -6,7 +6,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, Close, EditPen, FullScreen, Headset } from '@element-plus/icons-vue'
 import { useFamilyStore } from '@/stores/family'
 import { useRemoteStore } from '@/stores/remote'
-import { RemoteClient, webCodecsSupported, type AudioState, type LineState, type LinkState, type RemoteStats } from './RemoteClient'
+import { RemoteClient, webCodecsSupported, type AudioState, type LineProblem, type LineState, type LinkState, type RemoteStats } from './RemoteClient'
 import { realtimeSupported } from './RemoteRealtime'
 import { audioSupported } from './RemoteAudio'
 import { encode, Features, MAX_TEXT_BYTES, modifiersOf, normalizePoint, Quality, scanCodeOf, SpecialKey, StatusCode, utf8Length, WheelAccumulator, type MonitorInfo, type QualityPreset } from './protocol'
@@ -40,11 +40,12 @@ const sound = ref(loadSound())
 const audioState = ref<AudioState>('off')
 /**
  * 画面和声音走哪条线路：快速（经 Cloudflare Realtime，不绕回家里的服务器）还是标准（经服务器中继）。
- * 记在这台设备上，默认快速；快速线路接不上会自己回到标准。
+ * 记在这台设备上，默认快速。两条线路之间不自动换：快速线路出了问题只提示（lineProblem），要不要切到标准线路由用户决定。
  */
 const LINE_KEY = 'remote.transport'
 const fast = ref(loadFast())
 const line = ref<LineState>('relay')
+const lineProblem = ref<LineProblem | null>(null)
 /** 已经排上去播放的声音（采样点数、最近的峰值）：端到端测试靠它确认真的解出了声音 */
 const audioInfo = ref({ scheduled: 0, peak: 0 })
 const fullscreen = ref(false)
@@ -149,6 +150,7 @@ watch(() => props.id, (id, old) => {
   features.value = 0
   audioState.value = 'off'
   line.value = 'relay'
+  lineProblem.value = null
   monitors.value = []
   stats.value = null
   blocked.value = null
@@ -173,6 +175,7 @@ function startClient(): void {
   audioState.value = 'off'
   audioInfo.value = { scheduled: 0, peak: 0 }
   line.value = 'relay'
+  lineProblem.value = null
   const c = new RemoteClient(props.id, canvas.value, {
     state: (s) => (link.value = s),
     config: (v) => {
@@ -202,14 +205,14 @@ function startClient(): void {
     },
     unsupported: () => (unsupported.value = true),
     audio: (s) => (audioState.value = s),
-    line: (s, reason) => {
+    line: (s, problem) => {
       line.value = s
-      // 快速线路接不上、中途断了：画面已经自己回到标准线路，告诉用户一声
-      if (reason) toast('warning', t('remote.viewer.lineFallback', { reason }))
+      // 快速线路接不上、中途断了：不自动换线路，把原因摆在画面上，由用户决定要不要切到标准线路
+      lineProblem.value = problem ?? null
     },
   })
   client = c
-  // 想走快速线路的话，等对方的程序报上来支持就自动去接
+  // 选的是快速线路的话，等对方的程序报上来支持就去接（只用这条线路）
   c.setTransport(fast.value)
   c.connect()
   void nextTick(() => stage.value?.focus())
@@ -276,6 +279,12 @@ function setFast(value: boolean): void {
     // 无痕窗口等存不了：这次会话里照样生效
   }
   client?.setTransport(value)
+  stage.value?.focus()
+}
+
+/** 快速线路试了几次没接上、停下来之后，再试一轮 */
+function retryFast(): void {
+  client?.retryRealtime()
   stage.value?.focus()
 }
 
@@ -597,6 +606,18 @@ watch(textOpen, (open) => {
         </div>
         <div v-else-if="link !== 'streaming' || !video" class="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-gray-300" data-testid="remote-link">
           {{ link === 'reconnecting' ? t('remote.viewer.reconnecting') : link === 'waiting-agent' ? t('remote.viewer.waitingAgent') : t('remote.viewer.connecting') }}
+        </div>
+        <!-- 选的是快速线路，但它还没接上 / 出了问题：这期间没有画面（不拿标准线路的顶上），在这里说明并给出手动切换的入口 -->
+        <div v-else-if="line === 'connecting'" class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center text-sm"
+          style="background: rgba(0, 0, 0, 0.55)" data-testid="remote-line-wait">
+          <template v-if="lineProblem">
+            <div data-testid="remote-line-problem">{{ t(lineProblem.retrying ? 'remote.viewer.lineProblemRetrying' : 'remote.viewer.lineProblem', { reason: lineProblem.reason }) }}</div>
+            <div class="pointer-events-auto flex gap-2">
+              <el-button v-if="!lineProblem.retrying" round size="small" data-testid="remote-line-retry" @click="retryFast">{{ t('remote.viewer.lineRetry') }}</el-button>
+              <el-button round size="small" type="primary" data-testid="remote-line-use-standard" @click="setFast(false)">{{ t('remote.viewer.lineUseStandard') }}</el-button>
+            </div>
+          </template>
+          <div v-else class="text-gray-300">{{ t('remote.viewer.lineConnecting') }}</div>
         </div>
       </template>
     </div>

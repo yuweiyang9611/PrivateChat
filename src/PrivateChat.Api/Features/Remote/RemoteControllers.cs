@@ -96,9 +96,9 @@ public sealed class RemoteSessionsController(RemoteService remote, RemoteRealtim
 
     // ---- 快速线路：画面和声音经 Cloudflare Realtime，不经我们的中继（见 RemoteRealtimeService）----
 
-    /// <summary>这台服务器能不能走快速线路，以及连 Cloudflare 用的 ICE 服务器。被控端和控制端都要先问。</summary>
+    /// <summary>这台服务器能不能走快速线路，以及连 Cloudflare 用的 ICE 服务器。被控端和控制端都要先问。ice=false 时只问能不能，不带 ICE 服务器。</summary>
     [HttpGet("{id:guid}/realtime")]
-    public Task<RemoteRealtimeInfo> Realtime(Guid id, CancellationToken ct) => realtime.InfoAsync(User, id, ct);
+    public Task<RemoteRealtimeInfo> Realtime(Guid id, CancellationToken ct, [FromQuery] bool ice = true) => realtime.InfoAsync(User, id, ice, ct);
 
     /// <summary>被控端 Agent 把画面和声音发布到快速线路：交 offer，拿 answer。</summary>
     [HttpPost("{id:guid}/realtime/publish")]

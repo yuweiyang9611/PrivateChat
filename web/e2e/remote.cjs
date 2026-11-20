@@ -8,7 +8,7 @@
 // 并强制用程序自带的 TLS 1.3（Windows 10 上的做法）——同一套用例再跑一遍，另外断言三条连接都是 TLS 1.3。
 // 加 --realtime：快速线路——画面和声音经 Cloudflare Realtime（这里是本机的假 SFU，e2e/fake-sfu.cjs，用 Edge 起），不经我们的中继。
 // 脚本先把 api 指到假 SFU 上重建；网页默认选标准线路（原有用例照旧在中继上跑），中间插一段专门测快速线路：
-// 切过去之后画面 / 声音 / 键鼠、中继上不再有画面帧、故意丢包靠重发补上、掐断后自动回到标准线路再自动接回、手动切回。
+// 切过去之后画面 / 声音 / 键鼠、中继上不再有画面帧、故意丢包靠重发补上、掐断后不换线路而是自己重新接上、接不上时提示并手动切到标准线路。
 // 不加 --realtime 时被控端用 PRIVATECHAT_AGENT_REALTIME=off 关掉快速线路：api 配着真的 Cloudflare 也不会去连。
 // 前提：compose 栈已启动，装有 Edge；用法：cd web && node e2e/remote.cjs [--agent-tls13] [--realtime]
 // 对着另一套 compose 栈跑：E2E_BASE（网页地址）、E2E_COMPOSE（docker compose 命令，带 -p / -f）
@@ -34,6 +34,8 @@ const FAKE_SFU_ENV = {
   CF_TURN_KEY_API_TOKEN: 'e2e-turn-token',
 }
 let sfu = null
+/** --realtime 时中途会故意把假 SFU 停掉：记下是什么时候（看 api 日志时要分前后） */
+let sfuStoppedAt = null
 /** 这个脚本起的被控端进程：出错退出时只收掉它们（不按进程名全杀，别的测试、这台电脑上真在用的被控端不受影响） */
 const agents = new Set()
 /** --agent-tls13 时：本机的 TLS 1.3 入口（被控端连它，它转给 compose 栈） */
@@ -210,6 +212,8 @@ async function moveOnCanvas(page, fx, fy) {
   const deviceId = await card.getAttribute('data-device-id')
 
   // ---- 远程控制（Agent 自动同意）----
+  // 提醒只显示几秒：发起之前就开始等，不然后面几步稍慢一点就错过了
+  const reminded = bob.locator('.el-notification', { hasText: '正在控制你的电脑' }).waitFor({ timeout: 30000 }).then(() => true, () => false)
   await card.locator('[data-testid=device-control]').click()
   await admin.waitForURL(/\/remote\//, { timeout: 10000 })
   const sessionId = admin.url().split('/remote/')[1]
@@ -219,7 +223,12 @@ async function moveOnCanvas(page, fx, fy) {
   const colors = { tl: await pixel(admin, 0.25, 0.2), tr: await pixel(admin, 0.75, 0.2), bl: await pixel(admin, 0.25, 0.8), br: await pixel(admin, 0.75, 0.8) }
   check('解码出的画面就是测试画面（左上红、右上绿、左下蓝、右下白）',
     near(colors.tl, [255, 0, 0]) && near(colors.tr, [0, 255, 0]) && near(colors.bl, [0, 0, 255]) && near(colors.br, [255, 255, 255]), colors)
-  check('爸爸收到"正在被远程"的提醒', await bob.locator('.el-notification', { hasText: '正在控制你的电脑' }).waitFor({ timeout: 10000 }).then(() => true, () => false))
+  check('爸爸收到"正在被远程"的提醒', await reminded)
+  if (REALTIME) {
+    // 第一份画面配置里就带着"有快速线路"（被控端等问到了才发），不是先发一份没有的、之后再补发
+    const asked = agent.out.match(/服务器开了快速线路（问了 (\d+) ms）/)
+    check('被控端问清了服务器有快速线路才发第一份画面配置（没有补发）', !!asked && !agent.out.includes('补发一次画面配置'), asked?.[0])
+  }
   check('爸爸的设备卡片上显示谁在远程', await bobCard.locator('[data-testid=device-session]', { hasText: '控制' }).waitFor({ timeout: 10000 }).then(() => true, () => false))
   check('Agent 显示红条', agent.out.includes('红条：正在被 admin 远程控制'))
   if (tls) {
@@ -345,23 +354,68 @@ async function moveOnCanvas(page, fx, fy) {
       sfuAfter.framesDecoded - sfuBefore.framesDecoded >= 20 && sfuAfter.nackCount > 0 && sfuAfter.pliCount === sfuBefore.pliCount && sfuAfter.frameWidth >= 960,
       { decoded: sfuAfter.framesDecoded - sfuBefore.framesDecoded, nack: sfuAfter.nackCount, lost: sfuAfter.packetsLost, pli: [sfuBefore.pliCount, sfuAfter.pliCount], freezes: sfuAfter.freezeCount, size: `${sfuAfter.frameWidth}x${sfuAfter.frameHeight}` })
 
-    // 掐掉 SFU 上网页这一头的连接：网页收不到画面，自己回到标准线路并告诉用户；会话不断
-    const subscriber = (await sfu.summary()).find((s) => s.pulled > 0 && s.state === 'connected')
+    // ---- 线路不自动换：快速线路出了问题只提示，重新接的也是这条线路；换到标准线路只能是用户自己点 ----
+    const lineProblem = admin.locator('[data-testid=remote-line-problem]')
+    const ended = () => admin.locator('[data-testid=remote-ended]').isVisible().catch(() => false)
+    /** 假 SFU 上网页这一头现在连着的那条（之前的窗口留下的旧连接可能还没来得及显示成断开：取最新的） */
+    const liveSubscriber = async () => (await sfu.summary()).filter((s) => s.pulled > 0 && s.state === 'connected').at(-1)
+
+    // 默认线路：一个从没选过线路的浏览器接手这次远程——默认就是快速线路，而且从头到尾只画这条线路的画面，
+    // 不先出标准线路的再换过去（中继上这期间有画面帧过来，不解不画）
+    const freshCtx = await browser.newContext({ ...opts, storageState: { cookies: (await adminCtx.storageState()).cookies, origins: [] } })
+    await freshCtx.addInitScript(() => {
+      const original = CanvasRenderingContext2D.prototype.drawImage
+      window.__draws = { relay: 0, fast: 0 }
+      CanvasRenderingContext2D.prototype.drawImage = function (source, ...rest) {
+        if (source instanceof HTMLVideoElement) window.__draws.fast++
+        else window.__draws.relay++ // 中继的画面是 WebCodecs 解出来的 VideoFrame
+        return original.call(this, source, ...rest)
+      }
+    })
+    const fresh = await freshCtx.newPage()
+    let freshRelayFrames = 0
+    fresh.on('websocket', (ws) => {
+      if (!ws.url().endsWith('/controller')) return
+      ws.on('framereceived', ({ payload }) => {
+        if (Buffer.isBuffer(payload) && payload[0] === 0x02) freshRelayFrames++
+      })
+    })
+    await fresh.goto(admin.url())
+    await admin.locator('[data-testid=remote-replaced]').waitFor({ timeout: 15000 })
+    const freshLine = () => fresh.locator('[data-testid=remote-stats]').getAttribute('data-line', { timeout: 500 }).catch(() => null)
+    const freshFast = await until(async () => (await freshLine()) === 'realtime', 30000)
+    await sleep(1500)
+    const draws = await fresh.evaluate(() => window.__draws)
+    const stored = await fresh.evaluate(() => localStorage.getItem('remote.transport'))
+    check('没选过线路的浏览器默认走快速线路，从头只画这条线路的画面（中继上来的画面帧不画）',
+      !!freshFast && draws.fast > 0 && draws.relay === 0 && freshRelayFrames > 0 && stored === null,
+      { line: await freshLine(), draws, relayFramesIgnored: freshRelayFrames, stored })
+    // 回到原来的窗口（它选的也是快速线路）：按它的选择重新接上
+    await admin.locator('[data-testid=remote-take-over]').click()
+    await fresh.locator('[data-testid=remote-replaced]').waitFor({ timeout: 15000 })
+    await freshCtx.close()
+    const backOnFast = await until(async () => (await lineNow()) === 'realtime', 30000)
+    check('原来的窗口接手回来，按它选的快速线路重新接上', !!backOnFast && (await until(async () => (await fpsNow()) >= 5, 10000)) !== null, { line: await lineNow() })
+
+    // 掐掉 SFU 上网页这一头的连接：网页收不到画面，不拿中继的顶上；画面上说明原因，自己重新接上；会话不断
+    const subscriber = await liveSubscriber()
     await sfu.drop(subscriber.id)
-    const fellBack = await until(async () => (await lineNow()) === 'relay', 20000)
-    const told = await admin.locator('.el-message', { hasText: '快速线路用不了' }).first().waitFor({ timeout: 5000 }).then(() => true, () => false)
-    const relayAgain = await until(async () => (await fpsNow()) >= 5, 10000)
-    const before = relayed.video
-    await sleep(1000)
-    check('快速线路断了：自动回到标准线路，提示一声，画面接着从中继来，会话不断',
-      !!fellBack && told && !!relayAgain && relayed.video > before && !(await admin.locator('[data-testid=remote-ended]').isVisible().catch(() => false)),
-      { fellBack: !!fellBack, told, relayFrames: relayed.video - before })
-    const backToFast = await until(async () => (await lineNow()) === 'realtime', 40000)
-    check('过一会儿自动重新接上快速线路', !!backToFast && (await until(async () => (await fpsNow()) >= 5, 10000)) !== null, { line: await lineNow() })
+    const broke = await until(async () => (await lineNow()) === 'connecting', 20000, 100)
+    const toldText = await lineProblem.waitFor({ timeout: 5000 }).then(() => lineProblem.textContent(), () => '')
+    const seen = new Set()
+    const reconnected = await until(async () => {
+      const now = await lineNow()
+      seen.add(now)
+      return now === 'realtime'
+    }, 40000, 100)
+    check('快速线路断了：不换到标准线路，画面上说明原因，自己重新接上这条线路，会话不断',
+      !!broke && toldText.includes('快速线路接不上') && !!reconnected && !seen.has('relay')
+        && (await until(async () => (await fpsNow()) >= 5, 10000)) !== null && (await lineProblem.count()) === 0 && !(await ended()),
+      { broke: !!broke, told: toldText, reconnected: !!reconnected, lines: [...seen] })
 
     // 页面进了后台（切到别的标签页、窗口被盖住）：浏览器不再回调"出了一帧"，这段时间不能算成"没有画面"；
-    // 线路要是真断了，后台时不去重连（接上了也等不到第一帧，白算一次失败），回到前台马上接。
-    // 无界面浏览器做不出真正的后台，这里只让页面"以为"自己在后台：验证的是后台时不重连、回前台就接这两步
+    // 线路要是真断了，后台时不去重新接（接上了也等不到第一帧，白算一次失败），回到前台马上接。
+    // 无界面浏览器做不出真正的后台，这里只让页面"以为"自己在后台：验证的是后台时不接、回前台就接这两步
     const setHidden = (hidden) => admin.evaluate((hidden) => {
       Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (hidden ? 'hidden' : 'visible') })
       document.dispatchEvent(new Event('visibilitychange'))
@@ -369,25 +423,24 @@ async function moveOnCanvas(page, fx, fy) {
     await setHidden(true)
     await sleep(9000) // 比"7 秒没有画面算断"长：在后台待着本身不会把线路判成断了
     const stayed = (await lineNow()) === 'realtime'
-    const subscriber2 = (await sfu.summary()).find((s) => s.pulled > 0 && s.state === 'connected')
+    const subscriber2 = await liveSubscriber()
     await sfu.drop(subscriber2.id)
-    const fellBack2 = await until(async () => (await lineNow()) === 'relay', 45000)
-    await sleep(33000) // 第二次失败后 30 秒会自动再试：页面在后台，不试
-    const waited = (await lineNow()) === 'relay'
+    const broke2 = await until(async () => (await lineNow()) === 'connecting', 45000)
+    await sleep(8000) // 断了之后 2 秒就会重新接：页面在后台，不接
+    const waited = (await lineNow()) === 'connecting'
     await setHidden(false)
-    const resumed = await until(async () => (await lineNow()) === 'realtime', 10000)
-    check('页面在后台：待着不算断线；线路真断了不在后台重连，回到前台马上接上',
-      stayed && !!fellBack2 && waited && !!resumed && (await until(async () => (await fpsNow()) >= 5, 10000)) !== null,
-      { stayed, fellBack: !!fellBack2, waitedInBackground: waited, resumed: !!resumed, line: await lineNow() })
+    const resumed = await until(async () => (await lineNow()) === 'realtime', 15000)
+    check('页面在后台：待着不算断线；线路真断了不在后台重新接，回到前台马上接上',
+      stayed && !!broke2 && waited && !!resumed && (await until(async () => (await fpsNow()) >= 5, 10000)) !== null,
+      { stayed, broke: !!broke2, waitedInBackground: waited, resumed: !!resumed, line: await lineNow() })
 
-    // 手动切回标准线路：被控端收掉快速线路，画面回到中继；后面的用例都在中继上跑
-    await admin.locator('.el-message').first().waitFor({ state: 'detached', timeout: 10000 }).catch(() => undefined)
-    const mark = agent.out.length
+    // 手动切到标准线路（工具栏）：被控端收掉快速线路，画面和声音回到中继，不再去接快速线路
+    let mark = agent.out.length
     await admin.locator('[data-testid=remote-line-standard]').click()
     const standard = await until(async () => (await lineNow()) === 'relay' && agent.out.slice(mark).includes('控制端要求改回中继'), 10000)
     const before2 = relayed.video
     await sleep(1500)
-    check('手动切回标准线路：画面回到中继，不再去接快速线路',
+    check('手动切到标准线路：画面回到中继，不再去接快速线路',
       !!standard && relayed.video > before2 && (await fpsNow()) >= 5 && !agent.out.slice(mark).includes('控制端要走快速线路'), { line: await lineNow(), relayFrames: relayed.video - before2 })
     const soundBack = await until(async () => {
       const a = await audioNow()
@@ -396,7 +449,54 @@ async function moveOnCanvas(page, fx, fy) {
     check('回到标准线路后声音也回到中继', !!soundBack, soundBack ?? (await audioNow()))
     // 快速线路上因为码率低降过的分辨率，回到中继后按中继自己的情况重新判断
     const fullSize = await until(async () => (await canvasSize(admin)) === '1280x720', 10000)
-    check('回到标准线路后画面是原来的 1280×720', !!fullSize, await canvasSize(admin))
+    check('回到标准线路后画面是原来的 1280×720', !!fullSize,
+      { size: await canvasSize(admin), agent: agent.out.slice(mark).match(/(编码 \d+x\d+|目标码率 \d+ kbps)[^\r\n]*/g)?.slice(-6) })
+    // 再手动切回快速线路：后面要看它彻底接不上时怎么办
+    await lineSwitch.click()
+    const fastAgain = await until(async () => (await lineNow()) === 'realtime', 25000)
+    check('手动切回快速线路：重新接上', !!fastAgain && (await until(async () => (await fpsNow()) >= 5, 10000)) !== null, { line: await lineNow() })
+
+    // 快速线路根本接不上了（把假 SFU 停掉，相当于服务器连不上 Cloudflare）：重新接几次都不行就停下来，
+    // 画面上给出"重试"和"切到标准线路"。这期间中继上有画面帧过来，但不画——线路不自动换
+    await sfu.close()
+    sfu = null
+    sfuStoppedAt = new Date().toISOString()
+    const broke3 = await until(async () => (await lineNow()) === 'connecting', 40000)
+    const relayBefore = relayed.video
+    const noPicture = await until(async () => (await fpsNow()) === 0, 15000)
+    const retry = admin.locator('[data-testid=remote-line-retry]')
+    const seen3 = new Set()
+    const gaveUp = await until(async () => {
+      seen3.add(await lineNow())
+      return (await retry.count()) > 0
+    }, 120000, 250)
+    const stillNoPicture = (await fpsNow()) === 0
+    check('快速线路接不上：不自动换到标准线路（中继上有画面帧来也不画），试几次之后停下来等用户决定，会话不断',
+      !!broke3 && !!noPicture && !!gaveUp && stillNoPicture && relayed.video > relayBefore && !seen3.has('relay') && !seen3.has('realtime') && !(await ended()),
+      { broke: !!broke3, noPicture: !!noPicture, gaveUp: !!gaveUp, relayFramesIgnored: relayed.video - relayBefore, lines: [...seen3], told: await lineProblem.textContent().catch(() => '') })
+    // 点"重试"：再接一轮（还是接不上），线路仍然没有自己换
+    mark = agent.out.length
+    await retry.click()
+    const retried = await until(() => agent.out.slice(mark).includes('控制端要走快速线路'), 10000)
+    const failedAgain = await until(async () => (await lineProblem.count()) > 0 && (await lineProblem.textContent()).includes('正在重新接'), 20000)
+    check('点"重试"：重新去接快速线路，接不上照样只是提示', !!retried && !!failedAgain && (await lineNow()) === 'connecting',
+      { retried: !!retried, told: await lineProblem.textContent().catch(() => ''), line: await lineNow() })
+
+    // 点画面上的"切到标准线路"：画面回到中继，记住这个选择，不再去接快速线路；后面的用例都在中继上跑
+    mark = agent.out.length
+    await admin.locator('[data-testid=remote-line-use-standard]').click()
+    const standardNow = await until(async () => (await lineNow()) === 'relay', 10000)
+    const picture = await until(async () => (await fpsNow()) >= 5, 15000)
+    await sleep(6000) // 之前排着的"重新接"不能再生效
+    check('快速线路接不上时点"切到标准线路"：画面回到中继，记住了这个选择，不再去接快速线路',
+      !!standardNow && !!picture && (await lineNow()) === 'relay' && (await admin.locator('[data-testid=remote-line-wait]').count()) === 0
+        && (await admin.evaluate(() => localStorage.getItem('remote.transport'))) === 'relay' && !agent.out.slice(mark).includes('控制端要走快速线路'),
+      { line: await lineNow(), fps: await fpsNow(), stored: await admin.evaluate(() => localStorage.getItem('remote.transport')) })
+    const soundAfter = await until(async () => {
+      const a = await audioNow()
+      return a.state === 'playing' && a.peak > 0.1 ? a : null
+    }, 10000)
+    check('这样切到标准线路后声音也回到中继', !!soundAfter, soundAfter ?? (await audioNow()))
   }
 
   // 同一会话在另一个静音窗口接手，再回到原窗口。检查线上的声音帧，而非只看按钮。
@@ -663,7 +763,12 @@ async function moveOnCanvas(page, fx, fy) {
     agent.proc.kill()
   }
 
-  const errors = execSync(`${COMPOSE} logs api --since ${startedAt}`, { maxBuffer: 256 * 1024 * 1024 }).toString().split('\n').filter((l) => /\bERR\b|Unhandled|Exception/.test(l))
+  const apiLog = (range) => execSync(`${COMPOSE} logs api ${range}`, { maxBuffer: 256 * 1024 * 1024 }).toString().split('\n')
+  // 假 SFU 被故意停掉之后，api 去关 Cloudflare 那边的轨道会连不上（带堆栈的警告），被控端每次重新发布都是 502：都属于预期。
+  // 那之后只看有没有别的错误
+  const errors = sfuStoppedAt
+    ? [...apiLog(`--since ${startedAt} --until ${sfuStoppedAt}`).filter((l) => /\bERR\b|Unhandled|Exception/.test(l)), ...apiLog(`--since ${sfuStoppedAt}`).filter((l) => /\bERR\b|Unhandled/.test(l) && !/realtime\/publish responded 502/.test(l))]
+    : apiLog(`--since ${startedAt}`).filter((l) => /\bERR\b|Unhandled|Exception/.test(l))
   check('api 日志没有错误', errors.length === 0, errors.slice(0, 3))
 
   await browser.close()
