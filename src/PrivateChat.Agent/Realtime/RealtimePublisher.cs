@@ -20,7 +20,10 @@ public sealed class RealtimePublisher : IDisposable
     private const int VideoPayloadType = 96;
     private const int AudioPayloadType = 111;
     private const int VideoClock = 90000;
-    /// <summary>自己留着准备补发的包数（2 的幂）。20 fps、每帧十来个包时大约是最近 5 秒。</summary>
+    /// <summary>
+    /// 自己留着准备补发的包数（2 的幂）。按包数算，所以能补多久看每秒发多少包：码率低时是最近几秒，
+    /// 清晰档跑满 6 Mbps（每秒八九百个包）时只有一秒多，比下面的 2 秒短——那时更早的包本来也该改要关键帧了。
+    /// </summary>
     private const int ResendSlots = 1024;
     /// <summary>发出去超过这么久的包不再补发：对面早就改要关键帧了。</summary>
     private const long ResendWindowMs = 2000;
@@ -47,7 +50,7 @@ public sealed class RealtimePublisher : IDisposable
     public event Action<RealtimeLinkState>? StateChanged;
     /// <summary>排查用：对面要重发、要关键帧、报丢包时各说一句（平时是 null，什么都不记）。</summary>
     public Action<string>? Trace { get; set; }
-    /// <summary>排查用：连每一帧发了哪些包也记（一秒二十行，只在要对包的时候开）。</summary>
+    /// <summary>排查用：连每一帧发了哪些包也记（一秒最多三十行，只在要对包的时候开）。</summary>
     public bool TraceFrames { get; set; }
 
     public RealtimePublisher(IReadOnlyList<RemoteIceServer> iceServers)

@@ -34,7 +34,7 @@ public interface IRateController
 ///   多等的时间里扣掉按目标码率本来就该花的传输时间，所以一个大帧不会被误判成拥塞。
 ///   "本来的往返时间"有两个：线路本身的（小探测包量，它不带画面），和一帧画面从发出到确认的（小帧量，比前者多出控制端解码、
 ///   画出来的时间）。判断拥塞用后一个：手机解码慢是每一帧都慢，不是网络堵了，不能因此把码率压下去。
-/// - 降：连续两次多等超过阈值就降到实测送达速率的九成（最少降两成；刚开始还在试探时降多少都行，之后一次最多降一半）；
+/// - 降：连续多等超过阈值（至少两次、持续 100 ms 以上）就降到实测送达速率的九成（最少降两成；刚开始还在试探时降多少都行，之后一次最多降一半）；
 ///   降过之后要等"降速之后发的帧"的确认回来才会再降。只看一次不算：解码器刚启动时第一帧会慢几百毫秒。
 /// - 在途的帧数也有上限（按往返时间算，够它本来该有的再多几帧）：控制端解码跟不上时，发得再小也没用，只能少发。
 /// - 升：只有真的把码率用起来过（发过够大的帧）而且没有多等，才每秒往上试一步；画面一直不动时不升——没有证据。
@@ -53,6 +53,16 @@ public sealed class NetworkEstimator : IRateController
     private const int ProbeMs = 60;
     /// <summary>按目标码率算传输时间不超过这么多的帧算"小帧"：它的往返时间里基本没有传输时间，可以当画面往返的基准。</summary>
     private const int SmallFrameMs = 30;
+    /// <summary>
+    /// 确认连着晚、而且晚了这么久才算拥塞。以前每秒 20 帧时"连着两次"本身就跨了 50 ms 以上；
+    /// 30 帧时两次只隔 33 ms，控制端那边处理一帧忽快忽慢（旧手机、页面忙）就会连成两次，码率被冤枉地一次次往下降。
+    /// 真堵的时候排队是一直涨的，多等这几十毫秒不影响。
+    /// </summary>
+    private const int OveruseForMs = 100;
+    /// <summary>控制端说它解码跟不上时，这么久以内降的码率算冤枉的（它要一两秒才看得出自己跟不上）。</summary>
+    private const int ForgiveWindowMs = 5000;
+    /// <summary>……之后这么久里确认来得晚也不降码率：控制端那里排着的帧要一会儿才消得下去。</summary>
+    private const int DrainMs = 3000;
 
     private readonly Lock _gate = new();
     private readonly Queue<Sent> _inFlight = new();
@@ -67,6 +77,8 @@ public sealed class NetworkEstimator : IRateController
     private int _minFramePrev = int.MaxValue;
     private int _lastRttMs;
     private int _overuseStreak;
+    /// <summary>这一串"多等超过阈值"是从什么时候开始的。</summary>
+    private long _overuseSince;
     private long _lastOveruseAt = long.MinValue / 2;
     private long _lastDecreaseAt = long.MinValue / 2;
     private long _lastIncreaseAt;
@@ -75,6 +87,9 @@ public sealed class NetworkEstimator : IRateController
     private long _ackedBytes;
     private double _rateSampleKbps;
     private long _rateSampleAt = long.MinValue / 2;
+    /// <summary>最近几次降码率：什么时候、降之前是多少（控制端说它跟不上时用来补回来）。</summary>
+    private readonly Queue<(long At, double Before)> _decreases = new();
+    private long _forgiveUntil = long.MinValue / 2;
 
     private readonly record struct Sent(uint Ts, long At, int Bytes, int ModelDelayMs, long AckedBytesAtSend);
 
@@ -182,11 +197,17 @@ public sealed class NetworkEstimator : IRateController
 
             var excess = rtt - FrameBase - frame.ModelDelayMs;
             var threshold = Threshold(minRtt);
-            if (excess > threshold)
+            if (nowMs < _forgiveUntil)
             {
-                _overuseStreak++;
+                // 控制端刚说过它解码跟不上：现在确认晚是它那里排着的帧还没消完，不算拥塞，也不拿来往上试
+                _overuseStreak = 0;
+            }
+            else if (excess > threshold)
+            {
+                if (_overuseStreak++ == 0) _overuseSince = nowMs;
                 _lastOveruseAt = nowMs;
-                if (_overuseStreak >= 2 && frame.At >= _lastDecreaseAt) Decrease(nowMs);
+                // 连着晚、而且晚了有一阵（按时间算，不按帧数：帧率高时两次确认只隔 33 ms，控制端那边偶尔慢一下就连成了两次）
+                if (_overuseStreak >= 2 && nowMs - _overuseSince >= OveruseForMs && frame.At >= _lastDecreaseAt) Decrease(nowMs);
             }
             else
             {
@@ -196,8 +217,30 @@ public sealed class NetworkEstimator : IRateController
         }
     }
 
+    /// <summary>
+    /// 控制端说它自己解码 / 画画跟不上（请这边少发几帧，MaxFps）：
+    /// 最近几秒里因为"确认来得晚"降的码率是冤枉的——晚是它在排队解码，不是网络堵——补回来；
+    /// 它那里排着的帧消下去之前，确认晚也不再降。帧率由采集循环按它说的降。
+    /// </summary>
+    public void ReceiverWasBehind(long nowMs)
+    {
+        lock (_gate)
+        {
+            while (_decreases.TryPeek(out var d) && nowMs - d.At > ForgiveWindowMs) _decreases.Dequeue();
+            if (_decreases.TryPeek(out var first)) _targetKbps = Math.Min(_maxKbps, Math.Max(_targetKbps, first.Before));
+            _decreases.Clear();
+            _overuseStreak = 0;
+            _forgiveUntil = nowMs + DrainMs;
+            // 补回来的码率先别再往上加：之前攒下的"可以往上试"作废，排着的帧消完之前也不试
+            _probeOk = false;
+            _lastOveruseAt = nowMs + DrainMs;
+        }
+    }
+
     private void Decrease(long nowMs)
     {
+        _decreases.Enqueue((nowMs, _targetKbps));
+        while (_decreases.Count > 32) _decreases.Dequeue();
         var next = _targetKbps * 0.8;
         if (nowMs - _rateSampleAt < 1500) next = Math.Clamp(_rateSampleKbps * 0.9, _slowStart ? _minKbps : _targetKbps * 0.5, _targetKbps * 0.8);
         _targetKbps = Math.Max(_minKbps, next);
@@ -290,6 +333,8 @@ public sealed class NetworkEstimator : IRateController
             _minFrameCur = _minFramePrev = int.MaxValue;
             _virtualFreeMs = 0;
             _probeOk = false;
+            _decreases.Clear();
+            _forgiveUntil = long.MinValue / 2;
         }
     }
 }

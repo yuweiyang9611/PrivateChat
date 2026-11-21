@@ -1,6 +1,7 @@
 import { codecFromAnnexB, encode, Features, parseAgentFrame, Transport, TransportState, type MonitorInfo, type QualityPreset } from './protocol'
 import { RemoteAudio } from './RemoteAudio'
 import { RemoteRealtime, pageVisible, realtimeSupported } from './RemoteRealtime'
+import { FrameRateGovernor } from './FrameRateGovernor'
 
 /** 浏览器能不能解 H.264：要 WebCodecs（Chrome / Edge 94+、Safari 16.4+、Firefox 130+） */
 export function webCodecsSupported(): boolean {
@@ -65,6 +66,12 @@ export class RemoteClient {
   private retry = 0
   private retryTimer: number | undefined
   private statsTimer: number | undefined
+  /** 中继线路上这边解码跟不上时，请被控端少发几帧（见 FrameRateGovernor） */
+  private readonly governor = new FrameRateGovernor()
+  private governorTimer: number | undefined
+  private probeTimer: number | undefined
+  /** 量主线程排队多久：往自己的消息队列里投一条，看它等了多久才轮到 */
+  private readonly probeChannel = new MessageChannel()
   private decodedThisSecond = 0
   private decodedLastSecond = 0
   private readonly ctx: CanvasRenderingContext2D | null
@@ -98,11 +105,17 @@ export class RemoteClient {
     this.on = on
     this.ctx = canvas.getContext('2d', { alpha: false })
     document.addEventListener('visibilitychange', this.onVisibility)
+    this.probeChannel.port1.onmessage = (e: MessageEvent<number>) => {
+      const now = performance.now()
+      this.governor.probe(now, now - e.data, this.decoder?.decodeQueueSize ?? 0)
+    }
   }
 
-  /** 页面回到前台：在后台时没去接（重新接）的快速线路，现在接 */
+  /** 页面回到前台：在后台时没去接（重新接）的快速线路，现在接；在后台时的帧率判断不作数，先缓一缓 */
   private readonly onVisibility = (): void => {
-    if (pageVisible()) this.requestRealtime()
+    if (!pageVisible()) return
+    this.governor.hold(performance.now(), 2000)
+    this.requestRealtime()
   }
 
   connect(): void {
@@ -139,6 +152,19 @@ export class RemoteClient {
       this.decodedLastSecond = this.decodedThisSecond
       this.decodedThisSecond = 0
     }, 1000)
+    window.clearInterval(this.governorTimer)
+    this.governorTimer = window.setInterval(() => this.govern(), 500)
+    window.clearInterval(this.probeTimer)
+    this.probeTimer = window.setInterval(() => {
+      if (this.peer && !this.onFastLine && pageVisible()) this.probeChannel.port2.postMessage(performance.now())
+    }, 100)
+  }
+
+  /** 中继线路上看看这边跟不跟得上；跟不上就请被控端每秒少发几帧，一直很轻松再放开（页面在后台时不看） */
+  private govern(): void {
+    if (!this.peer || this.onFastLine || !pageVisible()) return
+    const cap = this.governor.tick(performance.now(), this.fps)
+    if (cap !== null) this.send(encode.maxFps(cap))
   }
 
   close(): void {
@@ -147,6 +173,10 @@ export class RemoteClient {
     document.removeEventListener('visibilitychange', this.onVisibility)
     window.clearTimeout(this.retryTimer)
     window.clearInterval(this.statsTimer)
+    window.clearInterval(this.governorTimer)
+    window.clearInterval(this.probeTimer)
+    this.probeChannel.port1.close()
+    this.probeChannel.port2.close()
     const ws = this.ws
     this.ws = null
     if (ws && ws.readyState <= WebSocket.OPEN) ws.close(1000)
@@ -262,6 +292,9 @@ export class RemoteClient {
         this.audio?.close()
         this.audio = null
         this.setLine('connecting')
+        // 为中继这边解码请对方少发的帧数，快速线路上不作数（那边不靠这边确认）
+        const uncapped = this.governor.reset()
+        if (uncapped !== null) this.send(encode.maxFps(uncapped))
       }
       this.requestRealtime()
       return
@@ -272,6 +305,7 @@ export class RemoteClient {
     this.send(encode.setTransport(Transport.Relay))
     this.setLine('relay')
     this.needKey = true
+    this.governor.hold(performance.now(), 2000)
     if (this.wantAudio) this.setAudio(true)
     else this.on.audio?.('off')
   }
@@ -381,6 +415,8 @@ export class RemoteClient {
       this.on.state?.(this.peer ? 'streaming' : 'waiting-agent')
       // 对面换了一条连接（或者走了）：它那边的快速线路已经收掉，这边的也收掉；等它回来再按选的线路接
       this.dropRealtime()
+      // 它那边请求过的帧率上限也作废了：从头看
+      this.governor.reset()
       this.realtimeFailures = 0
       this.line = this.onFastLine ? 'connecting' : 'relay'
       this.on.line?.(this.line) // 之前提示过的问题也一并清掉
@@ -390,6 +426,9 @@ export class RemoteClient {
         if (this.quality !== null) this.send(encode.setQuality(this.quality))
         if (this.monitor !== null) this.send(encode.selectMonitor(this.monitor))
         this.send(encode.setAudio(this.wantAudio))
+        // 告诉它这边跟不上时会说（MaxFps，现在不限）：被控端 0.8.4 起收到过这一条才按最高 30 帧发，
+        // 没收到（还没更新的旧页面）就照旧按 20 / 15 帧发，免得旧页面在慢设备上跟不上又说不出来
+        this.send(encode.maxFps(0))
         // 要不要走快速线路等它的 VideoConfig 来了再说（里面有它支不支持）
       }
     } catch {
@@ -477,6 +516,7 @@ export class RemoteClient {
       return
     }
     try {
+      this.governor.received(timestamp, performance.now(), this.decoder.decodeQueueSize)
       this.decoder.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: timestamp * 1000, data }))
     } catch {
       this.dropDecoder()
@@ -504,6 +544,8 @@ export class RemoteClient {
       // 编码器按 Annex B 输出（SPS/PPS 在关键帧里），不需要 description
       decoder.configure({ codec, optimizeForLatency: true })
       this.decoder = decoder
+      // 解码器刚建好，头几帧本来就慢
+      this.governor.hold(performance.now(), 2000)
       this.codec = codec
     } catch {
       this.close()
@@ -527,7 +569,9 @@ export class RemoteClient {
 
   private draw(frame: VideoFrame): void {
     try {
-      this.send(encode.frameAck(Math.round(frame.timestamp / 1000)))
+      const timestamp = Math.round(frame.timestamp / 1000)
+      this.governor.decoded(timestamp, performance.now())
+      this.send(encode.frameAck(timestamp))
       // 解到一半时用户切到了快速线路：这一帧不画
       if (this.onFastLine) return
       if (this.canvas.width !== frame.displayWidth || this.canvas.height !== frame.displayHeight) {

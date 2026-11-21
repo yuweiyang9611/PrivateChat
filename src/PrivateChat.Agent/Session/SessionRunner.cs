@@ -28,10 +28,16 @@ namespace PrivateChat.Agent.Session;
 public sealed class SessionRunner : IAsyncDisposable
 {
     /// <summary>画质档位。MaxKbps 是码率上限（实际用多少看网络和画面），Ceiling 是静止后补到的质量。</summary>
-    private readonly record struct Preset(int MaxWidth, int MaxHeight, int Fps, int MaxKbps, int Ceiling);
+    /// <summary>LegacyFps：控制端没说过它会在跟不上时告诉这边（还没更新的旧网页）时用的帧率，就是以前的帧率。</summary>
+    private readonly record struct Preset(int MaxWidth, int MaxHeight, int Fps, int LegacyFps, int MaxKbps, int Ceiling);
 
-    /// <summary>流畅：最大 1280×800、20 fps、上限 2.5 Mbps、质量 70（QP 24）；清晰：最大 1920×1200、15 fps、上限 6 Mbps、质量 85（QP 20）。</summary>
-    private static readonly Preset[] Presets = [new(1280, 800, 20, 2500, 70), new(1920, 1200, 15, 6000, 85)];
+    /// <summary>
+    /// 流畅：最大 1280×800、最高 30 fps、上限 2.5 Mbps、质量 70（QP 24）；清晰：最大 1920×1200、最高 30 fps、上限 6 Mbps、质量 85（QP 20）。
+    /// 30 帧是上限：画面不动时不发，变化大时码率预算不够也会少发；控制端跟不上时它会请这边少发（MaxFps）。
+    /// 控制端得先说一声它会这么做（连上后发一个 MaxFps），才按 30 帧发；没说过的（还没更新的旧网页）照旧按 20 / 15 帧：
+    /// 旧网页在慢设备上跟不上 30 帧又说不出来，中继线路会把它的确认来得晚当成网络堵，码率越压越低。
+    /// </summary>
+    private static readonly Preset[] Presets = [new(1280, 800, 30, 20, 2500, 70), new(1920, 1200, 30, 15, 6000, 85)];
     private const int MinKbps = 100;
     private const int StartKbps = 600;
     /// <summary>
@@ -42,8 +48,10 @@ public sealed class SessionRunner : IAsyncDisposable
     private static readonly (int Width, int Height) WeakSize = (960, 600);
     private const int WeakBelowKbps = 400;
     private const int WeakAboveKbps = 900;
-    /// <summary>编码器不接受"按质量"时的老办法：变化停止后再补这么多帧，让固定码率的编码器把画质补上来。</summary>
-    private const int FallbackRefineFrames = 8;
+    /// <summary>编码器不接受"按质量"时的老办法：变化停止后这么久里继续出帧，让固定码率的编码器把画质补上来（按时间算，不随帧率变）。</summary>
+    private const int FallbackRefineMs = 400;
+    /// <summary>控制端请求的每秒最多几帧（MaxFps）：-1 = 它没说过（旧网页，按老帧率），0 = 不限，其余是上限。换了控制端就作废。</summary>
+    private volatile int _clientMaxFps = -1;
     private static readonly TimeSpan ReconnectWindow = TimeSpan.FromSeconds(30);
 
     /// <summary>设成 off 就不用快速线路（画面和声音只走中继）。</summary>
@@ -313,6 +321,8 @@ public sealed class SessionRunner : IAsyncDisposable
         _lineRttMs = 0;
         // 控制端被新标签页替换时，中继会直接通知新对端已连接。
         _audioOn = false;
+        // 帧率限制是上一个控制端要的（它的设备慢）；新来的会不会说、要不要限，等它自己说
+        _clientMaxFps = -1;
         _input.ReleaseAll();
         // 快速线路是上一个控制端要的：先回到中继，新来的想用会再说
         StopRealtime(null);
@@ -362,6 +372,19 @@ public sealed class SessionRunner : IAsyncDisposable
             case ControlFrame.SetQuality q:
                 _quality = (int)q.Preset;
                 _reconfigure = true;
+                return;
+            case ControlFrame.MaxFps m:
+                var before = _clientMaxFps;
+                if (m.Fps != before)
+                    AgentLog.Info(m switch
+                    {
+                        { Fps: 0 } => before < 0 ? "控制端跟不上时会说：按最高 30 帧发" : "控制端跟上了，帧率不再按它限制",
+                        _ when before > 0 && m.Fps > before => $"控制端缓过来了，放开到每秒最多 {m.Fps} 帧",
+                        _ => $"控制端解码跟不上，请这边每秒最多发 {m.Fps} 帧",
+                    });
+                _clientMaxFps = m.Fps;
+                // 要得比之前少：之前那些"确认来得晚"是它在排队解码，不是网络堵——因此降的码率补回来
+                if (m.Fps > 0 && (before <= 0 || m.Fps < before)) _net.ReceiverWasBehind(_clock.ElapsedMilliseconds);
                 return;
             case ControlFrame.SelectMonitor m:
                 _monitor = m.Index;
@@ -767,7 +790,8 @@ public sealed class SessionRunner : IAsyncDisposable
         var changed = Array.Empty<bool>();
         var nv12 = Array.Empty<byte>();
         var fallbackRefine = 0;
-        long nextDue = 0;
+        // 下一帧最早什么时候采：按小数毫秒排（30 fps 是 33.3 ms 一帧，取整成 33 ms 实际会到 30.3 fps，超过上限）
+        double nextDue = 0;
         long lastDesktopCheck = -10_000;
         long lastChangeAt = -10_000;
         long lastSentAt = -10_000;
@@ -781,7 +805,7 @@ public sealed class SessionRunner : IAsyncDisposable
         var lastQuality = 0;
         var nv12Valid = false;
         IReadOnlyList<ScreenInfo> announced = [];
-        // 系统计时器默认 15.6 ms 一跳，Sleep(几毫秒) 会睡到下一跳：20 fps 实际只有 16。会话期间调到 1 ms
+        // 系统计时器默认 15.6 ms 一跳，Sleep(几毫秒) 会睡到下一跳：每帧都晚到下一跳，30 fps 实际只有二十出头。会话期间调到 1 ms
         var fineTimer = timeBeginPeriod(1) == 0;
         try
         {
@@ -809,14 +833,20 @@ public sealed class SessionRunner : IAsyncDisposable
                 }
 
                 var preset = Presets[Math.Clamp(_quality, 0, Presets.Length - 1)];
-                var frameMs = 1000 / preset.Fps;
+                // 控制端说它跟不上时按它说的帧率发；它没说过会说（旧网页）就按以前的帧率发。
+                // 编码器按档位的帧率建，不跟着变：按质量编码时那只是名义上的帧率（极少数只能按固定码率编的电脑上，
+                // 发得比名义帧率少时每帧还是按名义帧率分码率，实际码率会低一些）
+                var fps = _clientMaxFps switch { < 0 => preset.LegacyFps, 0 => preset.Fps, var cap => Math.Min(cap, preset.Fps) };
+                var frameInterval = 1000.0 / fps;
+                // 码率预算、在途帧数按整毫秒算就够了
+                var frameMs = (int)Math.Round(frameInterval);
                 var now = _clock.ElapsedMilliseconds;
                 if (now < nextDue)
                 {
-                    Thread.Sleep((int)Math.Min(nextDue - now, 20));
+                    Thread.Sleep((int)Math.Min(Math.Ceiling(nextDue - now), 20));
                     continue;
                 }
-                nextDue = Math.Max(nextDue + frameMs, now);
+                nextDue = Math.Max(nextDue + frameInterval, now);
 
                 // 锁屏 / UAC 提示：截到的是黑屏，告诉控制端原因
                 if (realScreen && now - lastDesktopCheck >= 1000)
@@ -965,7 +995,7 @@ public sealed class SessionRunner : IAsyncDisposable
                 else
                 {
                     if (changedTiles == 0 && fallbackRefine <= 0 && !key && !keepAlive) continue;
-                    fallbackRefine = changedTiles > 0 ? FallbackRefineFrames : Math.Max(0, fallbackRefine - 1);
+                    fallbackRefine = changedTiles > 0 ? (int)Math.Ceiling(FallbackRefineMs / frameInterval) : Math.Max(0, fallbackRefine - 1);
                     encoder.SetBitrate(Math.Clamp(net.TargetKbps, MinKbps, preset.MaxKbps));
                 }
                 if (changedTiles > 0)

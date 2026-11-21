@@ -28,6 +28,7 @@ export const FrameType = {
   Pong: 0x1c,
   SetTransport: 0x1d,
   ReceiverReport: 0x1e,
+  MaxFps: 0x1f,
 } as const
 
 /** 被控端支持的可选功能（VideoConfig 的最后一个字节；老版本没有，按 0 算） */
@@ -189,6 +190,8 @@ export const encode = {
     b[7] = clampTo(r.fps, 255)
     v.setUint16(8, clampTo(r.rttMs, 0xffff), true)
   }),
+  /** 这边解码跟不上：请被控端每秒最多发几帧（0 = 不限）。老版本被控端不认识，直接忽略 */
+  maxFps: (fps: number) => frame(FrameType.MaxFps, 1, (_, b) => { b[1] = clampTo(fps, 255) }),
 }
 
 function clampTo(n: number, max: number): number {

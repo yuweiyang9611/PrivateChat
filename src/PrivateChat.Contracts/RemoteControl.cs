@@ -38,6 +38,7 @@ public enum RemoteFrameType : byte
     Pong = 0x1C,
     SetTransport = 0x1D,    // 让画面和声音改走哪条线路
     ReceiverReport = 0x1E,  // 快速线路下，控制端每秒报一次自己收得怎么样
+    MaxFps = 0x1F,          // 控制端解码 / 画画跟不上：请被控端每秒最多发几帧（0 = 不限）。老版本被控端不认识，直接忽略
 }
 
 /// <summary>
@@ -118,6 +119,12 @@ public abstract record ControlFrame
     /// 浏览器到 SFU 的往返时间。被控端据此调码率（SFU 只管转发，不会告诉我们订阅端的网络怎么样）。
     /// </summary>
     public sealed record ReceiverReport(int LossPermille, int ReceivedKbps, int JitterBufferMs, int Fps, int RttMs) : ControlFrame;
+    /// <summary>
+    /// 控制端自己解码、画画跟不上：请被控端每秒最多发这么多帧（0 = 不限）。
+    /// 中继线路靠"画出来才确认"控制发多快，控制端慢的时候确认会越来越晚，看起来和网络堵了一样；
+    /// 由它直接说一声，被控端就少发几帧，而不是把码率越压越低。
+    /// </summary>
+    public sealed record MaxFps(int Fps) : ControlFrame;
 }
 
 public static class RemoteFrames
@@ -262,6 +269,7 @@ public static class RemoteFrames
             RemoteFrameType.SetAudio when p.Length >= 1 => new ControlFrame.SetAudio(p[0] != 0),
             RemoteFrameType.Pong when p.Length >= 4 => new ControlFrame.Pong(BinaryPrimitives.ReadUInt32LittleEndian(p)),
             RemoteFrameType.SetTransport when p.Length >= 1 && p[0] <= 1 => new ControlFrame.SetTransport((RemoteTransport)p[0]),
+            RemoteFrameType.MaxFps when p.Length >= 1 => new ControlFrame.MaxFps(p[0]),
             RemoteFrameType.ReceiverReport when p.Length >= 9 => new ControlFrame.ReceiverReport(
                 BinaryPrimitives.ReadUInt16LittleEndian(p), BinaryPrimitives.ReadUInt16LittleEndian(p[2..]),
                 BinaryPrimitives.ReadUInt16LittleEndian(p[4..]), p[6], BinaryPrimitives.ReadUInt16LittleEndian(p[7..])),
@@ -305,6 +313,8 @@ public static class RemoteFrames
         BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(8), (ushort)Math.Clamp(rttMs, 0, ushort.MaxValue));
         return b;
     }
+
+    public static byte[] MaxFps(int fps) => [(byte)RemoteFrameType.MaxFps, (byte)Math.Clamp(fps, 0, 255)];
 
     public static byte[] FrameAck(uint timestampMs)
     {

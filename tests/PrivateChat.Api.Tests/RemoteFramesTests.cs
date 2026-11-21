@@ -87,6 +87,21 @@ public class RemoteFramesTests
         // 只看模式下也可以换线路、也要报接收情况
         Assert.False(RemoteFrames.IsInput(RemoteFrameType.SetTransport));
         Assert.False(RemoteFrames.IsInput(RemoteFrameType.ReceiverReport));
+        // 只看模式下控制端也会跟不上
+        Assert.False(RemoteFrames.IsInput(RemoteFrameType.MaxFps));
+    }
+
+    [Fact]
+    public void MaxFps_tells_the_agent_how_many_frames_per_second_the_controller_can_take()
+    {
+        Assert.Equal([0x1F, 21], RemoteFrames.MaxFps(21));
+        Assert.Equal(new ControlFrame.MaxFps(21), RemoteFrames.ParseControl(RemoteFrames.MaxFps(21)));
+        // 0 是"不限了"
+        Assert.Equal(new ControlFrame.MaxFps(0), RemoteFrames.ParseControl(RemoteFrames.MaxFps(0)));
+        // 超出范围的数夹住，不回绕
+        Assert.Equal([0x1F, 255], RemoteFrames.MaxFps(999));
+        Assert.Equal([0x1F, 0], RemoteFrames.MaxFps(-3));
+        Assert.Null(RemoteFrames.ParseControl([(byte)RemoteFrameType.MaxFps])); // 太短
     }
 
     [Fact]

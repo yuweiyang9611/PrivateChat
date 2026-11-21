@@ -12,6 +12,9 @@ namespace PrivateChat.Agent;
 /// </summary>
 internal static class SelfTest
 {
+    /// <summary>和远程时的帧率上限一样。</summary>
+    private const int SelfTestFps = 30;
+
     public static int Run(string[] args)
     {
         Console.OutputEncoding = System.Text.Encoding.UTF8;
@@ -21,7 +24,8 @@ internal static class SelfTest
         var (width, height) = FrameGeometry.Fit(screen.Bounds.Width, screen.Bounds.Height, 1920, 1080);
         Console.WriteLine($"显示器 {screen.Bounds}，编码 {width}x{height}");
 
-        using var encoder = new H264Encoder(width, height, 20, 3000);
+        // 和远程时一样按 30 fps 编（时间戳一帧 33.3 ms）
+        using var encoder = new H264Encoder(width, height, SelfTestFps, 3000);
         var nv12 = new byte[width * height * 3 / 2];
         using var file = File.Create(output);
         var total = Stopwatch.StartNew();
@@ -37,7 +41,7 @@ internal static class SelfTest
             convertMs += sw.ElapsedMilliseconds;
             sw.Restart();
             if (i == 30) encoder.RequestKeyFrame();
-            var encoded = encoder.Encode(nv12, TimeSpan.FromMilliseconds(i * 50));
+            var encoded = encoder.Encode(nv12, TimeSpan.FromMilliseconds(i * 1000.0 / SelfTestFps));
             encodeMs += sw.ElapsedMilliseconds;
             if (encoded is not { } e)
             {
@@ -62,16 +66,16 @@ internal static class SelfTest
     {
         try
         {
-            using var encoder = new H264Encoder(width, height, 20, 3000, quality: 20);
+            using var encoder = new H264Encoder(width, height, SelfTestFps, 3000, quality: 20);
             if (!encoder.QualityMode)
             {
                 Console.WriteLine("按质量模式：这台电脑的编码器不接受（会退回固定码率，弱网下效果差一些）");
                 return;
             }
             var key = encoder.Encode(nv12, TimeSpan.Zero)?.Data.Length ?? 0;
-            var same = encoder.Encode(nv12, TimeSpan.FromMilliseconds(50))?.Data.Length ?? 0;
+            var same = encoder.Encode(nv12, TimeSpan.FromMilliseconds(1000.0 / SelfTestFps))?.Data.Length ?? 0;
             encoder.SetQuality(70);
-            var refined = encoder.Encode(nv12, TimeSpan.FromMilliseconds(100))?.Data.Length ?? 0;
+            var refined = encoder.Encode(nv12, TimeSpan.FromMilliseconds(2000.0 / SelfTestFps))?.Data.Length ?? 0;
             Console.WriteLine($"按质量模式：质量 20 的关键帧 {key / 1024.0:F1} KB，画面不变再编一帧 {same} 字节，质量调到 70 后 {refined / 1024.0:F1} KB" +
                 (refined > same * 4 ? "（逐帧改质量有效）" : "（改质量没有反应：这台电脑上码率控制会不准）"));
         }

@@ -9,7 +9,7 @@ namespace PrivateChat.Api.Tests;
 /// </summary>
 public class RemoteRateControlTests
 {
-    private sealed class Link(int kbps, int oneWayMs, int decodeMs = 0)
+    private sealed class Link(int kbps, int oneWayMs, int decodeMs = 0, Func<int>? decodeJitter = null)
     {
         private double _free;
         private double _decoded;
@@ -24,7 +24,7 @@ public class RemoteRateControlTests
             var arrive = (long)_free + oneWayMs;
             Delays.Add((int)(arrive - now));
             // 控制端解码要一会儿，一帧一帧排着解；解出来才确认
-            _decoded = Math.Max(_decoded, arrive) + decodeMs;
+            _decoded = Math.Max(_decoded, arrive) + decodeMs + (decodeJitter?.Invoke() ?? 0);
             _acks.Enqueue((ts, (long)_decoded + oneWayMs), (long)_decoded + oneWayMs);
         }
 
@@ -46,19 +46,24 @@ public class RemoteRateControlTests
     }
 
     /// <summary>
-    /// 画面一直在变（每 50 ms 一帧）：帧的大小跟着预算走，但不小于 floorBytes（编码器把质量压到最低也有这么大）。
+    /// 画面一直在变（默认每 50 ms 一帧，frameMs 可改）：帧的大小跟着预算走，但不小于 floorBytes（编码器把质量压到最低也有这么大）。
     /// 返回发出去的帧数。
+    /// 和被控端的采集循环一样：按帧间隔排时间，每个时间点问一次"能不能发"，不能发就等下一个时间点（不是过几毫秒再问）。
+    /// 确认按到达的那一毫秒处理，所以按 1 ms 走。
     /// </summary>
-    private static int Run(NetworkEstimator net, Link link, int fromMs, int toMs, int floorBytes, int? fixedBytes = null)
+    private static int Run(NetworkEstimator net, Link link, int fromMs, int toMs, int floorBytes, int? fixedBytes = null, int frameMs = 50)
     {
         var sent = 0;
-        for (long now = fromMs; now < toMs; now += 50)
+        double nextDue = fromMs;
+        for (long now = fromMs; now < toMs; now++)
         {
             link.Deliver(net, now);
             if (now % 500 == 0) link.Ping(now);
+            if (now < nextDue) continue;
+            nextDue = Math.Max(nextDue + frameMs, now);
             net.Tick(now);
-            if (!net.CanSend(now, 50)) continue;
-            var bytes = fixedBytes ?? Math.Max(floorBytes, net.ChangeBudget(now, sustained: true, frameMs: 50));
+            if (!net.CanSend(now, frameMs)) continue;
+            var bytes = fixedBytes ?? Math.Max(floorBytes, net.ChangeBudget(now, sustained: true, frameMs: frameMs));
             net.OnSent((uint)now + 1, bytes, now);
             link.Send((uint)now + 1, bytes, now);
             sent++;
@@ -114,6 +119,116 @@ public class RemoteRateControlTests
         sent = Run(net, link, 3000, 13_000, 0, fixedBytes: 6000);
         Assert.InRange(sent, 100, 130);
         Assert.True(net.InFlight <= 8, $"还有 {net.InFlight} 帧没确认");
+    }
+
+    [Theory]
+    // 每秒 30 帧（33 ms 一帧）。控制端每帧要解 25 ms：跟得上
+    [InlineData(25)]
+    // 每帧要解 40 ms：最多每秒 25 帧，跟不上 30 帧（在每秒 20 帧的时候这样的设备是跟得上的）
+    [InlineData(40)]
+    // 每帧要解 80 ms：最多每秒 12 帧
+    [InlineData(80)]
+    public void At_30_fps_a_slow_decoder_gets_fewer_frames_not_a_blurry_picture(int decodeMs)
+    {
+        foreach (var fixedBytes in new int?[] { 6000, null })
+        {
+            // 两种帧：固定大小；跟着预算走（画面一直在变时编码器就是这样出帧的。这种情况下码率一降、帧就变小、
+            // "送达速率"跟着变小、码率再降，一路滑到底——固定大小的帧看不出这个）
+            var what = fixedBytes is null ? "帧大小跟着预算走" : "固定大小的帧";
+            var net = new NetworkEstimator(100, 2500, 1200);
+            var link = new Link(5000, 20, decodeMs: decodeMs);
+            // 头三秒按 30 帧发。控制端跟不上的话确认会越来越晚，这时被控端只看到"晚"，以为网络堵了，码率会降几次
+            Run(net, link, 0, 3000, 0, fixedBytes: fixedBytes, frameMs: 33);
+            var fps = 30;
+            if (decodeMs > 33)
+            {
+                // 网页一两秒内看出自己跟不上，请这边每秒最多发它解得过来的八五成（MaxFps，见网页的 FrameRateGovernor）
+                fps = (int)(1000.0 / decodeMs * 0.85);
+                net.ReceiverWasBehind(3000);
+            }
+            var frameMs = (int)Math.Round(1000.0 / fps);
+            Run(net, link, 3000, 20_000, 0, fixedBytes: fixedBytes, frameMs: frameMs);
+            var sent = Run(net, link, 20_000, 30_000, 0, fixedBytes: fixedBytes, frameMs: frameMs);
+            // 线路本身很快：码率不该因为控制端解码慢被压下去（头几秒冤枉降的也补回来了）
+            Assert.True(net.TargetKbps >= 1000, $"{what}，解码 {decodeMs} ms/帧：码率被压到了 {net.TargetKbps}");
+            // 控制端要多少帧就发多少帧（这里的循环按整毫秒排，33 ms 一帧是 30.3 帧/秒）
+            Assert.InRange(sent, fps * 10 * 85 / 100, 10_000 / frameMs + 2);
+            // 也不在控制端那里堆着：一帧从发出到确认，就是线路往返 + 解一帧，再多一点
+            Assert.True(net.LastRttMs <= 40 + decodeMs + 60, $"{what}，解码 {decodeMs} ms/帧：一帧要 {net.LastRttMs} ms 才确认");
+        }
+    }
+
+    [Theory]
+    [InlineData(50)]
+    [InlineData(33)]
+    public void A_controller_that_is_sometimes_slow_does_not_drag_the_bitrate_down(int frameMs)
+    {
+        // 线路很快；控制端大多数帧 5–25 ms 就解完，但每十几帧会有一帧卡上 100 ms（旧手机、页面偶尔忙一下）。
+        // 平均一帧 20 ms 出头，它跟得上，只是确认偶尔晚一阵（实测把控制端 CPU 降速 3 倍时，延迟的九成分位就是一百多毫秒）。
+        // 以前按"连着两次确认晚"判断拥塞：30 帧时两次确认只隔 33 ms，卡一下就连成两次，码率被一次次压下去。
+        // 哪几帧卡是随机的：十个种子各跑一遍，看码率最低点的中位数，不靠某一个种子碰巧好。
+        // 以前的规则：20 帧时 272、30 帧时 140（都过不了这里的 300）；现在要晚上 100 ms 才算：340、618
+        var lowests = Enumerable.Range(1, 10).Select(seed => LowestWithOccasionalHiccups(seed, frameMs)).Order().ToArray();
+        var median = lowests[lowests.Length / 2];
+        Assert.True(median >= 300, $"每 {frameMs} ms 一帧：码率最低点十次的中位数 {median}（{string.Join(", ", lowests)}）");
+    }
+
+    /// <summary>控制端偶尔卡一下（见上）时，27 秒里目标码率最低到多少</summary>
+    private static int LowestWithOccasionalHiccups(int seed, int frameMs)
+    {
+        var random = new Random(seed);
+        var net = new NetworkEstimator(100, 2500, 1200);
+        var link = new Link(5000, 20, decodeMs: 5, decodeJitter: () => random.Next(100) < 7 ? 100 : random.Next(0, 21));
+        Run(net, link, 0, 3000, 0, frameMs: frameMs);
+        var lowest = int.MaxValue;
+        for (var t = 3000; t < 30_000; t += 1000)
+        {
+            Run(net, link, t, t + 1000, 0, frameMs: frameMs);
+            lowest = Math.Min(lowest, net.TargetKbps);
+        }
+        return lowest;
+    }
+
+    [Fact]
+    public void Being_told_the_controller_was_behind_does_not_hide_a_real_slow_link()
+    {
+        // 网络真的慢（300 kbps）：控制端那边说了一次"跟不上"，码率补回去以后，过一会儿照样要降下来
+        var net = new NetworkEstimator(100, 2500, 600);
+        var link = new Link(300, 100);
+        Run(net, link, 0, 5000, floorBytes: 3000, frameMs: 33);
+        net.ReceiverWasBehind(5000);
+        link.Delays.Clear();
+        Run(net, link, 5000, 30_000, floorBytes: 3000, frameMs: 33);
+        Assert.InRange(net.TargetKbps, 100, 450);
+        // 补回去的那一阵延迟会冲高，但不能冲到几秒
+        Assert.True(link.Delays.Max() < 1500, $"最大延迟 {link.Delays.Max()} ms");
+        link.Delays.Sort();
+        Assert.True(link.Delays[link.Delays.Count / 2] < 600, $"中位延迟 {link.Delays[link.Delays.Count / 2]} ms");
+    }
+
+    [Fact]
+    public void At_30_fps_a_slow_link_still_brings_the_bitrate_down()
+    {
+        var net = new NetworkEstimator(100, 2500, 600);
+        var link = new Link(300, 100);
+        Run(net, link, 0, 5000, floorBytes: 3000, frameMs: 33);
+        link.Delays.Clear();
+        Run(net, link, 5000, 30_000, floorBytes: 3000, frameMs: 33);
+        Assert.InRange(net.TargetKbps, 100, 450);
+        Assert.True(link.Delays.Max() < 1200, $"最大延迟 {link.Delays.Max()} ms");
+        link.Delays.Sort();
+        Assert.True(link.Delays[link.Delays.Count / 2] < 600, $"中位延迟 {link.Delays[link.Delays.Count / 2]} ms");
+    }
+
+    [Fact]
+    public void At_30_fps_a_high_latency_link_with_enough_bandwidth_keeps_full_frame_rate()
+    {
+        var net = new NetworkEstimator(100, 2500, 1200);
+        var link = new Link(4000, 300);
+        Run(net, link, 0, 3000, 0, fixedBytes: 4000, frameMs: 33);
+        var sent = Run(net, link, 3000, 13_000, 0, fixedBytes: 4000, frameMs: 33);
+        Assert.True(sent >= 285, $"10 秒只发了 {sent} 帧");
+        Assert.True(net.TargetKbps >= 1200, $"码率被错误地降到了 {net.TargetKbps}");
     }
 
     [Fact]

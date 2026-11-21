@@ -31,16 +31,24 @@ export async function getMicrophone(): Promise<MediaStreamTrack> {
 
 export type Facing = 'user' | 'environment'
 
-/** 720p / 24 帧：家庭通话够清楚，手机上行也扛得住 */
+/**
+ * 帧率上限：摄像头和共享屏幕都是最高 30 帧。
+ * 要写 ideal：Chrome / Edge 按 ideal 定实际的帧率（摄像头出 30 帧、ideal 写 24 就丢帧丢到 24；屏幕 ideal 写 15 就按 15 帧采）。
+ * 不写 min / exact：暗处摄像头自己会降帧，写死了就打不开；共享屏幕根本不接受这两个。
+ */
+export const MAX_FPS = 30
+
+/** 720p、最高 30 帧。上行有 1.2 Mbps 的上限（RealtimeSession.encodingsFor），手机上行扛得住 */
 export async function getCamera(facing: Facing = 'user'): Promise<MediaStreamTrack> {
   const stream = await navigator.mediaDevices.getUserMedia({
-    video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24, max: 30 }, facingMode: facing },
+    video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: MAX_FPS, max: MAX_FPS }, facingMode: facing },
   })
   return stream.getVideoTracks()[0]!
 }
 
+/** 最高 30 帧。画面不动时浏览器本来就不出新帧；带宽、CPU 不够时先降帧率保清晰度（contentHint = detail） */
 export async function getScreen(): Promise<MediaStreamTrack> {
-  const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 15, max: 30 } }, audio: false })
+  const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: MAX_FPS, max: MAX_FPS } }, audio: false })
   const track = stream.getVideoTracks()[0]!
   // 文字 / 界面优先保清晰度，而不是帧率
   try { track.contentHint = 'detail' } catch { /* 旧浏览器没有 contentHint */ }

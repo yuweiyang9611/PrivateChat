@@ -11,7 +11,7 @@
 //   node e2e/test-host.cjs tunnel        开隧道，开着别关（Ctrl+C 结束）：本机 18080 → 测试栈网页，
 //                                        服务器上的 8799 → 本机 8799（假 SFU，见 fake-sfu.cjs）
 //   node e2e/test-host.cjs env           打印跑 e2e 要带的环境变量（E2E_BASE、E2E_COMPOSE、E2E_SFU_PORT）
-//   node e2e/test-host.cjs dotnet-test … 在服务器上跑 .NET 测试（临时起一个 SDK 容器，数据库用测试栈的）；后面的参数原样交给 dotnet test
+//   node e2e/test-host.cjs dotnet-test … 同步代码后在服务器上跑 .NET 测试（临时起一个 SDK 容器，数据库用测试栈的）；后面的参数原样交给 dotnet test
 //   node e2e/test-host.cjs compose ...   对测试栈执行 docker compose（E2E_COMPOSE 指的就是它；CF_ 开头的环境变量会带过去）
 //   node e2e/test-host.cjs down [-v]     停掉并删除容器（-v 连数据卷一起删）
 //
@@ -74,14 +74,14 @@ function workingTree() {
   }
 }
 
-/** 把代码打包传过去，整个替换掉服务器上的那份 */
-function sync() {
+/** 把代码打包传过去，整个替换掉服务器上的那份（dir：放在 REMOTE_DIR 下的哪个目录，默认测试栈用的 src） */
+function sync(dir = 'src') {
   const c = config()
   const tree = workingTree()
   const head = git(['rev-parse', '--short', 'HEAD'])
   const dirty = git(['status', '--porcelain']).split('\n').filter(Boolean).length
   console.log(`同步代码：${head}${dirty ? ` + ${dirty} 处没提交的改动` : ''}`)
-  const script = `set -e; D=${REMOTE_DIR}; mkdir -p "$D"; rm -rf "$D/src.new"; mkdir "$D/src.new"; tar -xf - -C "$D/src.new"; rm -rf "$D/src"; mv "$D/src.new" "$D/src"`
+  const script = `set -e; D=${REMOTE_DIR}; mkdir -p "$D"; rm -rf "$D/${dir}.new"; mkdir "$D/${dir}.new"; tar -xf - -C "$D/${dir}.new"; rm -rf "$D/${dir}"; mv "$D/${dir}.new" "$D/${dir}"`
   return new Promise((resolve, reject) => {
     const archive = spawn('git', ['archive', '--format=tar', tree], { cwd: ROOT, stdio: ['ignore', 'pipe', 'inherit'] })
     const ssh = spawn(c.exe, [...c.args, script], { stdio: ['pipe', 'inherit', 'inherit'] })
@@ -152,11 +152,17 @@ async function main() {
       break
     }
     case 'dotnet-test': {
+      // 先把这边的代码同步过去：不然跑的是上次 up 时的代码，刚改的测试根本没跑到。
+      // 每次跑单独放一个目录（跑完删掉）：两次同时跑不会互相删掉对方的代码，也不动测试栈正在用的 src
+      const dir = `test-run-${Date.now()}-${process.pid}`
+      await sync(dir)
       // 和 CI 一样只跑测试项目（被控端是 Windows 程序，Linux 上不编它）。源码只读挂进去、拷一份再编：编出来的东西不留在服务器的目录里
       const args = ['tests/PrivateChat.Api.Tests', '-nologo', '-v', 'q', ...rest].map(quote).join(' ')
-      const script = `docker run --rm --network ${PROJECT}_default -v ${REMOTE_DIR}/src:/src:ro -v ${PROJECT}_nuget:/root/.nuget/packages `
+      const script = `D=${REMOTE_DIR}; find "$D" -maxdepth 1 -name 'test-run-*' -mmin +240 -exec rm -rf {} +; `
+        + `docker run --rm --network ${PROJECT}_default -v "$D/${dir}":/src:ro -v ${PROJECT}_nuget:/root/.nuget/packages `
         + `-e PC_TEST_PG='Host=postgres;Port=5432;Username=privatechat;Password=privatechat;Database=postgres;Timeout=15' -e DOTNET_CLI_TELEMETRY_OPTOUT=1 `
-        + `mcr.microsoft.com/dotnet/sdk:11.0 sh -c ${quote(`cp -r /src /work && cd /work && dotnet test ${args}`)}`
+        + `mcr.microsoft.com/dotnet/sdk:11.0 sh -c ${quote(`cp -r /src /work && cd /work && dotnet test ${args}`)}; `
+        + `code=$?; rm -rf "$D/${dir}"; exit $code`
       process.exit(remote(script, { extra: ['-n'] }))
       break
     }

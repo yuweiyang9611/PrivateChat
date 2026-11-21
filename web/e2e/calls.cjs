@@ -188,7 +188,15 @@ const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasT
       // headless 里没有真实屏幕可选：共享屏幕用一块会动的画布代替
       await ctx.addInitScript(() => {
         if (!navigator.mediaDevices) return
-        navigator.mediaDevices.getDisplayMedia = async () => {
+        // 记下页面按什么约束要摄像头和屏幕（帧率上限是在这里定的）
+        window.__mediaAsked = { camera: null, screen: null }
+        const getUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
+        navigator.mediaDevices.getUserMedia = async (c) => {
+          if (c && c.video) window.__mediaAsked.camera = c.video
+          return getUserMedia(c)
+        }
+        navigator.mediaDevices.getDisplayMedia = async (constraints) => {
+          window.__mediaAsked.screen = constraints && constraints.video
           const c = document.createElement('canvas')
           c.width = 960; c.height = 540
           const g = c.getContext('2d')
@@ -266,6 +274,9 @@ const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasT
     const screenSeen = await videoFlowing(b, tile(ADMIN_ID, 'screen'))
     check('对方多出一格共享的屏幕并且在动', !!screenSeen, screenSeen)
     check('共享屏幕时摄像头画面还在', !!(await videoFlowing(b, tile(ADMIN_ID))))
+    const asked = await a.evaluate(() => window.__mediaAsked)
+    const fps30 = (v) => v?.frameRate?.ideal === 30 && v?.frameRate?.max === 30
+    check('摄像头和共享屏幕都按最高 30 帧要（ideal、max 都是 30）', fps30(asked?.camera) && fps30(asked?.screen), asked)
     await a.click('[data-testid=call-screen]')
     check('停止共享后对方的屏幕格子消失', await waitGone(b, tile(ADMIN_ID, 'screen'), 10000))
     check('停止共享后摄像头画面不受影响', !!(await videoFlowing(b, tile(ADMIN_ID))))

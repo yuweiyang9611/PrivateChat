@@ -281,6 +281,9 @@ async function moveOnCanvas(page, fx, fy) {
   check('再打开又有声音', !!again, again ?? (await audioNow()))
   const netLog = agent.out.match(/网络：目标码率 (\d+) kbps（上限 (\d+)），线路往返 (\d+) ms/)
   check('被控端在按网络状况定码率（本机直连：往返很短，码率没有被压到最低）', !!netLog && Number(netLog[1]) >= 300 && Number(netLog[2]) === 2500 && Number(netLog[3]) < 200, netLog?.[0])
+  // 新网页一连上就告诉被控端"跟不上时我会说"，被控端从此按最高 30 帧发（没说过的是旧网页，按 20 帧）
+  const hellos = () => (agent.out.match(/控制端跟不上时会说：按最高 30 帧发/g) ?? []).length
+  check('控制端连上后告诉被控端跟不上时会说，被控端按最高 30 帧发', hellos() >= 1, agent.out.match(/控制端(跟不上|解码)[^\r\n]*/)?.[0])
 
   const lineSwitch = admin.locator('[data-testid=remote-line-fast]')
   if (!REALTIME) {
@@ -326,15 +329,16 @@ async function moveOnCanvas(page, fx, fy) {
     const fastLog = await until(() => agent.out.match(/网络：目标码率 (\d+) kbps（上限 (\d+)），线路往返 \d+ ms（快速线路）/), 8000)
     check('被控端改用快速线路自己的码率控制', !!fastLog && Number(fastLog[1]) >= 300 && Number(fastLog[2]) === 2500, fastLog?.[0])
 
-    // 在快速线路上换画质：被控端重建编码器（清晰档 15 fps），从关键帧接着发，线路不变；再换回来
+    // 在快速线路上换画质：被控端重建编码器（清晰档码率上限 6 Mbps），从关键帧接着发，线路不变；再换回来。
+    // 两档都是最高 30 fps、测试画面 1280x720 两档都放得下：日志里只有码率上限能看出换的是哪一档
     let rebuilt = agent.out.length
     await admin.locator('[data-testid=remote-quality-sharp]').click()
-    const sharp = await until(() => /编码 1280x720 15 fps/.test(agent.out.slice(rebuilt)), 8000)
+    const sharp = await until(() => /编码 1280x720 30 fps，码率上限 6000 kbps/.test(agent.out.slice(rebuilt)), 8000)
     await sleep(2000)
     const sharpOk = !!sharp && (await lineNow()) === 'realtime' && (await fpsNow()) >= 5 && (await statsLine.textContent()).includes('快速线路')
     rebuilt = agent.out.length
     await admin.locator('[data-testid=remote-quality-smooth]').click()
-    const smooth = await until(() => /编码 1280x720 20 fps/.test(agent.out.slice(rebuilt)), 8000)
+    const smooth = await until(() => /编码 1280x720 30 fps，码率上限 2500 kbps/.test(agent.out.slice(rebuilt)), 8000)
     // 鼠标从工具栏上挪开：提示条出现在顶部正中，鼠标停在它上面的话它不会自己消失，还会挡住下面要点的按钮
     await moveOnCanvas(admin, 0.5, 0.5)
     await sleep(2000)
@@ -514,6 +518,7 @@ async function moveOnCanvas(page, fx, fy) {
       if (payload[0] === 0x02) videoPackets++
     })
   })
+  const hellosBefore = hellos()
   await muted.goto(admin.url())
   await admin.locator('[data-testid=remote-replaced]').waitFor()
   await muted.locator('[data-testid=remote-sound][data-audio=off]').waitFor()
@@ -522,10 +527,13 @@ async function moveOnCanvas(page, fx, fy) {
   await sleep(1200)
   check('静音窗口接手后只收到画面，声音停止传输', videoPackets > beforeVideo && audioPackets === beforeMute,
     { videoPackets: videoPackets - beforeVideo, audioPackets: audioPackets - beforeMute })
+  const helloOnTakeover = await until(() => hellos() > hellosBefore, 5000)
   await admin.locator('[data-testid=remote-take-over]').click()
   await muted.locator('[data-testid=remote-replaced]').waitFor()
   const heardAfterTakeover = await until(async () => (await audioNow()).scheduled > 24000, 10000)
   check('有声窗口重新接手后继续收到测试音', !!heardAfterTakeover)
+  const helloOnTakeBack = await until(() => hellos() > hellosBefore + 1, 5000)
+  check('换了窗口接手（两次）：新窗口每次都重新告诉被控端跟不上时会说', !!helloOnTakeover && !!helloOnTakeBack, { before: hellosBefore, now: hellos() })
   await mutedContext.close()
 
   // 键鼠

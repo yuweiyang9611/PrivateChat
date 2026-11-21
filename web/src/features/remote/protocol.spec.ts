@@ -66,6 +66,10 @@ describe('控制端帧编码', () => {
     expect(Array.from(encode.setTransport(Transport.Relay))).toEqual([0x1d, 0])
     expect(Array.from(encode.receiverReport({ lossPermille: 25, receivedKbps: 1800, jitterBufferMs: 40, fps: 17, rttMs: 12 }))).toEqual([0x1e, 25, 0, 0x08, 0x07, 40, 0, 17, 12, 0])
     expect(Array.from(encode.receiverReport({ lossPermille: 5000, receivedKbps: 99999, jitterBufferMs: -3, fps: 999, rttMs: NaN }))).toEqual([0x1e, 0xe8, 0x03, 0xff, 0xff, 0, 0, 255, 0, 0])
+    expect(Array.from(encode.maxFps(21))).toEqual([0x1f, 21])
+    expect(Array.from(encode.maxFps(0))).toEqual([0x1f, 0])
+    expect(Array.from(encode.maxFps(999))).toEqual([0x1f, 255])
+    expect(Array.from(encode.maxFps(-2))).toEqual([0x1f, 0])
   })
 
   it('超过 1 MB 的文字截断在字符边界上', () => {
