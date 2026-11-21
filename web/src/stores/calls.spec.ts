@@ -365,6 +365,24 @@ describe('接听与通话中', () => {
     expect(store.remote['p-dad']).toEqual({ audio: 'AUDIO' })
   })
 
+  it('共享屏幕的人重连（旧身份被顶掉）：记一会儿，看的人那边画面位置先留着；正常离开的不记', async () => {
+    const { store } = await boot()
+    store.onIncomingCall(incomingFromDad())
+    expect(await store.accept()).toBe(true)
+    store.onTrackPublished({ callId: 'call-1', participantId: 'p-dad', trackName: 'screen-dad', kind: 'Screen' })
+    const before = Date.now()
+    store.onParticipantLeft({ callId: 'call-1', participantId: 'p-dad', userId: DAD, reason: 'replaced' })
+    expect(store.sharerRejoining[DAD]).toBeGreaterThanOrEqual(before + 9_000)
+
+    // 没在共享的人重连、或者共享的人真的离开了：不留
+    store.sharerRejoining = {}
+    store.onParticipantJoined({ callId: 'call-1', participant: participant('p-dad-2', DAD, [{ trackName: 'screen-dad-2', kind: 'Screen' }]) as never })
+    store.onParticipantLeft({ callId: 'call-1', participantId: 'p-dad-2', userId: DAD, reason: 'left' })
+    store.onParticipantJoined({ callId: 'call-1', participant: participant('p-dad-3', DAD) as never })
+    store.onParticipantLeft({ callId: 'call-1', participantId: 'p-dad-3', userId: DAD, reason: 'replaced' })
+    expect(store.sharerRejoining).toEqual({})
+  })
+
   it('麦克风没给权限：不加入，来电窗留着可以再试', async () => {
     const { store } = await boot()
     store.onIncomingCall(incomingFromDad())

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { Mute } from '@element-plus/icons-vue'
+import { attachTrack } from './attachTrack'
 
 const props = defineProps<{
   name: string
@@ -15,29 +16,20 @@ const props = defineProps<{
   badge?: string
   userId?: string
   kind?: 'camera' | 'screen' | 'self'
+  /** 小格子（有人共享屏幕时旁边那一列、下面那一排）：头像小一点 */
+  compact?: boolean
 }>()
 
 const video = ref<HTMLVideoElement | null>(null)
 
-function attach(): void {
-  const el = video.value
-  if (!el) return
-  const track = props.showVideo ? props.track : null
-  // 同一条轨道不重复设置，否则画面会闪一下
-  const current = (el.srcObject as MediaStream | null)?.getVideoTracks()[0]
-  if (current === (track ?? undefined)) return
-  el.srcObject = track ? new MediaStream([track]) : null
-  if (track) void el.play().catch(() => undefined)
-}
-
-watch(() => [props.track, props.showVideo, video.value], attach, { immediate: true, flush: 'post' })
+watch(() => [props.track, props.showVideo, video.value], () => attachTrack(video.value, props.showVideo ? props.track : null), { immediate: true, flush: 'post' })
 onBeforeUnmount(() => { if (video.value) video.value.srcObject = null })
 </script>
 
 <template>
   <div
     class="relative flex min-h-0 items-center justify-center overflow-hidden rounded-2xl"
-    style="background: #2a2420"
+    :style="{ background: kind === 'screen' ? '#000' : '#2a2420' }"
     data-testid="call-tile"
     :data-user-id="userId"
     :data-kind="kind ?? 'camera'"
@@ -53,8 +45,8 @@ onBeforeUnmount(() => { if (video.value) video.value.srcObject = null })
       playsinline
       muted
     />
-    <div v-if="!(showVideo && track)" class="flex flex-col items-center gap-3 p-4">
-      <el-avatar :size="kind === 'self' ? 48 : 96" style="background: var(--pc-primary); font-size: 2rem">{{ name.slice(0, 1) }}</el-avatar>
+    <div v-if="!(showVideo && track) && kind !== 'screen'" class="flex flex-col items-center gap-3" :class="compact ? 'p-1' : 'p-4'">
+      <el-avatar :size="compact ? (kind === 'self' ? 32 : 48) : kind === 'self' ? 48 : 96" :style="{ background: 'var(--pc-primary)', fontSize: compact ? '1.25rem' : '2rem' }">{{ name.slice(0, 1) }}</el-avatar>
     </div>
     <div
       v-if="kind !== 'self'"

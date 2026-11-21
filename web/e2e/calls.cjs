@@ -197,8 +197,9 @@ const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasT
         }
         navigator.mediaDevices.getDisplayMedia = async (constraints) => {
           window.__mediaAsked.screen = constraints && constraints.video
+          // 4:3（不是默认按的 16:9）：看的一方要量出真实比例、按它重新摆，才算对
           const c = document.createElement('canvas')
-          c.width = 960; c.height = 540
+          c.width = 960; c.height = 720
           const g = c.getContext('2d')
           let n = 0
           setInterval(() => {
@@ -277,7 +278,84 @@ const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasT
     const asked = await a.evaluate(() => window.__mediaAsked)
     const fps30 = (v) => v?.frameRate?.ideal === 30 && v?.frameRate?.max === 30
     check('摄像头和共享屏幕都按最高 30 帧要（ideal、max 都是 30）', fps30(asked?.camera) && fps30(asked?.screen), asked)
-    await a.click('[data-testid=call-screen]')
+
+    // 看的一方（窄屏 420×860）：画面按真实比例用满宽度，人像和自己的预览都不压着画面
+    const geometry = (page) => page.evaluate((id) => {
+      const rect = (el) => { if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height } }
+      const screen = document.querySelector(`[data-testid=call-tile][data-kind=screen][data-user-id="${id}"]`)
+      const video = screen?.querySelector('video')
+      return {
+        layout: document.querySelector('[data-testid=call-overlay]')?.getAttribute('data-layout'),
+        screen: rect(screen),
+        area: rect(document.querySelector('.pc-stage-layout')),
+        caption: rect(document.querySelector('[data-testid=call-stage-caption]')),
+        camera: rect(document.querySelector(`.pc-area-people [data-testid=call-tile][data-kind=camera][data-user-id="${id}"]`)),
+        self: rect(document.querySelector('[data-testid=call-tile][data-kind=self]')),
+        ratio: video && video.videoHeight ? video.videoWidth / video.videoHeight : null,
+      }
+    }, ADMIN_ID)
+    const overlaps = (p, q) => !!p && !!q && p.x < q.x + q.w - 1 && q.x < p.x + p.w - 1 && p.y < q.y + q.h - 1 && q.y < p.y + p.h - 1
+    await b.waitForSelector('[data-testid=call-overlay][data-layout=stack]', { timeout: 5000 }).catch(() => undefined)
+    await sleep(500)
+    const narrow = await geometry(b)
+    check('窄屏看共享：画面在上、用满宽度，比例和画面一致，人像和自己的预览不压着画面',
+      narrow.layout === 'stack' && !!narrow.screen && !!narrow.ratio && Math.abs(narrow.screen.w / narrow.screen.h - narrow.ratio) / narrow.ratio < 0.02
+        && Math.abs(narrow.ratio - 4 / 3) < 0.01 && narrow.screen.w >= narrow.area.w * 0.95 && !!narrow.camera && !!narrow.self
+        && !overlaps(narrow.screen, narrow.camera) && !overlaps(narrow.screen, narrow.self), narrow)
+
+    // 全屏（大图）：画面铺满，整个浏览器也进了全屏，摄像头变成浮在上面的小窗
+    await b.click('[data-testid=call-fullscreen]')
+    const expandedOk = await b.waitForSelector('[data-testid=call-overlay][data-expanded=true]', { timeout: 5000 }).then(() => true).catch(() => false)
+    const fsEntered = await b.waitForFunction(() => document.fullscreenElement === document.documentElement, null, { timeout: 5000 }).then(() => true).catch(() => false)
+    const bigRect = await b.evaluate((id) => { const r = document.querySelector(`[data-testid=call-tile][data-kind=screen][data-user-id="${id}"]`).getBoundingClientRect(); return { w: r.width, h: r.height, vw: innerWidth, vh: innerHeight } }, ADMIN_ID)
+    check('点"全屏"：浏览器进了全屏，共享的画面铺满整个窗口，还在动', expandedOk && fsEntered && Math.abs(bigRect.w - bigRect.vw) <= 1 && Math.abs(bigRect.h - bigRect.vh) <= 1 && !!(await videoFlowing(b, tile(ADMIN_ID, 'screen'))), { fsEntered, ...bigRect })
+    check('全屏时摄像头变成浮在画面上的小窗，画面在动', !!(await videoFlowing(b, `[data-testid=call-float] [data-testid=call-tile][data-user-id="${ADMIN_ID}"]`)))
+    const float = b.locator('[data-testid=call-float]')
+    const fb = await float.boundingBox()
+    await b.mouse.move(fb.x + fb.width / 2, fb.y + fb.height / 2)
+    await b.mouse.down()
+    for (let i = 1; i <= 10; i++) await b.mouse.move(fb.x + fb.width / 2 - (fb.x + fb.width / 2 - 60) * i / 10, fb.y + fb.height / 2 - (fb.y + fb.height / 2 - 60) * i / 10)
+    await b.mouse.up()
+    check('小窗能拖：拖到左上方，松手贴到左上角', (await float.getAttribute('data-corner')) === 'tl', await float.getAttribute('data-corner'))
+    await b.click('[data-testid=call-float-collapse]')
+    const iconShown = await b.waitForSelector('[data-testid=call-float-icon]', { timeout: 3000 }).then(() => true).catch(() => false)
+    await b.click('[data-testid=call-float-icon]')
+    check('小窗能收成浮动图标，点图标再展开', iconShown && (await float.getAttribute('data-collapsed')) === 'false')
+    const screenTile = b.locator(tile(ADMIN_ID, 'screen'))
+    const widthAt = () => b.evaluate((id) => document.querySelector(`[data-testid=call-tile][data-kind=screen][data-user-id="${id}"] video`).getBoundingClientRect().width, ADMIN_ID)
+    const w1 = await widthAt()
+    await b.click('[data-testid=call-zoom-in]')
+    const zoomed = (await screenTile.getAttribute('data-zoom')) === '1.5'
+    const w2 = await widthAt()
+    await b.click('[data-testid=call-zoom-reset]')
+    check('全屏里能放大（1.5 倍）、还原', zoomed && Math.abs(w2 / w1 - 1.5) < 0.03 && (await screenTile.getAttribute('data-zoom')) === '1', { w1, w2 })
+    await b.click('[data-testid=call-exit-fullscreen]')
+    const collapsedBack = await b.waitForSelector('[data-testid=call-overlay][data-expanded=false]', { timeout: 5000 }).then(() => true).catch(() => false)
+    const fsLeft = await b.waitForFunction(() => !document.fullscreenElement, null, { timeout: 5000 }).then(() => true).catch(() => false)
+    check('退出全屏：回到原来的样子，浏览器也退出了全屏，小窗收起', collapsedBack && fsLeft && (await float.count()) === 0)
+
+    // 最小化：浮窗里放着共享的画面，点一下回到通话
+    await b.click('[data-testid=call-minimize]')
+    const miniScreen = await videoFlowing(b, '[data-testid=call-mini-video][data-kind=screen]')
+    await b.click('[data-testid=call-mini-video]')
+    check('最小化后浮窗里放着共享的画面（在动），点一下回到通话', !!miniScreen && (await b.waitForSelector('[data-testid=call-overlay]', { timeout: 5000 }).then(() => true).catch(() => false)), miniScreen)
+
+    // 宽屏：画面用满高度，"谁的屏幕"和人像放在右边一列（还在全屏的话改不了窗口大小：先退出，免得整个脚本中断）
+    await b.evaluate(() => (document.fullscreenElement ? document.exitFullscreen().catch(() => undefined) : undefined))
+    await b.waitForFunction(() => !document.fullscreenElement, null, { timeout: 5000 }).catch(() => undefined)
+    await b.setViewportSize({ width: 1280, height: 720 })
+    await b.waitForSelector('[data-testid=call-overlay][data-layout=side]', { timeout: 5000 }).catch(() => undefined)
+    await sleep(500)
+    const wide = await geometry(b)
+    check('宽屏看共享：画面用满高度，人像和全屏按钮放在右边一列',
+      wide.layout === 'side' && !!wide.screen && Math.abs(wide.screen.h - wide.area.h) <= 2 && !!wide.caption && wide.caption.x >= wide.screen.x + wide.screen.w - 1
+        && !!wide.camera && wide.camera.x >= wide.screen.x + wide.screen.w - 1, wide)
+    await b.setViewportSize({ width: 420, height: 860 })
+
+    // 共享的人：上面一条提示，旁边就能停
+    const banner = await a.locator('[data-testid=call-sharing-stop]').count()
+    await a.click('[data-testid=call-sharing-stop]')
+    check('共享的人在提示条上点"停止共享"就停了', banner === 1 && (await a.waitForSelector('[data-testid=call-screen][data-on=false]', { timeout: 8000 }).then(() => true).catch(() => false)))
     check('停止共享后对方的屏幕格子消失', await waitGone(b, tile(ADMIN_ID, 'screen'), 10000))
     check('停止共享后摄像头画面不受影响', !!(await videoFlowing(b, tile(ADMIN_ID))))
 
@@ -393,7 +471,20 @@ const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasT
         '重连的一方也重新看到对方',
       ]) skip(name, '需要假 SFU 主动断开媒体连接；真实网络切换须另行实测')
     } else {
+      // 断的是正在共享屏幕的人：看的一方开着全屏，重连那几秒不能被踢出全屏，画面回来接着看
+      await a.click('[data-testid=call-screen]')
+      const sharedBefore = !!(await videoFlowing(b, tile(ADMIN_ID, 'screen')))
+      await b.click('[data-testid=call-fullscreen]')
+      const fullBefore = await b.waitForFunction(() => document.fullscreenElement === document.documentElement, null, { timeout: 5000 }).then(() => true).catch(() => false)
       const adminSession = sql(`select p.cf_session_id from call_participants p join call_sessions c on c.id = p.call_id where c.room_slug is not null and p.left_at is null and p.user_id = '${ADMIN_ID}'`)
+      // 一直盯着：重连过程中看的一方有没有哪一刻退出了大图 / 全屏
+      await b.evaluate(() => {
+        window.__leftBigView = false
+        const o = document.querySelector('[data-testid=call-overlay]')
+        const mark = () => { if (o.getAttribute('data-expanded') !== 'true' || !document.fullscreenElement) window.__leftBigView = true }
+        new MutationObserver(mark).observe(o, { attributes: true, attributeFilter: ['data-expanded'] })
+        document.addEventListener('fullscreenchange', mark)
+      })
       const dropped = await sfu.drop(adminSession)
       // ICE 要过几秒才发现对端没了（consent 超时），再加 5 秒宽限才重连；重连本身很快，看"重新加入"的日志而不是抓那一瞬间的状态
       const reconnectLogged = await new Promise((resolve) => {
@@ -406,6 +497,13 @@ const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasT
       check('重连换了新的 Cloudflare 会话', !!newSession && newSession !== adminSession, { before: adminSession.slice(0, 12), after: newSession.slice(0, 12) })
       check('重连后对方重新看到画面、听到声音', !!(await videoFlowing(b, tile(ADMIN_ID), 30000)) && (await audioPeak(b)) > 0.02)
       check('重连的一方也重新看到对方', !!(await videoFlowing(a, tile(BOB_ID), 30000)))
+      const screenBack = await videoFlowing(b, tile(ADMIN_ID, 'screen'), 30000)
+      const leftBigView = await b.evaluate(() => window.__leftBigView)
+      check('共享屏幕的人重连：看的一方一直在全屏里，共享的画面回来接着放', sharedBefore && fullBefore && !!screenBack && !leftBigView
+        && (await b.locator('[data-testid=call-overlay][data-expanded=true]').count()) === 1, { sharedBefore, fullBefore, screenBack, leftBigView })
+      await b.click('[data-testid=call-exit-fullscreen]')
+      await a.click('[data-testid=call-sharing-stop]')
+      await waitGone(b, tile(ADMIN_ID, 'screen'), 10000)
     }
 
     // ---------- 12. 离开客厅：房间还在 ----------

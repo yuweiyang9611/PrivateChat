@@ -38,6 +38,8 @@ export interface CallDeclinedEvent { callId: string; userId: string }
 const SLOT: Record<TrackKind, keyof RemoteMedia> = { Audio: 'audio', Video: 'video', Screen: 'screen' }
 /** 重连：每次重新加入之间的等待 */
 export const RESTART_DELAYS_MS = [0, 1500, 4000, 8000]
+/** 共享屏幕的人重连时，看的人那边画面位置（和全屏）留多久等他重新发布 */
+export const SHARER_REJOIN_MS = 10_000
 /** 连着重连这么多轮都没真正连通过，就放弃 */
 const MAX_RESTART_ROUNDS = 4
 /** 切到后台超过这么久回来：系统多半暂停过采集，Cloudflare 30 秒收不到媒体会回收发布的轨道，要重新发布 */
@@ -59,6 +61,8 @@ export const useCallsStore = defineStore('calls', () => {
   const remote = shallowRef<Record<string, RemoteMedia>>({})
   const localVideo = shallowRef<MediaStreamTrack | null>(null)
   const localScreen = shallowRef<MediaStreamTrack | null>(null)
+  /** 刚才还在共享屏幕、连接被新的顶掉（重连）的人：userId → 等到什么时候（毫秒时间戳）。过了这个时间还没重新共享就不等了 */
+  const sharerRejoining = ref<Record<string, number>>({})
   const notice = ref<CallNotice | null>(null)
   /** 正在申请权限 / 加入中：按钮置灰，避免连点 */
   const entering = ref(false)
@@ -251,7 +255,12 @@ export const useCallsStore = defineStore('calls', () => {
 
   function onParticipantLeft(e: ParticipantLeftEvent): void {
     const c = calls.value[e.callId]
+    const left = c?.participants.find((p) => p.id === e.participantId)
     if (c) c.participants = c.participants.filter((p) => p.id !== e.participantId)
+    // 正在共享屏幕的人重连了（换了新身份，屏幕要等他重新发布才回来）：记一会儿，看的人那边画面位置先留着
+    if (e.reason === 'replaced' && left?.tracks.some((t) => t.kind === 'Screen')) {
+      sharerRejoining.value = { ...sharerRejoining.value, [left.userId]: Date.now() + SHARER_REJOIN_MS }
+    }
     const cur = current.value
     if (cur?.callId !== e.callId) return
     if (e.participantId === cur.participantId || selfReplaced.has(e.participantId)) {
@@ -518,6 +527,7 @@ export const useCallsStore = defineStore('calls', () => {
     closeSession()
     releaseMedia()
     remote.value = {}
+    sharerRejoining.value = {}
     void wakeLock?.release().catch(() => undefined)
     wakeLock = null
     current.value = null
@@ -1020,7 +1030,7 @@ export const useCallsStore = defineStore('calls', () => {
   }
 
   return {
-    config, enabled, calls, incoming, current, currentCall, others, rooms, ongoing, remote, localVideo, localScreen, notice, entering, busy, camBusy,
+    config, enabled, calls, incoming, current, currentCall, others, rooms, ongoing, remote, localVideo, localScreen, sharerRejoining, notice, entering, busy, camBusy,
     init, refresh, ongoingIn,
     onIncomingCall, onCallUpdated, onParticipantJoined, onParticipantLeft, onParticipantUpdated, onTrackPublished, onTrackUnpublished, onCallDeclined,
     startCall, callMember, accept, join, decline, openFromLink, hangup,
