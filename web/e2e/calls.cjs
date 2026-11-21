@@ -251,6 +251,16 @@ const toast = (page, text, timeout = 8000) => page.locator('.el-message', { hasT
     check('媒体连接状态为已连接', connected)
     const timerText = await a.locator('[data-testid=call-status]').innerText()
     check('通话界面显示计时', /^\d\d:\d\d/.test(timerText), timerText)
+    // 长辈模式、360 px 宽的安卓手机：底栏按钮放不下时一起等比缩小，仍是圆的，不出屏（以前挤成椭圆、最右边的挂断出了屏）
+    await b.setViewportSize({ width: 360, height: 780 })
+    await b.evaluate(() => document.documentElement.classList.add('elder'))
+    await sleep(300)
+    const footer = await b.evaluate(() => [...document.querySelectorAll('[data-testid=call-overlay] footer button')].filter((x) => x.offsetParent)
+      .map((x) => { const r = x.getBoundingClientRect(); return { id: x.dataset.testid, w: Math.round(r.width), h: Math.round(r.height), left: Math.round(r.left), right: Math.round(r.right) } }))
+    await b.evaluate(() => document.documentElement.classList.remove('elder'))
+    await b.setViewportSize({ width: 420, height: 860 })
+    check('长辈模式在 360 px 宽的手机上：通话按钮都在屏幕里、还是圆的、不小于 52 px', footer.length >= 4
+      && footer.every((x) => x.left >= 0 && x.right <= 360 && x.w >= 52 && (x.id === 'call-hangup' ? Math.abs(x.w / x.h - 88 / 68) < 0.05 : Math.abs(x.w - x.h) <= 1)), footer)
     const convId = sql(`select conversation_id from call_sessions where ended_at is null and room_slug is null`)
     check('数据库里这通通话已接通、两人在场', sql(`select count(*) from call_participants p join call_sessions c on c.id = p.call_id where c.ended_at is null and c.room_slug is null and c.answered_at is not null and p.left_at is null`) === '2')
 

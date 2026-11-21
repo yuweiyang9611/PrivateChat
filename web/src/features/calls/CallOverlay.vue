@@ -565,14 +565,16 @@ const self = computed(() => session.user?.displayName ?? '')
         </button>
       </main>
 
-      <footer class="flex items-center justify-center gap-4 px-4 py-4 sm:gap-6" :inert="expanded">
+      <!-- 窄屏（360 px 的安卓、长辈模式）间距收紧；还放不下时按钮一起等比缩小，保持圆形 -->
+      <footer class="flex items-center justify-center gap-2 px-2 py-4 min-[400px]:gap-4 min-[400px]:px-4 sm:gap-6" :inert="expanded">
         <button class="pc-call-btn" :class="{ off: !cur.micOn }" type="button" :title="t(cur.micOn ? 'calls.mute' : 'calls.unmute')" data-testid="call-mic" :data-on="cur.micOn" @click="calls.toggleMic()">
           <el-icon :size="24"><component :is="cur.micOn ? Microphone : Mute" /></el-icon>
         </button>
         <button class="pc-call-btn" :class="{ off: !cur.camOn, slash: !cur.camOn }" type="button" :title="t(cur.camOn ? 'calls.camOff' : 'calls.camOn')" data-testid="call-cam" :data-on="cur.camOn" :disabled="cur.phase === 'reconnecting' || calls.camBusy" @click="calls.toggleCam()">
           <el-icon :size="24"><VideoCamera /></el-icon>
         </button>
-        <button v-if="cur.camOn && canFlip" class="pc-call-btn sm:hidden" type="button" :title="t('calls.flip')" data-testid="call-flip" :disabled="cur.phase === 'reconnecting' || calls.camBusy" @click="calls.flipCamera()">
+        <!-- 有前后摄像头的设备（手机、平板，横竖都算）才有翻转；用鼠标的电脑不显示 -->
+        <button v-if="cur.camOn && canFlip" class="pc-call-btn [@media(pointer:fine)]:hidden" type="button" :title="t('calls.flip')" data-testid="call-flip" :disabled="cur.phase === 'reconnecting' || calls.camBusy" @click="calls.flipCamera()">
           <el-icon :size="24"><Refresh /></el-icon>
         </button>
         <button v-if="canShare" class="pc-call-btn" :class="{ active: cur.screenOn }" type="button" :title="t(cur.screenOn ? 'calls.stopShare' : 'calls.share')" data-testid="call-screen" :data-on="cur.screenOn" :disabled="cur.phase === 'reconnecting'" @click="calls.toggleScreen()">
@@ -642,11 +644,15 @@ const self = computed(() => session.user?.displayName ?? '')
     width: 96px;
   }
 }
+/* 放不下时一起等比缩小（宽度按比例让，高度跟着 aspect-ratio 走，不会挤成椭圆），最小 44 px */
 .pc-call-btn {
   position: relative;
   display: flex;
-  height: 56px;
+  flex: 0 1 56px;
   width: 56px;
+  min-width: 44px;
+  height: auto;
+  aspect-ratio: 1;
   align-items: center;
   justify-content: center;
   border-radius: 9999px;
@@ -666,7 +672,10 @@ const self = computed(() => session.user?.displayName ?? '')
   background: var(--pc-primary);
 }
 .pc-call-btn.hangup {
+  flex-basis: 72px;
   width: 72px;
+  min-width: 56px;
+  aspect-ratio: 72 / 56;
   background: #e5484d;
 }
 /* 图标库里没有"摄像头关闭"：画一道斜线 */
@@ -684,10 +693,14 @@ const self = computed(() => session.user?.displayName ?? '')
 <style>
 /* 长辈模式：按钮更大（不带 scoped，要匹配 html 上的 class） */
 html.elder [data-testid='call-overlay'] footer button {
-  height: 68px;
+  flex-basis: 68px;
   width: 68px;
+  min-width: 52px;
 }
 html.elder [data-testid='call-overlay'] footer button[data-testid='call-hangup'] {
+  flex-basis: 88px;
   width: 88px;
+  min-width: 68px;
+  aspect-ratio: 88 / 68;
 }
 </style>
