@@ -379,7 +379,10 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 - 屏幕共享是同一条发布连接上的第三条轨道，停止时协商式关闭。iOS Safari 没有 `getDisplayMedia`，按钮不显示。
 - 观看共享屏幕（`CallOverlay` + `ScreenStage`，摆法在 `stageLayout.ts`）：画面按真实比例尽量大，宽的窗口人像让到右边一列、窄的放到下面（看哪种画面更大）；"谁在共享"按人算、以服务器说的轨道为准：自己重连时画面位置不消失，只显示"正在接收…"；共享的人重连（换了新身份、要过一会儿才重新发布）时位置也留着，最多等 10 秒，看的人不会被踢出全屏。点画面或"全屏"进入大图：整页全屏（`document.documentElement`，来电窗和提示照样看得见），安卓顺带锁横屏，iPhone 没有网页全屏就在页面里铺满；手机横过来自动进大图。只有大图里能放大（放大 / 缩小 / 还原大小按钮，也可以双击、双指、Ctrl + 滚轮）和拖动，退出就还原；按钮放在画面用不上的那一边，一直显示。大图里摄像头变成浮在画面上的小窗（`FloatingCams`），能拖到四个角、收成圆形浮动图标。浏览器支持画中画的话还有"小窗"按钮，把共享的画面放进系统小窗（切到别的应用也浮在最上面）。共享的人看到一条提示，旁边就是"停止共享"；不显示自己屏幕的预览（会套娃）。
 - 最小化后是一个能拖到四个角的浮窗：有人共享就放共享的画面，不然放对方的摄像头，下面是计时和挂断；点画面回到通话。浮窗停在哪个角记在这台设备上。
-- 上行：摄像头 720p、最高 30 帧、最高 1.2 Mbps；屏幕最高 30 帧、2.5 Mbps、`contentHint = detail`（带宽 / CPU 不够时先降帧率、不降分辨率，文字保持清楚）。约束写 `frameRate: { ideal: 30, max: 30 }`：Chrome / Edge 按 ideal 定实际帧率（以前摄像头写 24 就丢帧到 24、屏幕写 15 就按 15 帧采）；不写 min / exact（暗处摄像头会自己降帧，写死了打不开；共享屏幕不接受）。全项目的帧率上限都是 30。**simulcast 暂未启用**：需要在真实 Cloudflare 上验证各浏览器的分层行为后再开（发布端 `sendEncodings` + 订阅端 `simulcast.preferredRid`），留到 M6。
+- 上行：摄像头 720p、最高 30 帧、最高 1.2 Mbps；屏幕最高 30 帧、2.5 Mbps、`contentHint = detail`（带宽 / CPU 不够时先降帧率、不降分辨率，文字保持清楚）。约束写 `frameRate: { ideal: 30, max: 30 }`：Chrome / Edge 按 ideal 定实际帧率（以前摄像头写 24 就丢帧到 24、屏幕写 15 就按 15 帧采）；不写 min / exact（暗处摄像头会自己降帧，写死了打不开；共享屏幕不接受）。全项目的帧率上限都是 30。**不开 simulcast（分层发送）**，2026-11-22 在真实 Cloudflare 上实测后决定的：
+  - 能用：发布端三层（`sendEncodings` rid f / h / q = 原尺寸 / 一半 / 四分之一，VP8）Cloudflare 都接受；订阅时带 `simulcast { preferredRid, priorityOrdering: asciibetical, ridNotAvailable: asciibetical }` 0.1 秒出第一帧；`PUT tracks/update` 换层不用协商、换的过程中不卡；再发共享屏幕、摄像头关着时的占位画面都不影响。
+  - 不能接受的：换层要等 Cloudflare 向发布端要那一层的关键帧，`tracks/update` 之后 4–10 秒才发（重复发也一样）；更要紧的是发的人上行不够、浏览器自己停掉最上面一层时，正看着那一层的人画面停 6–12 秒才被退到下一层。现在只发一层时，这种情况只是画质慢慢降。家里的通话大多是一对一、常有人用手机流量，所以不开。
+  - 怎么测的（临时脚本，没进仓库）：两个浏览器页面，接口经服务器转发给 Cloudflare；发布三层、订阅一条，反复 `tracks/update`，按订阅端每一帧的尺寸（`requestVideoFrameCallback`）量多久换过去、发布端各层什么时候收到 FIR；再让发布端用 `setParameters` 停掉 f，量订阅端停了多久。Cloudflare 换层变快了可以照这个再测。
 - 通话需要安全上下文：局域网 8080 明文直连时没有通话（界面有说明）。
 
 **没有的东西**：服务端录制（Realtime SFU 不提供，RealtimeKit 才有）、webhook（参与者状态靠 api 自己维护）。
@@ -895,7 +898,7 @@ docker compose up -d     # 首次会构建 web 与 api 镜像
 | M3 通话（已完成） | 3 周 | Cloudflare Realtime 会话 / 轨道编排、1:1 / 会议、屏幕共享、客厅、通话记录、来电推送；真实 Cloudflare 上尚未实测 |
 | M4 时光（已完成） | 2 周 | 动态 / 评论 / 点赞 / 那年今天 / 相册 |
 | M5 远程（已完成） | 3–4 周 | Agent v1（Windows 托盘，GDI + Media Foundation H.264，SendInput）+ 设备码 + 同意 / 无人值守 PIN + 中继（按帧确认流控）+ 浏览器控制端（WebCodecs）+ 审计；经 Cloudflare 隧道、实体机上尚未实测 |
-| M6 打磨 | 持续 | 搜索（已完成）、长辈模式、WebDAV、备份脚本、Capacitor、通话 simulcast / 网络自适应 |
+| M6 打磨 | 持续 | 搜索（已完成）、长辈模式（已完成）、备份脚本；通话 simulcast 实测后不开（见 4.5）；WebDAV、Capacitor 暂不做 |
 
 一个人业余做，M0–M5 约 4–5 个月。建议 M1 完成就让家人用起来，后面按反馈排序。
 
