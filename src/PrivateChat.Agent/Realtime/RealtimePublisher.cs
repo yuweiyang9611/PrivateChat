@@ -32,6 +32,8 @@ public sealed class RealtimePublisher : IDisposable
 
     private readonly RTCPeerConnection _pc;
     private readonly VideoStream _video;
+    /// <summary>接通后定期重申走哪条路（见 <see cref="IcePathKeeper"/>："接通约 35 秒后断流"的修法）</summary>
+    private readonly IcePathKeeper _path;
     private readonly TaskCompletionSource _connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Lock _send = new();
     private readonly SentPacket[] _sent = new SentPacket[ResendSlots];
@@ -71,6 +73,7 @@ public sealed class RealtimePublisher : IDisposable
             new SIPSorceryMedia.Abstractions.AudioFormat(AudioCodecsEnum.OPUS, AudioPayloadType, Audio.AudioFormat.SampleRate, Audio.AudioFormat.Channels, "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1"),
             MediaStreamStatusEnum.SendOnly));
         _video = _pc.VideoStream;
+        _path = new IcePathKeeper(_pc.GetRtpChannel()) { Trace = s => Trace?.Invoke(s) };
 
         _pc.onconnectionstatechange += OnState;
         _pc.OnReceiveReport += OnReport;
@@ -257,6 +260,7 @@ public sealed class RealtimePublisher : IDisposable
         {
             case RTCPeerConnectionState.connected:
                 _up = true;
+                _path.Start();
                 _connected.TrySetResult();
                 Changed(RealtimeLinkState.Connected);
                 break;
@@ -326,6 +330,7 @@ public sealed class RealtimePublisher : IDisposable
         _pc.onconnectionstatechange -= OnState;
         _pc.OnReceiveReport -= OnReport;
         _video.OnNackReceived -= OnNack;
+        _path.Dispose();
         try { _pc.Close("disposed"); } catch (Exception) { /* 关的时候出错不要紧 */ }
         _pc.Dispose();
     }
