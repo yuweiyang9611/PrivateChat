@@ -1,11 +1,13 @@
 using System.Runtime.InteropServices;
+using PrivateChat.Agent.Telemetry;
 
-namespace PrivateChat.Agent.Telemetry;
+namespace PrivateChat.Agent.Video;
 
-// DXGI / D3D11 的最小 COM 互操作，写法同 Video/MediaFoundation.cs：只声明用得到的方法。
-// [ComImport] 接口不继承基接口的 vtable，基接口（IDXGIObject、IDXGIFactory、IDXGIAdapter、IDXGIOutput）的方法要按顺序重抄一遍，
-// 不调用的用无参占位（只占 vtable 槽位，永远不会被调用）。
-// 探测（--probe-hardware）用它列显卡、看显示器接在哪张卡上、试桌面复制；以后用桌面复制截屏时接着用。
+// DXGI 的最小 COM 互操作，写法同 Video/MediaFoundation.cs：只声明用得到的方法。
+// [ComImport] 接口不继承基接口的 vtable，基接口（IDXGIObject、IDXGIFactory、IDXGIAdapter）的方法要按顺序重抄一遍，
+// 不调用的用无参占位（只占 vtable 槽位，永远不会被调用）。槽位顺序对照过 Windows SDK 10.0.26100 的 dxgi.h。
+// 探测（--probe-hardware）用它列显卡、看显示器接在哪张卡上（见 Telemetry/HardwareInfo）。
+// 桌面复制截屏本身（DxgiScreenSource）用的是 DxgiNative.cs 里按槽位号直接调的那一套：对象的生命周期自己管，不经 RCW。
 
 [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
 internal struct DxgiAdapterDesc1
@@ -35,21 +37,6 @@ internal struct DxgiOutputDesc
     public int AttachedToDesktop;
     public int Rotation;
     public IntPtr Monitor;
-}
-
-[StructLayout(LayoutKind.Sequential)]
-internal struct DxgiOutduplFrameInfo
-{
-    public long LastPresentTime;
-    public long LastMouseUpdateTime;
-    public int AccumulatedFrames;
-    public int RectsCoalesced;
-    public int ProtectedContentMaskedOut;
-    public int PointerX;
-    public int PointerY;
-    public int PointerVisible;
-    public int TotalMetadataBufferSize;
-    public int PointerShapeBufferSize;
 }
 
 [ComImport, Guid("770aae78-f26f-4dba-a829-253c83d1b387"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -84,33 +71,6 @@ internal interface IDXGIOutput
     void SetPrivateData(); void SetPrivateDataInterface(); void GetPrivateData(); void GetParent();
     // IDXGIOutput
     [PreserveSig] int GetDesc(out DxgiOutputDesc desc);
-}
-
-[ComImport, Guid("00cddea8-939b-4b83-a340-a685226666cc"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-internal interface IDXGIOutput1
-{
-    // IDXGIObject
-    void SetPrivateData(); void SetPrivateDataInterface(); void GetPrivateData(); void GetParent();
-    // IDXGIOutput
-    void GetDesc(); void GetDisplayModeList(); void FindClosestMatchingMode(); void WaitForVBlank(); void TakeOwnership(); void ReleaseOwnership();
-    void GetGammaControlCapabilities(); void SetGammaControl(); void GetGammaControl(); void SetDisplaySurface(); void GetDisplaySurfaceData(); void GetFrameStatistics();
-    // IDXGIOutput1
-    void GetDisplayModeList1(); void FindClosestMatchingMode1(); void GetDisplaySurfaceData1();
-    /// <param name="device">ID3D11Device*（建在这块显示器所在的那张卡上）。</param>
-    [PreserveSig] int DuplicateOutput(IntPtr device, out IDXGIOutputDuplication duplication);
-}
-
-[ComImport, Guid("191cfac3-a341-470d-b26e-a864f428319c"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-internal interface IDXGIOutputDuplication
-{
-    // IDXGIObject
-    void SetPrivateData(); void SetPrivateDataInterface(); void GetPrivateData(); void GetParent();
-    // IDXGIOutputDuplication
-    void GetDesc();
-    /// <param name="resource">IDXGIResource*（拿到了要 Release，再 ReleaseFrame）。</param>
-    [PreserveSig] int AcquireNextFrame(int timeoutMs, out DxgiOutduplFrameInfo info, out IntPtr resource);
-    void GetFrameDirtyRects(); void GetFrameMoveRects(); void GetFramePointerShape(); void MapDesktopSurface(); void UnMapDesktopSurface();
-    [PreserveSig] int ReleaseFrame();
 }
 
 internal static class Dxgi

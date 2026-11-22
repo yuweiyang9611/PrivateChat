@@ -3,16 +3,28 @@ using System.Runtime.InteropServices;
 
 namespace PrivateChat.Agent.Video;
 
-/// <summary>一块显示器：在虚拟桌面上的位置（物理像素）。</summary>
-public sealed record ScreenInfo(int Index, Rectangle Bounds, bool IsPrimary);
+/// <summary>一块显示器：在虚拟桌面上的位置（物理像素）。DeviceName：系统里的名字（\\.\DISPLAY1），桌面复制靠它找对应的显卡输出。</summary>
+public sealed record ScreenInfo(int Index, Rectangle Bounds, bool IsPrimary, string? DeviceName = null);
 
-/// <summary>采到的一帧：BGRA，已缩放到编码尺寸（偶数宽高）。缓冲区由来源复用，下一次采集前有效。</summary>
-public sealed class CapturedFrame(byte[] bgra, int width, int height, int stride)
+/// <summary>采到的一帧是什么格式：BGRA（GDI、测试画面），或者显卡上已经转好的 NV12（桌面复制）。</summary>
+public enum FrameFormat { Bgra, Nv12 }
+
+/// <summary>
+/// 采到的一帧，已缩放到编码尺寸（偶数宽高）。缓冲区由来源复用，下一次采集前有效。
+/// Bgra：每行 stride 字节（≥ 宽 × 4）。Nv12：紧凑排列（stride == 宽）：先是宽 × 高的 Y，再是宽 × 高 / 2 的交错 UV。
+/// ChangedHint：按 <c>FrameTiles</c> 的块（64×64），true = 可能变了；null = 不知道（全部比较）。
+/// 给了提示的来源保证真变了的块都标上了（变化区域、移动区域、鼠标指针新旧位置）。
+/// </summary>
+public sealed class CapturedFrame(byte[] data, int width, int height, int stride, FrameFormat format = FrameFormat.Bgra, bool[]? changedHint = null)
 {
-    public byte[] Bgra { get; } = bgra;
+    public byte[] Data { get; } = data;
+    /// <summary>BGRA 数据（Format 是 Bgra 时才有意义）。</summary>
+    public byte[] Bgra => Data;
     public int Width { get; } = width;
     public int Height { get; } = height;
     public int Stride { get; } = stride;
+    public FrameFormat Format { get; } = format;
+    public bool[]? ChangedHint { get; } = changedHint;
 }
 
 public interface IFrameSource : IDisposable
@@ -21,6 +33,15 @@ public interface IFrameSource : IDisposable
 
     /// <summary>采集一块显示器，缩放到 width × height（调用方按 <see cref="FrameGeometry.Fit"/> 算好）。</summary>
     CapturedFrame Capture(ScreenInfo screen, int width, int height);
+
+    /// <summary>抓的是真屏幕（SessionRunner 要据此查锁屏 / UAC）。</summary>
+    bool IsRealScreen => false;
+
+    /// <summary>日志、遥测里的名字："GDI" / "桌面复制（Intel(R) UHD Graphics）" / "测试画面"。</summary>
+    string Name => "测试画面";
+
+    /// <summary>真屏幕上已经知道现在是锁屏 / 安全桌面（桌面复制被拒）。</summary>
+    bool SecureDesktop => false;
 }
 
 public static class FrameGeometry

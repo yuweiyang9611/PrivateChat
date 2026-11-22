@@ -3,8 +3,6 @@ using PrivateChat.Contracts.Remote;
 
 namespace PrivateChat.Agent.Video;
 
-public readonly record struct EncodedFrame(byte[] Data, bool IsKey);
-
 /// <summary>
 /// Windows 自带的软件 H.264 编码器（Media Foundation，CLSID_CMSH264EncoderMFT），同步 MFT：一帧进、一帧出。
 /// 低延迟模式、无 B 帧、GOP 很长（关键帧只在开头和按需时出现，见 <see cref="RequestKeyFrame"/>）。
@@ -13,10 +11,17 @@ public readonly record struct EncodedFrame(byte[] Data, bool IsKey);
 ///   远程画面用这个——编码器自己的固定码率在画面突变时管不住，见 <see cref="PrivateChat.Agent.Session.QualityPlanner"/>。
 /// - 固定码率（没给 quality，或者这台电脑的编码器不接受按质量）：<see cref="SetBitrate"/> 可以中途改。
 /// 输出 Annex B；关键帧前总是带 SPS / PPS，方便控制端中途加入或解码器重置后直接开始。
+/// 远程默认用它；探测验证过的显卡硬件编码器（<see cref="HardwareH264Encoder"/>）能用时用那个，起不来、中途出错又换回它（见 <see cref="VideoEncoders"/>）。
 /// 只能在一个线程上用（采集循环）。
 /// </summary>
-public sealed class H264Encoder : IDisposable
+public sealed class H264Encoder : IVideoEncoder
 {
+    /// <summary>日志、遥测里的名字（会话遥测、诊断里也是这个）。</summary>
+    public const string SoftwareName = "Microsoft H.264（软件）";
+
+    public string Name => SoftwareName;
+    public bool IsHardware => false;
+
     private const int ProfileMain = 77;
     private const int RateControlCbr = 0;
     private const int RateControlQuality = 3;

@@ -16,17 +16,25 @@ namespace PrivateChat.Agent;
 ///     --pretend-version X  假装自己是版本 X（只在 PRIVATECHAT_AGENT_TEST=1 时生效）：测自动升级用
 ///     --consent accept|decline|ignore|wait   自动回复远程请求（accept 需要环境变量 PRIVATECHAT_AGENT_TEST=1；
 ///                          wait = 同意窗口一直挂着没人点，直到请求被取消或超时）
-/// PrivateChat.Agent.exe --selftest [out.h264] [--screen]   编码器自检
+/// PrivateChat.Agent.exe --selftest [out.h264] [--capture dxgi|gdi|pattern] [--encoder auto|hardware|software]
+///                          编码器 / 截屏自检：打印用了哪个编码器、哪种截屏和每帧耗时（见 SelfTest）
 /// PrivateChat.Agent.exe --probe-hardware OUT.json   探测显卡、编码器、截屏，结果写进 OUT.json 后退出（遥测用：Agent 连上服务器后
-///                          自己在子进程里跑，见 Telemetry/HardwareTelemetry；也可以手动跑来看）
+///                          自己在子进程里跑，见 Telemetry/HardwareTelemetry；也可以手动跑来看）。远程只用这里验证过的桌面复制和硬件编码器
 /// 环境变量：
+///     PRIVATECHAT_AGENT_CAPTURE=auto|dxgi|gdi   怎么截屏（默认 auto：最近一次探测验证过桌面复制的显示器上用桌面复制，别的用 GDI；
+///                                             dxgi = 没验证过也用桌面复制；gdi = 一律 GDI。桌面复制中途出错都退回 GDI，远程不断。
+///                                             见 Video/ScreenCaptures、docs/DESIGN.md"截屏和编码器怎么选"）
+///     PRIVATECHAT_AGENT_ENCODER=auto|hardware|software   用哪个 H.264 编码器（默认 auto：最近一次探测里试编成功的硬件编码器，同一张显卡上的优先，
+///                                             没有就用 Windows 自带的软件编码器；hardware = 没验证过也试显卡的硬件编码器；software = 一律软件。
+///                                             硬件编码器起不来、中途出错都换回软件编码器，出过错的这个进程里不再用。见 Video/VideoEncoders）
 ///     PRIVATECHAT_AGENT_AUTOUPDATE=off        不自动升级（默认：服务器上的安装包比自己新就自动换，见 Updater）
 ///     PRIVATECHAT_AGENT_REALTIME=off          不用快速线路（画面和声音只走服务器中继；默认：服务器配了 Cloudflare Realtime 就可以用，由控制端决定）
 ///     PRIVATECHAT_AGENT_TLS=bundled|system   强制用程序自带的 TLS 1.3 / 系统的 TLS（默认：系统没有 TLS 1.3 时用自带的）
 ///     PRIVATECHAT_AGENT_TELEMETRY=off         不报遥测：不探测硬件、不上报（默认：连上服务器后报这台电脑的硬件和能力——没探测过、或者
 ///                                             版本 / 显卡驱动 / 显示器变了就先在子进程里探测一次，等启动后第一次查完更新、连上满 30 秒、
 ///                                             没在被远程时才探——每次远程再报性能汇总；
-///                                             只有数字、型号和出错的说明，管理员在设备页的"诊断"里看，见 docs/DESIGN.md"远程协助遥测"）
+///                                             只有数字、型号和出错的说明，管理员在设备页的"诊断"里看，见 docs/DESIGN.md"远程协助遥测"）。
+///                                             关了就没有探测验证过的桌面复制和硬件编码器：远程用 GDI + 软件编码器（除非上面两个强制）
 ///     PRIVATECHAT_AGENT_TEST_RTP_DROP=0.02   快速线路上故意丢掉这个比例的画面包（只在 PRIVATECHAT_AGENT_TEST=1 时生效，自动化测试用）
 ///     PRIVATECHAT_AGENT_TEST_CA=FILE.pem     自带的 TLS 只信任这个根证书（只在 PRIVATECHAT_AGENT_TEST=1 时生效，自动化测试用）
 ///     PRIVATECHAT_AGENT_TEST_ENCODE_DELAY_MS=45   每编一帧多等这么多毫秒 × 像素数 ÷ 1280×720，装成一台编码很慢的电脑（只在 PRIVATECHAT_AGENT_TEST=1 时生效，自动化测试用）

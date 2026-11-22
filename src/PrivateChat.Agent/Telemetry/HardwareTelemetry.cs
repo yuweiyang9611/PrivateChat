@@ -1,7 +1,11 @@
+using System.Collections.Frozen;
 using System.Diagnostics;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using PrivateChat.Agent.Video;
 using PrivateChat.Contracts.Remote;
 
 namespace PrivateChat.Agent.Telemetry;
@@ -14,13 +18,16 @@ namespace PrivateChat.Agent.Telemetry;
 /// - 什么时候起子进程（见 <see cref="ReadyToProbeAsync"/>）：启动后自动升级的第一次检查做完了（已是最新、暂缓、出错，或者没启用自动升级），
 ///   而且这次连上服务器满 30 秒——刚升级完、服务器上又有更新的版本时，别探测到一半被换版本打断；
 ///   只在没有远程的时候跑，跑到一半开始远程就杀掉，远程结束后重来；自动升级换版本之前、Agent 退出时也杀掉（<see cref="Suspend"/>），结果文件删掉。
-/// - 结果存在数据目录的 telemetry.json。之后每次要上报时先算一遍便宜的指纹（程序版本、显卡驱动、显示器，见 <see cref="HardwareInfo.Fingerprint"/>）：
+/// - 结果存在数据目录的 telemetry.json。之后每次要上报时先算一遍便宜的指纹（程序版本、显卡驱动、显示器，见 <see cref="HardwareInfo.Fingerprint"/>；
+///   再加上探测做法的版本 <see cref="ProbeMethod"/>）：
 ///   和上次探测时一样就沿用上次的显卡 / 编码器 / 截屏结果，只刷新系统、内存、显示器这些字段，不再起子进程。探测失败（超时、崩溃）的结果也一样沿用，
 ///   免得每次连上都去碰一个会卡死的驱动；换了版本、换了驱动、换了显示器才重来。
 /// - 锁着屏时探到的截屏结果不准：只临时用、不存盘，解锁后重探一次（见 <see cref="CurrentAsync"/>）。
 /// - 每次连上服务器（和重新探测之后）PUT /api/remote/agent/telemetry（不走 SignalR：消息上限 32 KB，而且 Report 会让所有网页刷新设备列表）。
 ///   服务器是老版本（404 / 405）就安静地等下次连上再说；网络出错过一分钟再试，最多三次。
-/// PRIVATECHAT_AGENT_TELEMETRY=off 时 AgentService 不创建它。
+/// - 远程只用探测验证过的桌面复制和硬件编码器（<see cref="ValidatedOutputs"/>、<see cref="ValidatedEncoders"/>，docs/DESIGN.md"截屏和编码器怎么选"）：
+///   新的原生路径先在子进程里走一遍，驱动出问题只带走子进程。远程开始前、显示设置变了时也对一次指纹（<see cref="Recheck"/>），变了就先不用。
+/// PRIVATECHAT_AGENT_TELEMETRY=off 时 AgentService 不创建它（远程就一律 GDI + 软件编码器，除非用环境变量强制）。
 /// </summary>
 /// <param name="updateChecked">启动后自动升级的第一次检查做完了（见 AgentService.UpdateLoopAsync）；换成新版本了的话一直不完成。</param>
 internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive, Task updateChecked)
@@ -42,6 +49,14 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
     private const string AccessDenied = "0x80070005";
     /// <summary>探测子进程的结果文件：telemetry-probe-{Agent 的进程号}.json（写的时候先写 .tmp）。</summary>
     private static readonly Regex OutputName = new(@"^telemetry-probe-(\d+)\.json(?:\.tmp)?$", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    /// <summary>探测没做完的两种说法（写进 Problems 的开头）：这样的结果什么都不算验证过（见 <see cref="Publish"/>）。</summary>
+    private const string TimeoutFailure = "探测超时";
+    private const string ExitCodeFailure = "探测进程退出码 ";
+    /// <summary>
+    /// 探测做法的版本，算进指纹：探测怎么做变了，同一个程序版本号下存着的老结果也作废、重探一次。
+    /// 2：桌面复制、硬件编码器经远程用的那几个类（DxgiScreenSource、HardwareH264Encoder）试过才算验证过——老做法的结果不能拿来放行。
+    /// </summary>
+    private const string ProbeMethod = "probe 2";
 
     private readonly SemaphoreSlim _wake = new(0, 1);
     private readonly Lock _gate = new();
@@ -61,6 +76,28 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
     private AgentTelemetrySnapshot? _snapshot;
     /// <summary>_snapshot 是临时的（锁着屏时探的，没存盘）：什么时候探的。只在后台循环里读写。</summary>
     private long? _provisionalSince;
+    /// <summary>后台循环整份换掉（不可变），远程的采集线程随时读：不用锁。<see cref="Recheck"/> 从别的线程把它换成 None（CompareExchange）。</summary>
+    private volatile Validated _validated = Validated.None;
+    /// <summary>上次记进日志的验证结果（变了才再记）。只在后台循环里读写。</summary>
+    private string? _validatedLogged;
+
+    /// <summary>远程能用的显示器、硬件编码器；Fingerprint = 验证它们的那次探测的指纹（<see cref="Recheck"/> 拿来比；None 是 null）。</summary>
+    private sealed record Validated(FrozenSet<string> Outputs, IReadOnlyList<ValidatedEncoder> Encoders, string? Fingerprint)
+    {
+        public static readonly Validated None = new(FrozenSet<string>.Empty, [], null);
+    }
+
+    /// <summary>
+    /// 最近一次探测里整条桌面复制流程验证过的显示器（\\.\DISPLAYn，不分大小写）。还没有做完的探测（没探过、探测超时 / 崩溃 / 退出码不是 0）时是空的；
+    /// 锁着屏时的临时结果也不算（桌面复制被拒，验证不了）。
+    /// </summary>
+    public IReadOnlySet<string> ValidatedOutputs => _validated.Outputs;
+
+    /// <summary>
+    /// 最近一次探测里经 HardwareH264Encoder 试编、每帧都出来了、而且能按质量或逐帧 QP 编的硬件编码器（按探测的顺序）。
+    /// 没做完的探测时是空的；锁着屏时的临时结果照样算（编码不受锁屏影响）。
+    /// </summary>
+    public IReadOnlyList<ValidatedEncoder> ValidatedEncoders => _validated.Encoders;
 
     public void Start(CancellationToken ct)
     {
@@ -104,6 +141,42 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
     }
 
     public void SessionEnded() => Wake();
+
+    /// <summary>
+    /// 远程开始前（建截屏、问验证过的编码器之前）、显示设置变了时调：现算一遍便宜的指纹（注册表 + 显示器列表），
+    /// 和验证结果所属的那次探测比。验证结果平时只在连上服务器（和重探）时对一次指纹，连着服务器的这几天里
+    /// Windows 更新装了新显卡驱动（不用重启、连接也不断）的话，远程会在探测子进程没碰过的驱动上跑桌面复制和硬件编码器。
+    /// 不一样就当场作废（这次远程用 GDI + 软件编码器），并要一次重探：后台循环在没有远程的时候探（连着服务器、连上满 30 秒；正在远程就等它结束）。
+    /// 任何线程都能调，不抛异常；指纹算不出来也当变了（验证不了就别用）。
+    /// </summary>
+    public void Recheck()
+    {
+        if (_validated.Fingerprint is null) return; // 本来就没有验证过的
+        string? now;
+        try
+        {
+            now = Fingerprint();
+        }
+        catch (Exception ex)
+        {
+            AgentLog.Warn($"算不出这台电脑的指纹，探测验证过的先不用：{ex.Message}");
+            now = null;
+        }
+        while (true)
+        {
+            var validated = _validated;
+            if (validated.Fingerprint is null || validated.Fingerprint == now) return;
+            // 后台循环刚好换了一份（新探测的）：拿新的再比一次
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _validated, Validated.None, validated), validated)) break;
+        }
+        AgentLog.Info("显卡驱动或显示器和上次探测时不一样了：探测验证过的桌面复制、硬件编码器先不用（远程用 GDI + 软件编码器），没有远程的时候重新探测");
+        lock (_gate)
+        {
+            _uploadWanted = true;
+            _attempts = 0;
+        }
+        Wake();
+    }
 
     /// <summary>
     /// 自动升级要换版本了、Agent 要退出了：正在跑的探测杀掉（等它真的退出，最多 5 秒）、删掉它的结果文件，之后不再起新的探测，
@@ -207,10 +280,17 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
     /// </summary>
     private async Task<AgentTelemetrySnapshot?> CurrentAsync(CancellationToken ct)
     {
-        var fingerprint = HardwareInfo.Fingerprint();
+        var fingerprint = Fingerprint();
         var known = _snapshot ?? LoadCache();
         var reprobe = ReprobeDue();
-        if (known is not null && known.Fingerprint == fingerprint && !reprobe) return _snapshot = Refresh(known);
+        if (known is not null && known.Fingerprint == fingerprint && !reprobe)
+        {
+            _snapshot = Refresh(known);
+            Publish(_snapshot, provisional: _provisionalSince is not null);
+            return _snapshot;
+        }
+        // 换了版本 / 驱动 / 显示器（或者从没探过）：上次验证过的不再算数，等这次探完
+        if (known is not null && known.Fingerprint != fingerprint) _validated = Validated.None;
         if (sessionActive() || !await ReadyToProbeAsync(ct)) return null;
         var probed = await ProbeAsync(fingerprint, ct);
         if (probed is null) return null;
@@ -226,7 +306,67 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
             _provisionalSince = null;
             SaveCache(probed);
         }
+        Publish(probed, provisional: _provisionalSince is not null);
         return probed;
+    }
+
+    /// <summary>这台电脑的指纹（<see cref="HardwareInfo.Fingerprint"/>）再加上探测做法的版本（<see cref="ProbeMethod"/>），还是 64 位十六进制。</summary>
+    private static string Fingerprint()
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{HardwareInfo.Fingerprint()}\n{ProbeMethod}"))).ToLowerInvariant();
+
+    /// <summary>
+    /// 按最新的快照定远程能用哪些显示器的桌面复制、哪些硬件编码器（<see cref="ValidatedOutputs"/>、<see cref="ValidatedEncoders"/>）：
+    /// - 探测没做完（超时、崩溃、退出码不是 0、停在半路）：什么都不算——多半就是新的原生路径在驱动里出了事，远程别再去碰它；
+    ///   这样的结果也会存盘沿用，换了版本 / 驱动 / 显示器才重探。
+    /// - 显示器：桌面复制那一项 Ok（探测子进程用远程那个类采了几十帧、尺寸都对、没出错）。临时结果（锁着屏）不算。
+    /// - 编码器：硬件的、试编每帧都出来了、没有出错，而且能按质量或逐帧 QP 编（只能固定码率的不自动用：画质规划靠逐帧定质量）。
+    ///   按名字算（<see cref="ValidatedEncoders"/>）：同一个名字的每一项都得这样才算，能用的方式取它们都行的
+    ///   （同厂商的两张卡——核显加独显——各列一个同名的编码器，远程时 VideoEncoders 按名字挑、挑到的可能是探测里没通过的那张卡上的）。
+    /// </summary>
+    private void Publish(AgentTelemetrySnapshot snapshot, bool provisional)
+    {
+        var finished = !snapshot.Problems.Any(p => p.StartsWith(HardwareProbe.UnfinishedPrefix, StringComparison.Ordinal)
+            || p.StartsWith(TimeoutFailure, StringComparison.Ordinal) || p.StartsWith(ExitCodeFailure, StringComparison.Ordinal));
+        var validated = !finished ? Validated.None : new Validated(
+            provisional ? FrozenSet<string>.Empty
+                : snapshot.Capture.Duplication.Where(d => d.Ok && d.Output.Length > 0).Select(d => d.Output).ToFrozenSet(StringComparer.OrdinalIgnoreCase),
+            ValidEncoders(snapshot.Encoders),
+            snapshot.Fingerprint);
+        var before = _validated;
+        _validated = validated;
+        string text;
+        if (!finished) text = "（探测没做完，都不算）远程用 GDI 截屏 + 软件编码器";
+        else
+        {
+            var outputs = validated.Outputs.Count > 0 ? string.Join("、", validated.Outputs.Order(StringComparer.OrdinalIgnoreCase))
+                : provisional ? "（锁着屏时的临时结果，不算）" : "（没有）";
+            var encoders = validated.Encoders.Count > 0 ? string.Join("、", validated.Encoders.Select(e => e.Name)) : "（没有）";
+            text = $"桌面复制 {outputs}，硬件编码器 {encoders}";
+        }
+        // 一样的话不再记；中途作废过（指纹变了）、重探后又是同样的结果，再记一次
+        if (text == _validatedLogged && !(before.Fingerprint is null && validated.Fingerprint is not null)) return;
+        _validatedLogged = text;
+        AgentLog.Info($"探测验证过、远程可以用的：{text}");
+    }
+
+    /// <summary>
+    /// 探测里的编码器 → 远程能自动用的硬件编码器（按第一次出现的顺序）：同名的（MFTEnumEx 每张卡列一个，名字一样）每一项都
+    /// 试编通过才算，QualityMode / PerFrameQp 取它们都是 true 的，取完两样都不行也不算。
+    /// </summary>
+    internal static List<ValidatedEncoder> ValidEncoders(IEnumerable<TelemetryEncoder> encoders)
+    {
+        var result = new List<ValidatedEncoder>();
+        foreach (var group in encoders.Where(e => e.Hardware).GroupBy(e => EncoderChoice.BaseName(e.Name), StringComparer.Ordinal))
+        {
+            if (group.Key.Length == 0) continue;
+            var passed = group.All(e => e.Test is { Frames: > 0, Error: null } test && test.FramesOut == test.Frames);
+            var quality = group.All(e => e.QualityMode);
+            var qp = group.All(e => e.PerFrameQp);
+            if (!passed || !(quality || qp)) continue;
+            var first = group.First();
+            result.Add(new ValidatedEncoder(first.Name, first.VendorId, quality, qp));
+        }
+        return result;
     }
 
     /// <summary>手上的临时结果放了 <see cref="ProvisionalFor"/> 以上、现在没锁屏：该重探了。</summary>
@@ -324,13 +464,13 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
             {
                 ct.ThrowIfCancellationRequested();
                 Kill(process);
-                failure = "探测超时";
+                failure = TimeoutFailure;
             }
             else
             {
                 await exited;
             }
-            if (failure is null && process.ExitCode != 0) failure = $"探测进程退出码 {ExitCodeText(process.ExitCode)}";
+            if (failure is null && process.ExitCode != 0) failure = $"{ExitCodeFailure}{ExitCodeText(process.ExitCode)}";
         }
         catch (OperationCanceledException)
         {

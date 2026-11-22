@@ -13,7 +13,11 @@
 // 脚本先把 api 指到假 SFU 上重建；网页默认选标准线路（原有用例照旧在中继上跑），中间插一段专门测快速线路：
 // 切过去之后画面 / 声音 / 键鼠、中继上不再有画面帧、故意丢包靠重发补上、掐断后不换线路而是自己重新接上、接不上时提示并手动切到标准线路。
 // 不加 --realtime 时被控端用 PRIVATECHAT_AGENT_REALTIME=off 关掉快速线路：api 配着真的 Cloudflare 也不会去连。
-// 前提：compose 栈已启动，装有 Edge；用法：cd web && node e2e/remote.cjs [--agent-tls13] [--realtime]
+// 加 --encoder hardware|software|auto：被控端用 PRIVATECHAT_AGENT_ENCODER=…（hardware = 没探测验证过也用显卡的硬件编码器），
+// 同一套用例照样要过；hardware 时另外断言"编码 …"那一行写的是一个（硬件）编码器、中途没有换回软件编码器。
+// 截屏方式跟着环境变量 PRIVATECHAT_AGENT_CAPTURE 走（测试画面用不着；E2E_REAL_SCREEN=1 那一段会说用的是哪种，
+// 设成 dxgi 时还断言用上了桌面复制——锁着屏的电脑上跑不了这一段）。
+// 前提：compose 栈已启动，装有 Edge；用法：cd web && node e2e/remote.cjs [--agent-tls13] [--realtime] [--encoder hardware]
 // 对着另一套 compose 栈跑：E2E_BASE（网页地址）、E2E_COMPOSE（docker compose 命令，带 -p / -f）
 const fs = require('fs')
 const os = require('os')
@@ -27,6 +31,12 @@ const COMPOSE = process.env.E2E_COMPOSE || `docker compose -f "${path.resolve(RO
 const AGENT = path.resolve(ROOT, 'src/PrivateChat.Agent/bin/Debug/net11.0-windows/PrivateChat.Agent.exe')
 const TLS13 = process.argv.includes('--agent-tls13')
 const REALTIME = process.argv.includes('--realtime')
+/** --encoder X：被控端的 PRIVATECHAT_AGENT_ENCODER（不给就不设，照环境变量 / 默认的 auto） */
+const ENCODER = process.argv.includes('--encoder') ? process.argv[process.argv.indexOf('--encoder') + 1] : null
+if (ENCODER !== null && !['auto', 'hardware', 'software'].includes(ENCODER)) {
+  console.error(`--encoder 只能是 auto / hardware / software，现在是：${ENCODER}`)
+  process.exit(2)
+}
 /** --realtime 时：假 SFU 监听的端口，和让 api 连它的环境变量（和 calls.cjs 用的是同一组） */
 const SFU_PORT = Number(process.env.E2E_SFU_PORT || 8788)
 const FAKE_SFU_ENV = {
@@ -93,6 +103,7 @@ function startAgent(dir, consent, source = 'pattern', extraEnv = {}) {
   else env.PRIVATECHAT_AGENT_REALTIME = 'off'
   // 强制走程序自带的 TLS 1.3，只信任测试入口那张临时证书
   if (tls) Object.assign(env, { PRIVATECHAT_AGENT_TLS: 'bundled', PRIVATECHAT_AGENT_TEST_CA: tls.cert })
+  if (ENCODER) env.PRIVATECHAT_AGENT_ENCODER = ENCODER
   Object.assign(env, extraEnv)
   const proc = spawn(AGENT, args, { env })
   agents.add(proc)
@@ -124,6 +135,11 @@ const canvasSize = (page) => page.evaluate(() => {
 const shownFps = async (page) => Number((await page.locator('[data-testid=remote-stats]').textContent().catch(() => '')).match(/(\d+) fps/)?.[1] ?? 0)
 /** 被控端输出里从 from 起的"编码 …"那几行（检查失败时打出来看） */
 const encodeLines = (agent, from = 0) => agent.out.slice(from).match(/编码 \d+x\d+[^\r\n]*/g) ?? []
+/** "编码 …"那一行最后写的编码器和截屏方式（"…，编码器 X，截屏 Y"；老版本被控端没有这一截，都是 null） */
+const pipelineOf = (line) => ({
+  encoder: line?.match(/，编码器 (.+?)，截屏 /)?.[1] ?? null,
+  capture: line?.match(/，截屏 (.+)$/)?.[1]?.trim() ?? null,
+})
 /** 被控端输出里从 from 起自动画质说的那几行 */
 const autoLines = (agent, from = 0) => agent.out.slice(from).match(/自动画质：[^\r\n]*/g) ?? []
 
@@ -282,6 +298,13 @@ async function moveOnCanvas(page, fx, fy) {
     return fps >= 5 ? t : null
   }, 10000)
   check('持续出帧（解码帧率 ≥ 5，有往返延迟）', !!stats && / \d+ ms/.test(stats), stats)
+  if (ENCODER === 'hardware') {
+    // 强制硬件编码：被控端每次建编码器的那一行都写着一个（硬件）编码器，中途没有出错换回软件编码器
+    const built = encodeLines(agent).map((l) => ({ line: l, ...pipelineOf(l) }))
+    check('--encoder hardware：被控端用的是显卡的硬件编码器（"编码 …"那一行写着一个（硬件）编码器），没有换回软件编码器',
+      built.length > 0 && built.every((b) => b.encoder?.endsWith('（硬件）')) && !agent.out.includes('改用软件编码器'),
+      { built: built.map((b) => b.encoder), notes: agent.out.match(/(编码器：|硬件编码器)[^\r\n]*/g)?.slice(0, 4) ?? [] })
+  }
 
   // 声音：测试画面配的是一直响的 440 Hz 测试音（不碰声卡）；网页默认开着声音
   const soundButton = admin.locator('[data-testid=remote-sound]')
@@ -1079,7 +1102,15 @@ async function moveOnCanvas(page, fx, fy) {
       })
       return size !== '0x0' && size !== '300x150' && lit > 100 ? { size, lit } : null
     }, 20000)
-    check('真实屏幕：GDI 截屏 + 编码 + 解码出非黑画面', !!real, real ?? (await canvasSize(admin)))
+    // 截屏、编码器是哪种：看被控端最后一次建编码器那一行（默认 auto 时刚添加的电脑还没探测完，是 GDI + 软件编码器）
+    const realPipeline = pipelineOf(encodeLines(agent).at(-1))
+    console.log(`  真实屏幕：截屏 ${realPipeline.capture ?? '（没写）'}，编码器 ${realPipeline.encoder ?? '（没写）'}`)
+    check('真实屏幕：截屏 + 编码 + 解码出非黑画面', !!real, { ...(real ?? { size: await canvasSize(admin) }), ...realPipeline })
+    if (process.env.PRIVATECHAT_AGENT_CAPTURE === 'dxgi') {
+      // 强制桌面复制：截屏那一截是"桌面复制（显卡名）"，不是退回去的 GDI（锁着屏时桌面复制被拒，这一条会失败）
+      check('PRIVATECHAT_AGENT_CAPTURE=dxgi：真实屏幕用的是桌面复制，没有退回 GDI',
+        realPipeline.capture?.startsWith('桌面复制') === true && !agent.out.includes('截屏改用'), realPipeline)
+    }
     // 真实的声音：环回采集这台电脑的播放设备（这会儿没有声音在播就采到静音，不发包；这里只确认设备打得开）
     const loopback = await until(() => agent.out.match(/声音采集已打开[^\r\n]*/)?.[0] ?? (agent.out.includes('声音采集出错') ? 'error' : null), 8000)
     check('真实声音：能打开这台电脑的播放设备做环回采集', !!loopback && loopback !== 'error', loopback ?? agent.out.split(/\r?\n/).filter((l) => l.includes('声音')).slice(-2))

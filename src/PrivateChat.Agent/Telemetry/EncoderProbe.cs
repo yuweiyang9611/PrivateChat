@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Globalization;
 using System.Runtime.InteropServices;
 using PrivateChat.Agent.Video;
 using PrivateChat.Contracts.Remote;
@@ -27,11 +26,15 @@ internal sealed class EncoderCandidate(IMFActivate? activate, string name, bool 
 /// <summary>
 /// 探测这台电脑上的 H.264 编码器（Media Foundation，只在探测子进程里跑）：
 /// 1. <see cref="List"/>：MFTEnumEx 列出 NV12 → H.264 的编码器（硬件、同步、异步都要，按系统的优先顺序），微软的软件编码器排第一个。
-/// 2. <see cref="Probe"/> 每一个：先建一个实例问能力——是不是异步、ICodecAPI 接受哪些码率控制方式、能不能按质量 / 逐帧给 QP / 低延迟、
-///    1080p 和 4K 的输出输入类型接不接受——问完就关；再新建一个实例实际编 30 帧 1920×1080 的测试画面（系统内存里的 NV12），
-///    量第一帧多久出来、之后每帧平均 / P90 多久、一共多少字节。
-///    微软的软件编码器用远程时的 <see cref="H264Encoder"/> 试编（同步：一帧进一帧出）；硬件编码器用 <see cref="AsyncMftEncoder"/>
-///    （像远程时那样一帧一帧来：送一帧、等它出来再送下一帧；要攒几帧才出的，每帧最多等 100 ms 就先接着送）。最多试 10 秒。
+/// 2. <see cref="Probe"/> 每一个：先建一个实例问能力——是不是异步、ICodecAPI 接受哪些码率控制方式、能不能设按质量 / 逐帧 QP / 低延迟、
+///    1080p 和 4K 的输出输入类型接不接受——问完就关。然后全用远程时的那个类（软件的 <see cref="H264Encoder"/>、
+///    硬件的 <see cref="HardwareH264Encoder"/>，每次新建一个实例）实际编 1920×1080 的测试画面（系统内存里的 NV12）：
+///    - 逐帧改质量是不是真的有效（每种设得上的方式各试一次：质量 20 的关键帧、同一画面再编一帧、调到 70 再编同一画面，
+///      最后那帧要明显更大，见 <see cref="EncoderChoice.RefineWorks"/>）——结果就是报上去的 QualityMode / PerFrameQp
+///      （软件编码器远程时不走逐帧 QP，它的 PerFrameQp 还是"设得上"）；两种都没效果的原因写进 Error。
+///    - 30 帧（第 16 帧要关键帧；硬件的按验证有效的那种方式编，和远程时一样），量第一帧多久出来、之后每帧平均 / P90 多久、一共多少字节；
+///      要了关键帧却没给的写进 Error（不算试编失败：远程时下一帧会再要）。最多试 10 秒。
+///    远程自动用哪个硬件编码器就看这里：试编每帧都出来、没出错，而且按质量或逐帧 QP 验证有效（见 HardwareTelemetry）。
 /// </summary>
 internal static class EncoderProbe
 {
@@ -41,55 +44,28 @@ internal static class EncoderProbe
     public const int TestFps = 30;
     private const int TestKbps = 8000;
     private const int TestQuality = 30;
+    /// <summary>试编时在这一帧（从 0 数）要关键帧。</summary>
+    private const int KeyFrameAt = 15;
+    private const int RefineLow = 20;
+    private const int RefineHigh = 70;
     private const int MaxEncoders = 8;
     private static readonly TimeSpan TestLimit = TimeSpan.FromSeconds(10);
-    private static readonly TimeSpan FrameWait = TimeSpan.FromMilliseconds(100);
-    private static readonly TimeSpan DrainWait = TimeSpan.FromSeconds(2);
-
-    public const string MicrosoftName = "Microsoft H.264（软件）";
 
     public static List<EncoderCandidate> List()
     {
-        MF.EnsureStarted();
-        var input = new MftRegisterTypeInfo(MF.MediaType_Video, MF.VideoFormat_NV12);
-        var output = new MftRegisterTypeInfo(MF.MediaType_Video, MF.VideoFormat_H264);
         var flags = Mft.EnumHardware | Mft.EnumSyncMft | Mft.EnumAsyncMft | Mft.EnumSortAndFilter;
-        MF.Check(Mft.MFTEnumEx(Mft.CategoryVideoEncoder, flags, input, output, out var array, out var count), "列编码器（MFTEnumEx）");
         var list = new List<EncoderCandidate>();
-        try
+        foreach (var activate in Mft.H264Encoders(flags, MaxEncoders))
         {
-            for (var i = 0; i < count; i++)
-            {
-                var ptr = Marshal.ReadIntPtr(array, i * IntPtr.Size);
-                if (ptr == 0) continue;
-                IMFActivate activate;
-                try
-                {
-                    activate = (IMFActivate)Marshal.GetObjectForIUnknown(ptr);
-                }
-                finally
-                {
-                    Marshal.Release(ptr); // 数组里的那份引用
-                }
-                if (list.Count >= MaxEncoders)
-                {
-                    Marshal.ReleaseComObject(activate);
-                    continue;
-                }
-                var transformFlags = activate.GetUINT32(Mft.TransformFlags, out var f) >= 0 ? f : 0;
-                var microsoft = activate.GetGUID(Mft.TransformClsid, out var clsid) >= 0 && clsid == MF.CLSID_MSH264EncoderMFT;
-                var vendor = VendorId(Mft.String(activate, Mft.HardwareVendorId));
-                var hardware = (transformFlags & Mft.EnumHardware) != 0 || vendor != 0;
-                var name = microsoft ? MicrosoftName : Mft.String(activate, Mft.FriendlyName)?.Trim() is { Length: > 0 } n ? n : "（没有名字的编码器）";
-                // 硬件 MFT 规定必须是异步的（建不出来的那种也这么报；建出来了再按它自己的 MF_TRANSFORM_ASYNC 改）
-                list.Add(new EncoderCandidate(activate, name, hardware, vendor, hardware || (transformFlags & Mft.EnumAsyncMft) != 0, microsoft));
-            }
+            var transformFlags = activate.GetUINT32(Mft.TransformFlags, out var f) >= 0 ? f : 0;
+            var microsoft = activate.GetGUID(Mft.TransformClsid, out var clsid) >= 0 && clsid == MF.CLSID_MSH264EncoderMFT;
+            var vendor = Mft.VendorId(activate);
+            var hardware = (transformFlags & Mft.EnumHardware) != 0 || vendor != 0;
+            var name = microsoft ? H264Encoder.SoftwareName : Mft.Name(activate) ?? "（没有名字的编码器）";
+            // 硬件 MFT 规定必须是异步的（建不出来的那种也这么报；建出来了再按它自己的 MF_TRANSFORM_ASYNC 改）
+            list.Add(new EncoderCandidate(activate, name, hardware, vendor, hardware || (transformFlags & Mft.EnumAsyncMft) != 0, microsoft));
         }
-        finally
-        {
-            Marshal.FreeCoTaskMem(array);
-        }
-        // 远程现在用的就是它：放第一个，后面的硬件编码器卡住、探测超时也有它的结果
+        // 远程默认用的就是它：放第一个，后面的硬件编码器卡住、探测超时也有它的结果
         if (list.FirstOrDefault(c => c.Microsoft) is { } ms)
         {
             list.Remove(ms);
@@ -97,15 +73,10 @@ internal static class EncoderProbe
         }
         else
         {
-            list.Insert(0, new EncoderCandidate(null, MicrosoftName, false, 0, false, true));
+            list.Insert(0, new EncoderCandidate(null, H264Encoder.SoftwareName, false, 0, false, true));
         }
         return list;
     }
-
-    /// <summary>"VEN_10DE" → 0x10DE；没有是 0。</summary>
-    private static int VendorId(string? text)
-        => text is not null && text.StartsWith("VEN_", StringComparison.OrdinalIgnoreCase)
-           && int.TryParse(text.AsSpan(4), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var id) ? id : 0;
 
     /// <param name="test">false：时间不够了，只问能力不试编。</param>
     public static TelemetryEncoder Probe(EncoderCandidate candidate, bool test)
@@ -122,16 +93,35 @@ internal static class EncoderProbe
         }
 
         TelemetryEncodeTest? encodeTest = null;
+        bool quality = false, qp = false;
+        var notes = new List<string>();
+        var refineNotes = new List<string>();
         if (error is null && result.Activated)
         {
             if (!result.Accepts1080p) error = HResults.Clip($"不接受 {TestWidth}×{TestHeight} 的 NV12 → H.264：{result.TypeError}");
             else if (!test) error = "探测时间不够了，没有试编";
-            else if (candidate.Microsoft) encodeTest = TestSoftware();
-            else if (result.Async && candidate.Activate is { } activate) encodeTest = TestAsync(activate);
+            else if (candidate.Microsoft)
+            {
+                quality = result.QualityMode && RefineWorks(() => new H264Encoder(TestWidth, TestHeight, TestFps, TestKbps, quality: RefineLow), "按质量", refineNotes);
+                qp = result.PerFrameQp;
+                encodeTest = TestEncode(() => new H264Encoder(TestWidth, TestHeight, TestFps, TestKbps, quality: TestQuality), notes);
+            }
+            else if (result.Async && candidate.Activate is { } activate)
+            {
+                HardwareH264Encoder Hardware(IReadOnlyList<HardwareRateControl> modes, int q)
+                    => new(activate, candidate.Name, candidate.VendorId, TestWidth, TestHeight, TestFps, TestKbps, modes, q, ownsActivate: false);
+                quality = result.QualityMode && RefineWorks(() => Hardware([HardwareRateControl.Quality], RefineLow), "按质量", refineNotes);
+                qp = result.PerFrameQp && RefineWorks(() => Hardware([HardwareRateControl.Qp], RefineLow), "逐帧 QP", refineNotes);
+                // 和远程时一样：验证有效的那种方式（两种都有效先按质量）；都不行就照没验证过时的顺序（这个编码器远程时不会自动用）
+                IReadOnlyList<HardwareRateControl> sessionModes = quality ? [HardwareRateControl.Quality] : qp ? [HardwareRateControl.Qp] : EncoderChoice.UnverifiedModes;
+                encodeTest = TestEncode(() => Hardware(sessionModes, TestQuality), notes);
+            }
             else error = "同步的第三方编码器，没有试编";
         }
+        if (error is null && !quality && !qp && refineNotes.Count > 0) notes.AddRange(refineNotes);
+        if (error is null && notes.Count > 0) error = HResults.Clip(string.Join("；", notes));
         return new TelemetryEncoder(candidate.Name, candidate.Hardware, candidate.VendorId, result.Activated, result.Async,
-            result.RateControlModes, result.QualityMode, result.PerFrameQp, result.LowLatency, result.Accepts1080p, result.Accepts4k,
+            result.RateControlModes, quality, qp, result.LowLatency, result.Accepts1080p, result.Accepts4k,
             encodeTest, error);
     }
 
@@ -198,8 +188,9 @@ internal static class EncoderProbe
                     && (!listed || result.RateControlModes.Contains(Mft.RateControlName(3)))
                     && codec.SetValue(MF.AVEncCommonRateControlMode, Variant64.UInt(3)) >= 0
                     && codec.SetValue(MF.AVEncCommonQuality, Variant64.UInt(50)) >= 0;
-                // 逐帧 QP：低 16 位是默认 QP（文档说编码器可能只看这一个）
-                result.PerFrameQp = codec.IsSupported(Mft.AVEncVideoEncodeQP) == 0 && codec.SetValue(Mft.AVEncVideoEncodeQP, Variant64.UInt64(26)) >= 0;
+                // 逐帧 QP 设不设得上（设法和 HardwareH264Encoder 一样：四个 16 位都填同一个 QP）；真的有没有效果后面试编时再看
+                result.PerFrameQp = codec.IsSupported(Mft.AVEncVideoEncodeQP) == 0
+                    && codec.SetValue(Mft.AVEncVideoEncodeQP, Variant64.UInt64(EncoderChoice.PackQp(26))) >= 0;
             }
 
             var input = new int[1];
@@ -276,18 +267,57 @@ internal static class EncoderProbe
         }
     }
 
-    /// <summary>微软的软件编码器：远程时用的 H264Encoder，同步，一帧进一帧出。</summary>
-    private static TelemetryEncodeTest TestSoftware()
+
+    /// <summary>
+    /// 逐帧改质量真的有效吗（create 建的编码器第一帧质量是 <see cref="RefineLow"/>）：质量 20 的关键帧、同一画面再编一帧、调到 70 再编同一画面。
+    /// 没效果、建不起来的原因记进 notes。
+    /// </summary>
+    private static bool RefineWorks(Func<IVideoEncoder> create, string label, List<string> notes)
+    {
+        try
+        {
+            using var encoder = create();
+            if (!encoder.QualityMode)
+            {
+                notes.Add($"{label}：编码器不接受");
+                return false;
+            }
+            var pattern = new TestPattern(TestWidth, TestHeight);
+            pattern.Render(0);
+            encoder.SetQuality(RefineLow);
+            encoder.RequestKeyFrame();
+            var key = encoder.Encode(pattern.Data, Timestamp(0))?.Data.Length;
+            var same = encoder.Encode(pattern.Data, Timestamp(1))?.Data.Length;
+            encoder.SetQuality(RefineHigh);
+            var refined = encoder.Encode(pattern.Data, Timestamp(2))?.Data.Length;
+            if (EncoderChoice.RefineWorks(same, refined)) return true;
+            static string Size(int? bytes) => bytes is { } b ? $"{b} 字节" : "没有输出";
+            notes.Add($"{label}逐帧改质量没有效果（质量 {RefineLow} 的关键帧 {Size(key)}，同一画面再编一帧 {Size(same)}，调到 {RefineHigh} 后 {Size(refined)}）");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            notes.Add($"{label}试不了：{HResults.Explain(ex)}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 用远程时的那个类编 30 帧测试画面（一帧一帧来：Encode 返回的就是这一帧的输出），第 <see cref="KeyFrameAt"/> 帧要关键帧。
+    /// 第一帧（新建的编码器总从关键帧开始）、要了关键帧的那帧出来的不是关键帧，记进 notes。
+    /// </summary>
+    private static TelemetryEncodeTest TestEncode(Func<IVideoEncoder> create, List<string> notes)
     {
         var latencies = new List<double>();
         long bytes = 0;
         var frames = 0;
         string? error = null;
+        var notKey = new List<int>();
         try
         {
-            using var encoder = new H264Encoder(TestWidth, TestHeight, TestFps, TestKbps, quality: TestQuality);
+            using var encoder = create();
             var pattern = new TestPattern(TestWidth, TestHeight);
-            var clock = Stopwatch.StartNew();
+            var clock = Stopwatch.StartNew(); // 只算编码，不算建编码器
             for (var i = 0; i < TestFrames; i++)
             {
                 if (clock.Elapsed > TestLimit)
@@ -296,6 +326,7 @@ internal static class EncoderProbe
                     break;
                 }
                 pattern.Render(i);
+                if (i == KeyFrameAt) encoder.RequestKeyFrame();
                 var start = Stopwatch.GetTimestamp();
                 var encoded = encoder.Encode(pattern.Data, Timestamp(i));
                 var ms = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
@@ -303,74 +334,14 @@ internal static class EncoderProbe
                 if (encoded is not { } e) continue;
                 latencies.Add(ms);
                 bytes += e.Data.Length;
+                if ((i == 0 || i == KeyFrameAt) && !e.IsKey) notKey.Add(i + 1);
             }
         }
         catch (Exception ex)
         {
             error = HResults.Explain(ex);
         }
-        return Summarize(frames, latencies, bytes, error);
-    }
-
-    /// <summary>硬件编码器：<see cref="AsyncMftEncoder"/>，按时间戳对上每帧是什么时候送进去的。</summary>
-    private static TelemetryEncodeTest TestAsync(IMFActivate activate)
-    {
-        var latencies = new List<double>();
-        long bytes = 0;
-        var frames = 0;
-        string? error = null;
-        var inFlight = new List<(long Ticks, long SentAt)>();
-        var clock = Stopwatch.StartNew();
-        TimeSpan Left() => TestLimit - clock.Elapsed;
-        TimeSpan AtMost(TimeSpan wait) => Left() < wait ? Left() : wait;
-
-        void Take(EncodedSample sample)
-        {
-            var now = Stopwatch.GetTimestamp();
-            bytes += sample.Data.Length;
-            if (inFlight.Count == 0) return;
-            var index = inFlight.FindIndex(f => f.Ticks == sample.Timestamp.Ticks);
-            if (index < 0) index = 0; // 编码器没带回时间戳：按先进先出算
-            latencies.Add(Stopwatch.GetElapsedTime(inFlight[index].SentAt, now).TotalMilliseconds);
-            inFlight.RemoveAt(index);
-        }
-
-        try
-        {
-            using var encoder = new AsyncMftEncoder(activate, TestWidth, TestHeight, TestFps, TestKbps, quality: TestQuality);
-            var pattern = new TestPattern(TestWidth, TestHeight);
-            clock.Restart(); // 只算编码，不算建编码器
-            for (var i = 0; i < TestFrames; i++)
-            {
-                pattern.Render(i);
-                var ts = Timestamp(i);
-                if (Left() <= TimeSpan.Zero)
-                {
-                    error = $"{TestLimit.TotalSeconds:F0} 秒内没编完";
-                    break;
-                }
-                if (!encoder.TrySubmit(pattern.Data, ts, Left()))
-                {
-                    error = $"第 {i + 1} 帧：编码器 {TestLimit.TotalSeconds:F0} 秒内没要输入（没发 METransformNeedInput）";
-                    break;
-                }
-                inFlight.Add((ts.Ticks, Stopwatch.GetTimestamp()));
-                frames++;
-                // 等这一帧出来再送下一帧（远程时就是这样一帧一帧来的）
-                while (inFlight.Count > 0 && encoder.TryReceive(AtMost(FrameWait)) is { } sample)
-                {
-                    Take(sample);
-                    if (sample.Timestamp == ts) break;
-                }
-            }
-            if (error is null && inFlight.Count > 0)
-                foreach (var sample in encoder.Drain(AtMost(DrainWait))) Take(sample);
-            if (error is null && inFlight.Count > 0) error = $"送进去 {frames} 帧，有 {inFlight.Count} 帧没出来";
-        }
-        catch (Exception ex)
-        {
-            error = HResults.Explain(ex);
-        }
+        if (notKey.Count > 0) notes.Add($"要了关键帧的第 {string.Join("、", notKey)} 帧出来的不是关键帧");
         return Summarize(frames, latencies, bytes, error);
     }
 

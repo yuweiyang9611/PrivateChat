@@ -1,27 +1,30 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using PrivateChat.Agent.Video;
-using PrivateChat.Contracts.Remote;
 
-namespace PrivateChat.Agent.Telemetry;
+namespace PrivateChat.Agent.Video;
 
-/// <summary>异步编码器吐出来的一帧：带着送进去时的时间戳（它可能攒几帧才吐，靠时间戳对上是哪一帧）。</summary>
-internal readonly record struct EncodedSample(byte[] Data, bool IsKey, TimeSpan Timestamp);
+/// <summary>异步编码器吐出来的一段输出：原样的 Annex B 字节、带着送进去时的样本时间（它可能攒几帧才吐，靠时间认是哪一帧；没带时间是 null）。</summary>
+internal readonly record struct EncodedSample(byte[] Data, bool CleanPoint, long? Time);
 
 /// <summary>
-/// 显卡的硬件 H.264 编码器（Media Foundation 的异步 MFT：NVIDIA NVENC、AMD VCE / VCN、Intel Quick Sync）。
+/// 显卡的硬件 H.264 编码器（Media Foundation 的异步 MFT：NVIDIA NVENC、AMD VCE / VCN、Intel Quick Sync）的底层驱动；
+/// 远程、探测、自检都经 <see cref="HardwareH264Encoder"/> 用它（那边负责"等这一帧的输出"、关键帧、出错换软件）。
 /// 异步 MFT 不能想调就调：它发 METransformNeedInput 才能送一帧（ProcessInput），发 METransformHaveOutput 才能取一帧（ProcessOutput）。
 /// 事件经 IMFMediaEventGenerator.BeginGetEvent 回调到 MF 的工作线程上，那边只把事件排进队列、叫醒等着的人；
-/// ProcessInput / ProcessOutput 都在调用方的线程上做——和 <see cref="H264Encoder"/> 一样，只能在一个线程上用。
-/// 设置和 H264Encoder 一致：低延迟、无 B 帧、GOP 很长、Main profile；给了 quality 且编码器接受就按质量编，否则固定码率。
-/// 输入是系统内存里的 NV12（宽 × 高 × 1.5 字节，和软件编码器一样）；以后接桌面复制时再加显存纹理（MFT_MESSAGE_SET_D3D_MANAGER）。
-/// 现在只有探测（--probe-hardware）用它试编；下一步远程画面用硬件编码时就用这个类。
+/// ProcessInput / ProcessOutput 都在调用方的线程上做——和 <see cref="H264Encoder"/> 一样，只能在一个（MTA）线程上用。
+/// 设置和 H264Encoder 一致：低延迟、无 B 帧、GOP 很长、Main profile；码率控制按 <see cref="HardwareRateControl"/> 给的顺序挑第一个编码器接受的。
+/// 输入是系统内存里紧凑排列的 NV12（宽 × 高 × 1.5 字节，和软件编码器一样）；以后接桌面复制的显存纹理时再加 MFT_MESSAGE_SET_D3D_MANAGER。
 /// </summary>
 internal sealed class AsyncMftEncoder : IDisposable
 {
     private const int RateControlCbr = 0;
     private const int RateControlQuality = 3;
+    /// <summary>
+    /// 关掉编码器时等那个还挂着的事件请求回来最多这么久，再放掉 MFT。平常用不着等：<see cref="MftEventQueue.Stop"/> 自己往 MFT 的事件队列里放一个事件，
+    /// 那次请求当场就回来了；这只是 MFT 不接受 QueueEvent 时的兜底——别指望 ShutdownObject 会让它回来（Intel Quick Sync 上实测不回来，每次都白等满）。
+    /// </summary>
+    private static readonly TimeSpan ShutdownWait = TimeSpan.FromMilliseconds(250);
 
     private readonly IMFActivate _activate;
     private readonly IMFTransformFull? _mft;
@@ -33,12 +36,11 @@ internal sealed class AsyncMftEncoder : IDisposable
     private readonly long _frameDuration;
     private readonly Queue<EncodedSample> _ready = new();
     private MftOutputStreamInfo _outputInfo;
-    private byte[]? _parameterSets;
     /// <summary>编码器要了、还没送进去的帧数（每个 METransformNeedInput 一帧）。</summary>
     private int _wanted;
-    private bool _drained;
     private bool _keyRequested;
     private int _quality = -1;
+    private int _qp = -1;
     private int _bitrateKbps;
     private bool _disposed;
 
@@ -46,13 +48,17 @@ internal sealed class AsyncMftEncoder : IDisposable
     public int Height { get; }
     public int Fps { get; }
 
-    /// <summary>在按质量的模式下工作（false：编码器不接受，用的固定码率）。</summary>
-    public bool QualityMode { get; }
+    /// <summary>实际用的码率控制方式（构造时按给的顺序挑的第一个编码器接受的）。</summary>
+    public HardwareRateControl RateControl { get; }
+
+    /// <summary>输出媒体类型里的 SPS / PPS（MF_MT_MPEG_SEQUENCE_HEADER，带起始码）；编码器不给是 null（那就只能从关键帧里取）。</summary>
+    public byte[]? ParameterSets { get; private set; }
 
     /// <param name="activate">MFTEnumEx 列出来的那个编码器：这里 ActivateObject 建出来，Dispose 时 ShutdownObject 关掉（activate 本身归调用方放）。</param>
     /// <param name="bitrateKbps">固定码率模式的码率；按质量时只是写进媒体类型里的名义值。</param>
-    /// <param name="quality">给了就试按质量的模式（0–100，同 H264Encoder）。</param>
-    public AsyncMftEncoder(IMFActivate activate, int width, int height, int fps, int bitrateKbps, int? quality = null)
+    /// <param name="modes">按顺序试的码率控制方式；一个都不接受就抛 NotSupportedException。</param>
+    /// <param name="quality">第一帧的质量（0–100，同 H264Encoder；逐帧 QP 时按 <see cref="EncoderChoice.QpForQuality"/> 换算）。</param>
+    public AsyncMftEncoder(IMFActivate activate, int width, int height, int fps, int bitrateKbps, IReadOnlyList<HardwareRateControl> modes, int quality)
     {
         if (width <= 0 || height <= 0 || width % 2 != 0 || height % 2 != 0)
             throw new ArgumentException($"画面尺寸必须是正偶数：{width}x{height}");
@@ -95,17 +101,17 @@ internal sealed class AsyncMftEncoder : IDisposable
             _codec = _mft as ICodecApiFull;
             TrySet(MF.LowLatency, Variant64.Bool(true));
             _bitrateKbps = bitrateKbps;
-            if (quality is { } q && TrySet(MF.AVEncCommonRateControlMode, Variant64.UInt(RateControlQuality))
-                && TrySet(MF.AVEncCommonQuality, Variant64.UInt(Math.Clamp(q, 0, 100))))
+            quality = Math.Clamp(quality, 0, 100);
+            HardwareRateControl? chosen = null;
+            foreach (var mode in modes)
             {
-                QualityMode = true;
-                _quality = Math.Clamp(q, 0, 100);
+                if (TryRateControl(mode, quality, bitrateKbps))
+                {
+                    chosen = mode;
+                    break;
+                }
             }
-            else
-            {
-                TrySet(MF.AVEncCommonRateControlMode, Variant64.UInt(RateControlCbr));
-                TrySet(MF.AVEncCommonMeanBitRate, Variant64.UInt(bitrateKbps * 1000));
-            }
+            RateControl = chosen ?? throw new NotSupportedException($"编码器不接受这些码率控制方式：{string.Join(" / ", modes)}");
             TrySet(MF.AVEncMPVDefaultBPictureCount, Variant64.UInt(0));
             TrySet(MF.AVEncMPVGOPSize, Variant64.UInt(fps * 600));
 
@@ -129,7 +135,7 @@ internal sealed class AsyncMftEncoder : IDisposable
                 Marshal.ReleaseComObject(input);
             }
             MF.Check(_mft.GetOutputStreamInfo(_outputId, out _outputInfo), "GetOutputStreamInfo");
-            _parameterSets = ReadSequenceHeader();
+            ParameterSets = ReadSequenceHeader();
 
             _events.Start();
             MF.Check(_mft.ProcessMessage(MF.MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0), "开始编码（BEGIN_STREAMING）");
@@ -143,37 +149,77 @@ internal sealed class AsyncMftEncoder : IDisposable
         }
     }
 
-    /// <summary>下一帧编成关键帧。</summary>
+    /// <summary>
+    /// 设一种码率控制方式（媒体类型之前）：
+    /// - 按质量：模式 Quality + AVEncCommonQuality；
+    /// - 逐帧 QP：模式 Quality（固定 QP 编码）+ AVEncVideoEncodeQP；
+    /// - 固定码率：模式 CBR + 平均码率。连 ICodecAPI 都没有的编码器也当它接受（用它默认的码率控制、媒体类型里的码率）。
+    /// </summary>
+    private bool TryRateControl(HardwareRateControl mode, int quality, int bitrateKbps)
+    {
+        switch (mode)
+        {
+            case HardwareRateControl.Quality:
+                if (!TrySet(MF.AVEncCommonRateControlMode, Variant64.UInt(RateControlQuality)) || !TrySet(MF.AVEncCommonQuality, Variant64.UInt(quality)))
+                    return false;
+                _quality = quality;
+                return true;
+            case HardwareRateControl.Qp:
+                var qp = EncoderChoice.QpForQuality(quality);
+                if (!TrySet(MF.AVEncCommonRateControlMode, Variant64.UInt(RateControlQuality)) || !TrySet(Mft.AVEncVideoEncodeQP, Variant64.UInt64(EncoderChoice.PackQp(qp))))
+                    return false;
+                _quality = quality;
+                _qp = qp;
+                return true;
+            default:
+                if (_codec is not null)
+                {
+                    TrySet(MF.AVEncCommonRateControlMode, Variant64.UInt(RateControlCbr));
+                    TrySet(MF.AVEncCommonMeanBitRate, Variant64.UInt(bitrateKbps * 1000));
+                }
+                return true;
+        }
+    }
+
+    /// <summary>下一帧编成关键帧（送那一帧之前设 AVEncVideoForceKeyFrame）。</summary>
     public void RequestKeyFrame() => _keyRequested = true;
 
-    /// <summary>之后的帧用这个质量（0–100；只在按质量的模式下有用）。</summary>
+    /// <summary>之后的帧用这个质量（0–100；固定码率时没有作用）。</summary>
     public void SetQuality(int quality)
     {
         quality = Math.Clamp(quality, 0, 100);
-        if (!QualityMode || quality == _quality) return;
-        if (TrySet(MF.AVEncCommonQuality, Variant64.UInt(quality))) _quality = quality;
+        if (quality == _quality) return;
+        switch (RateControl)
+        {
+            case HardwareRateControl.Quality:
+                if (TrySet(MF.AVEncCommonQuality, Variant64.UInt(quality))) _quality = quality;
+                break;
+            case HardwareRateControl.Qp:
+                var qp = EncoderChoice.QpForQuality(quality);
+                if (qp == _qp || TrySet(Mft.AVEncVideoEncodeQP, Variant64.UInt64(EncoderChoice.PackQp(qp))))
+                {
+                    _qp = qp;
+                    _quality = quality;
+                }
+                break;
+        }
     }
 
     /// <summary>固定码率模式下中途改码率。</summary>
     public void SetBitrate(int kbps)
     {
-        if (QualityMode || kbps == _bitrateKbps) return;
+        if (RateControl != HardwareRateControl.Cbr || kbps == _bitrateKbps) return;
         if (TrySet(MF.AVEncCommonMeanBitRate, Variant64.UInt(kbps * 1000))) _bitrateKbps = kbps;
     }
 
     /// <summary>等编码器要输入（最多等 timeout），送进去一帧 NV12；false：这么久它都没要。</summary>
-    public bool TrySubmit(ReadOnlySpan<byte> nv12, TimeSpan timestamp, TimeSpan timeout)
+    public bool TrySubmit(ReadOnlySpan<byte> nv12, long time, TimeSpan timeout)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (nv12.Length < _inputSize) throw new ArgumentException("NV12 数据不完整");
-        if (!WaitUntil(() => _wanted > 0, timeout)) return false;
-        _wanted--;
+        var deadline = Deadline(timeout);
+        if (!WaitUntil(() => _wanted > 0, deadline)) return false;
 
-        if (_keyRequested)
-        {
-            _keyRequested = false;
-            TrySet(MF.AVEncVideoForceKeyFrame, Variant64.UInt(1));
-        }
         MF.Check(MF.MFCreateMemoryBuffer(_inputSize, out var buffer), "MFCreateMemoryBuffer");
         MF.Check(MF.MFCreateSample(out var sample), "MFCreateSample");
         try
@@ -183,38 +229,50 @@ internal sealed class AsyncMftEncoder : IDisposable
             buffer.Unlock();
             buffer.SetCurrentLength(_inputSize);
             sample.AddBuffer(buffer);
-            sample.SetSampleTime(timestamp.Ticks);
+            sample.SetSampleTime(time);
             sample.SetSampleDuration(_frameDuration);
-            MF.Check(_mft!.ProcessInput(_inputId, sample, 0), "编码输入");
+            if (_keyRequested)
+            {
+                _keyRequested = false;
+                TrySet(MF.AVEncVideoForceKeyFrame, Variant64.UInt(1));
+            }
+            while (true)
+            {
+                _wanted--;
+                var hr = _mft!.ProcessInput(_inputId, sample, 0);
+                if (hr != Mft.MF_E_NOTACCEPTING)
+                {
+                    MF.Check(hr, "编码输入");
+                    return true;
+                }
+                // 我们记的"它要几帧"和它自己的不一致：当它现在不要，等下一个 METransformNeedInput 再送
+                _wanted = 0;
+                if (!WaitUntil(() => _wanted > 0, deadline)) return false;
+            }
         }
         finally
         {
             Marshal.ReleaseComObject(sample);
             Marshal.ReleaseComObject(buffer);
         }
-        return true;
     }
 
-    /// <summary>等编好的一帧（最多等 timeout）；没等到返回 null。</summary>
+    /// <summary>等编码器吐出一段输出（最多等 timeout）；没等到返回 null。</summary>
     public EncodedSample? TryReceive(TimeSpan timeout)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        WaitUntil(() => _ready.Count > 0, timeout);
+        WaitUntil(() => _ready.Count > 0, Deadline(timeout));
         return _ready.TryDequeue(out var sample) ? sample : null;
     }
 
-    /// <summary>不再送新帧了：让编码器把手里的帧都吐出来（最多等 timeout），返回这些帧。之后这个编码器只能 Dispose。</summary>
-    public List<EncodedSample> Drain(TimeSpan timeout)
+    /// <summary>已经出来的输出都丢掉（不等）。</summary>
+    public void DiscardReady()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        MF.Check(_mft!.ProcessMessage(Mft.MFT_MESSAGE_COMMAND_DRAIN, 0), "排空编码器（COMMAND_DRAIN）");
-        WaitUntil(() => _drained, timeout);
-        var all = new List<EncodedSample>(_ready);
+        Pump();
         _ready.Clear();
-        return all;
     }
 
-    /// <summary>处理已经到了的事件：要输入的记一笔，有输出的当场取出来。</summary>
+    /// <summary>处理已经到了的事件：要输入的记一笔，有输出的当场取出来。事件报错（状态是失败、MEError）抛 MediaFoundationException。</summary>
     private void Pump()
     {
         while (_events!.TryTake(out var e))
@@ -228,18 +286,16 @@ internal sealed class AsyncMftEncoder : IDisposable
                 case Mft.METransformHaveOutput:
                     TakeOutput();
                     break;
-                case Mft.METransformDrainComplete:
-                    _drained = true;
-                    break;
                 case Mft.MEError:
                     throw new MediaFoundationException("硬件编码器报错", unchecked((int)0x80004005));
             }
         }
     }
 
-    private bool WaitUntil(Func<bool> done, TimeSpan timeout)
+    private static long Deadline(TimeSpan timeout) => Stopwatch.GetTimestamp() + (long)(Math.Max(0, timeout.TotalSeconds) * Stopwatch.Frequency);
+
+    private bool WaitUntil(Func<bool> done, long deadline)
     {
-        var deadline = Stopwatch.GetTimestamp() + (long)(Math.Max(0, timeout.TotalSeconds) * Stopwatch.Frequency);
         while (true)
         {
             Pump();
@@ -279,12 +335,13 @@ internal sealed class AsyncMftEncoder : IDisposable
             }
             if (hr == MF.MF_E_TRANSFORM_NEED_MORE_INPUT) return;
             MF.Check(hr, "编码输出");
+            if (data.Sample == 0) return;
 
             var produced = mine ?? (IMFSample)Marshal.GetObjectForIUnknown(data.Sample);
             try
             {
                 var cleanPoint = produced.GetUINT32(MF.SampleExtension_CleanPoint, out var clean) >= 0 && clean != 0;
-                var time = produced.GetSampleTime(out var t) >= 0 ? t : -1;
+                long? time = produced.GetSampleTime(out var t) >= 0 ? t : null;
                 MF.Check(produced.ConvertToContiguousBuffer(out var contiguous), "读取编码输出");
                 byte[] bytes;
                 try
@@ -298,14 +355,7 @@ internal sealed class AsyncMftEncoder : IDisposable
                 {
                     Marshal.ReleaseComObject(contiguous);
                 }
-                var isKey = cleanPoint || H264.IsKeyFrame(bytes);
-                if (isKey)
-                {
-                    // 关键帧前总带 SPS / PPS（同 H264Encoder）
-                    if (H264.ParameterSets(bytes) is { } sets) _parameterSets = sets;
-                    else if (_parameterSets is { } cached) bytes = [.. cached, .. bytes];
-                }
-                if (bytes.Length > 0) _ready.Enqueue(new EncodedSample(bytes, isKey, TimeSpan.FromTicks(time)));
+                if (bytes.Length > 0) _ready.Enqueue(new EncodedSample(bytes, cleanPoint, time));
             }
             finally
             {
@@ -332,7 +382,7 @@ internal sealed class AsyncMftEncoder : IDisposable
             Marshal.ReleaseComObject(type);
         }
         MF.Check(_mft.GetOutputStreamInfo(_outputId, out _outputInfo), "GetOutputStreamInfo");
-        _parameterSets = ReadSequenceHeader() ?? _parameterSets;
+        ParameterSets = ReadSequenceHeader() ?? ParameterSets;
     }
 
     /// <summary>流号：大多数 MFT 不实现 GetStreamIDs（E_NOTIMPL），那就是从 0 开始。</summary>
@@ -356,7 +406,7 @@ internal sealed class AsyncMftEncoder : IDisposable
                 fixed (byte* p = blob)
                     if (current.GetBlob(MF.MT_MPEG_SEQUENCE_HEADER, (IntPtr)p, size, out written) < 0) return null;
             }
-            return H264.ParameterSets(blob.AsSpan(0, written));
+            return PrivateChat.Contracts.Remote.H264.ParameterSets(blob.AsSpan(0, written));
         }
         finally
         {
@@ -366,17 +416,30 @@ internal sealed class AsyncMftEncoder : IDisposable
 
     private bool TrySet(Guid api, Variant64 value) => _codec is not null && _codec.SetValue(api, value) >= 0;
 
+    /// <summary>
+    /// 关掉：不再要事件、把还挂着的那次事件请求叫回来（<see cref="MftEventQueue.Stop"/>）→ END_OF_STREAM / END_STREAMING
+    /// → ShutdownObject（硬件编码器要这样关，才会放掉显卡上的编码会话，NVIDIA 的消费级显卡同时只给几路）
+    /// → 等那次请求的回调跑完（它在 MF 的工作线程上还会用到这个 MFT；最多 <see cref="ShutdownWait"/>）→ 放掉 MFT。不抛异常。
+    /// </summary>
     private void Shutdown()
     {
-        _events?.Stop();
-        if (_mft is not null)
+        try
         {
-            _mft.ProcessMessage(Mft.MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
-            _mft.ProcessMessage(MF.MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+            _events?.Stop();
+            if (_mft is not null)
+            {
+                _mft.ProcessMessage(Mft.MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+                _mft.ProcessMessage(MF.MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+            }
+            _activate.ShutdownObject();
+            _events?.WaitIdle(ShutdownWait);
         }
-        // 硬件编码器要 ShutdownObject 才会放掉显卡上的编码会话（NVIDIA 的消费级显卡同时只给几路）
-        _activate.ShutdownObject();
-        if (_mft is not null) Marshal.ReleaseComObject(_mft);
+        catch (Exception) { } // 驱动已经坏了也要接着放
+        try
+        {
+            if (_mft is not null) Marshal.ReleaseComObject(_mft);
+        }
+        catch (Exception) { }
     }
 
     public void Dispose()
@@ -396,12 +459,33 @@ internal sealed class MftEventQueue(IMFMediaEventGenerator generator) : IMFAsync
 {
     private readonly ConcurrentQueue<(int Type, int Status)> _queue = new();
     private readonly AutoResetEvent _signal = new(false);
+    /// <summary>没有挂着的事件请求、回调也没在跑（关编码器时等这个）。</summary>
+    private readonly ManualResetEventSlim _idle = new(true);
     private volatile bool _stopped;
 
     public void Start() => Arm();
 
-    /// <summary>不再要新的事件（已经发出去的那一次请求，MFT 关掉时会以 MF_E_SHUTDOWN 回来，丢掉就是）。</summary>
-    public void Stop() => _stopped = true;
+    /// <summary>
+    /// 不再要新的事件，并把已经发出去的那一次请求叫回来：自己往 MFT 的事件队列里放一个 MEUnknown（QueueEvent），
+    /// 回调拿到它（或者正好先到的别的事件）、看到已经停了，就不再要下一个、记成空闲——关编码器的那边 WaitIdle 当场返回。
+    /// 不能指望 MFT 关掉（ShutdownObject）时让那次请求以 MF_E_SHUTDOWN 回来：Intel Quick Sync 上实测不回来，每次 Dispose 都白等满 ShutdownWait。
+    /// MFT 不接受 QueueEvent（报错、抛异常）就还是靠 WaitIdle 等到超时。只在用编码器的那个线程上调。
+    /// </summary>
+    public void Stop()
+    {
+        _stopped = true;
+        // 没有挂着的请求（还没 Start、或者 BeginGetEvent 失败了）：不用叫；_idle 只在 Arm 里清，Arm 只在这个线程（Start）和回调里调，
+        // 这里看到空闲就不会再有新的请求
+        if (_idle.IsSet) return;
+        try
+        {
+            generator.QueueEvent(Mft.MEUnknown, Guid.Empty, 0 /* S_OK */, IntPtr.Zero);
+        }
+        catch (Exception) { } // 驱动已经坏了：还有 WaitIdle 兜底
+    }
+
+    /// <summary>等挂着的那次请求回来（最多 timeout）。</summary>
+    public void WaitIdle(TimeSpan timeout) => _idle.Wait(timeout);
 
     public bool TryTake(out (int Type, int Status) e) => _queue.TryDequeue(out e);
 
@@ -410,8 +494,13 @@ internal sealed class MftEventQueue(IMFMediaEventGenerator generator) : IMFAsync
 
     private void Arm()
     {
+        _idle.Reset();
         var hr = generator.BeginGetEvent(this, null);
-        if (hr < 0) Post(Mft.MEError, hr);
+        if (hr < 0)
+        {
+            _idle.Set();
+            Post(Mft.MEError, hr);
+        }
     }
 
     private void Post(int type, int status)
@@ -429,9 +518,12 @@ internal sealed class MftEventQueue(IMFMediaEventGenerator generator) : IMFAsync
 
     int IMFAsyncCallback.Invoke(IntPtr result)
     {
+        var rearmed = false;
         // 这里抛出去的异常会被 COM 吞成错误码：自己接住，当成一个出错事件
         try
         {
+            // 关的时候也照样 EndGetEvent（每次 BeginGetEvent 都要配一次）：关编码器的那边等这个回调跑完（WaitIdle）才放掉 MFT；
+            // 等超时了才放的话，这里调已经放掉的 MFT 会抛 InvalidComObjectException，下面接住
             var hr = generator.EndGetEvent(result, out var ev);
             if (hr < 0)
             {
@@ -450,11 +542,16 @@ internal sealed class MftEventQueue(IMFMediaEventGenerator generator) : IMFAsync
             }
             if (_stopped) return 0;
             Post(type, status);
+            rearmed = true;
             Arm();
         }
         catch (Exception ex)
         {
             if (!_stopped) Post(Mft.MEError, ex.HResult < 0 ? ex.HResult : unchecked((int)0x80004005));
+        }
+        finally
+        {
+            if (!rearmed) _idle.Set();
         }
         return 0;
     }

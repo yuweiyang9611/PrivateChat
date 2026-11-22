@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Microsoft.AspNetCore.SignalR.Client;
@@ -73,7 +74,15 @@ public sealed class AgentService
         ui.SetupRequested += () => _reset?.Cancel();
     }
 
-    private IFrameSource CreateSource() => _options.BusyPattern ? new BusyPatternSource() : _options.UsePattern ? new TestPatternSource() : new GdiScreenSource();
+    /// <summary>
+    /// 真实屏幕：桌面复制只用在最近一次探测验证过的显示器上，别的用 GDI（<see cref="ScreenCaptures"/>，环境变量可以强制）。
+    /// 构造很便宜（第一次采集才建 D3D 设备）：<see cref="ReportAsync"/> 也拿它列显示器。
+    /// </summary>
+    private IFrameSource CreateSource() => _options.BusyPattern ? new BusyPatternSource() : _options.UsePattern ? new TestPatternSource()
+        : ScreenCaptures.Create(_telemetry?.ValidatedOutputs ?? FrozenSet<string>.Empty);
+
+    /// <summary>最近一次探测里试编成功的硬件编码器：远程每次重建编码器时现问（<see cref="VideoEncoders"/>）。</summary>
+    private IReadOnlyList<ValidatedEncoder> ValidatedEncoders() => _telemetry?.ValidatedEncoders ?? [];
 
     /// <summary>电脑正在播放的声音；测试画面配测试音（一直响的 440 Hz），不碰声卡。</summary>
     private IAudioSource CreateAudioSource() => _options.UsePattern ? new TestToneSource() : new WasapiLoopback();
@@ -452,7 +461,12 @@ public sealed class AgentService
         await SetConnectionStateAsync(AgentState.Online, "在线");
         await ReportAsync(hub);
         _telemetry?.Connected(server); // 硬件和能力走 REST，不走 hub（后台做，这里立刻返回）
-        EventHandler displayChanged = (_, _) => _ = ReportAsync(hub);
+        // 显示设置变了（插拔显示器、换主显示器，装显卡驱动时多半也有一次）：重报显示器；指纹变了的话验证过的先作废、没有远程时重探
+        EventHandler displayChanged = (_, _) =>
+        {
+            _telemetry?.Recheck();
+            _ = ReportAsync(hub);
+        };
         if (!_options.Headless) SystemEvents.DisplaySettingsChanged += displayChanged;
         try
         {
@@ -552,8 +566,11 @@ public sealed class AgentService
 
     private void StartRunner(AgentSessionRequest request)
     {
-        var runner = new SessionRunner(request, _server!, CreateSource, CreateAudioSource, _input, _ui);
+        var runner = new SessionRunner(request, _server!, CreateSource, ValidatedEncoders, CreateAudioSource, _input, _ui);
         _runner = runner;
+        // 建截屏、问验证过的编码器（runner.Start 之后在采集线程上）之前再对一次指纹：连着服务器时装了新显卡驱动、换了显示器，
+        // 这次远程就别用旧探测验证过的（GDI + 软件编码器），远程结束后重探。放在 _runner 之后：叫醒的后台循环看得到正在远程
+        _telemetry?.Recheck();
         _telemetry?.SessionStarted(); // 正在探测就停下（试编码器、桌面复制会和远程抢显卡），远程结束后再来
         runner.Start();
         _ui.ShowBanner(request);

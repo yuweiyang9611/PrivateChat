@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Win32;
 using PrivateChat.Agent.Ui;
+using PrivateChat.Agent.Video;
 using PrivateChat.Contracts.Remote;
 
 namespace PrivateChat.Agent.Telemetry;

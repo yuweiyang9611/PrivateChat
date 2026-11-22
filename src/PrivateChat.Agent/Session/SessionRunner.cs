@@ -11,6 +11,7 @@ using PrivateChat.Agent.Realtime;
 using PrivateChat.Agent.Ui;
 using PrivateChat.Agent.Video;
 using PrivateChat.Contracts.Remote;
+using HardwareInfo = PrivateChat.Agent.Telemetry.HardwareInfo;
 
 namespace PrivateChat.Agent.Session;
 
@@ -21,7 +22,9 @@ namespace PrivateChat.Agent.Session;
 /// - 每一帧用什么质量由 <see cref="QualityPlanner"/> 定：画面大变时先糊一点马上送到，停下来再一步步补清晰。
 /// - 画质：控制端的画质菜单（SetVideo，<see cref="VideoSettings"/>）定分辨率、帧率、码率上限；默认自动档，
 ///   分辨率随网速和这台电脑的性能调（<see cref="AutoResolution"/>）。每秒的统计里带上采集、编码一帧平均用了多久，控制端据此提示"对方电脑忙不过来"。
-/// - 静止画面不编码（按 64×64 的块比较）。
+/// - 静止画面不编码（按 64×64 的块比较；桌面复制会说哪些区域变了，只比那几块）。
+/// - 截屏、编码器（docs/DESIGN.md"截屏和编码器怎么选"）：默认只用这台电脑上探测验证过的桌面复制和硬件编码器，别的用 GDI + Windows 自带的软件编码器；
+///   中途出错都换回 GDI / 软件编码器接着来（日志、遥测里记上原因），不结束远程。
 /// - 声音：控制端要求时（SetAudio）采这台电脑正在播放的声音，Opus 编码后和画面走同一条连接。
 /// - 断线（网络切换）30 秒内自动重连；服务端以 4001 关闭表示会话结束。
 /// - 快速线路：控制端要求时（SetTransport）把画面和声音改经 Cloudflare Realtime 发（<see cref="RealtimePublisher"/>），
@@ -63,7 +66,7 @@ public sealed class SessionRunner : IAsyncDisposable
     public const string TestEncodeDelayVariable = "PRIVATECHAT_AGENT_TEST_ENCODE_DELAY_MS";
     /// <summary>
     /// 自动化测试用（只在 PRIVATECHAT_AGENT_TEST=1 时生效）：装成一台截屏很慢的电脑——每截一次屏多等这么多毫秒（算在采集用时里，最多 1000 ms），
-    /// 不管截多大。GDI 截屏按原始尺寸截、缩小还要另外缩放，降分辨率省不了它。
+    /// 不管截多大。像 GDI 截屏：按原始尺寸截、缩小还要另外缩放，降分辨率省不了它（桌面复制在显卡上缩放，不会这样）。
     /// </summary>
     public const string TestCaptureDelayVariable = "PRIVATECHAT_AGENT_TEST_CAPTURE_DELAY_MS";
     /// <summary>快速线路：发布之后这么久还没连上 Cloudflare 就算了。</summary>
@@ -87,13 +90,22 @@ public sealed class SessionRunner : IAsyncDisposable
     private const int TelemetryCheckpointTimeoutMs = 15_000;
     /// <summary>遥测：结束时那一份（含一次重试）最多等这么久，到点就算了——不拖住会话的收尾。</summary>
     private const int TelemetryFinalBudgetMs = 3000;
-    /// <summary>遥测里记的编码器（现在只有 Media Foundation 自带的软件编码器）。</summary>
-    private const string SoftwareEncoderName = "Microsoft H.264（软件）";
+    /// <summary>系统没在锁屏、桌面复制却一直说被拒（安全桌面）超过这么久：记一笔（那就不是锁屏，是这台电脑上桌面复制有问题）。</summary>
+    private const int SourceSecureWarnMs = 10_000;
+    /// <summary>后台关出错的硬件编码器超过这么久还没关完：记一笔。</summary>
+    private const int DisposeSlowMs = 5000;
+    /// <summary>
+    /// 桌面复制建不起来、用着出了错，ScreenCapture 退回 GDI 后的名字的开头（"GDI（桌面复制不能用：DuplicateOutput1：…）"，见 Video/ScreenCaptures.cs）。
+    /// 没验证过、强制 GDI 的名字不是这个开头（那不算出错）。
+    /// </summary>
+    private const string DdaFallbackPrefix = "GDI（桌面复制不能用";
 
     private readonly AgentSessionRequest _request;
     private readonly ServerInfo _server;
     private readonly HttpMessageInvoker? _invoker;
     private readonly Func<IFrameSource> _sourceFactory;
+    /// <summary>最近一次探测里试编成功的硬件编码器：每次重建编码器时现问（探测可能刚做完）。</summary>
+    private readonly Func<IReadOnlyList<ValidatedEncoder>> _validatedEncoders;
     private readonly Func<IAudioSource> _audioFactory;
     private readonly InputController _input;
     private readonly IAgentUi _ui;
@@ -186,12 +198,14 @@ public sealed class SessionRunner : IAsyncDisposable
     }
 
     public SessionRunner(AgentSessionRequest request, ServerInfo server,
-        Func<IFrameSource> sourceFactory, Func<IAudioSource> audioFactory, InputController input, IAgentUi ui)
+        Func<IFrameSource> sourceFactory, Func<IReadOnlyList<ValidatedEncoder>> validatedEncoders, Func<IAudioSource> audioFactory,
+        InputController input, IAgentUi ui)
     {
         _request = request;
         _server = server;
         _invoker = AgentTransport.CreateInvoker(new Uri(server.Url));
         _sourceFactory = sourceFactory;
+        _validatedEncoders = validatedEncoders;
         _audioFactory = audioFactory;
         _input = input;
         _ui = ui;
@@ -895,16 +909,20 @@ public sealed class SessionRunner : IAsyncDisposable
         }
     }
 
-    // ---- 采集 + 编码（独立线程：GDI 和编码器都是同步调用）----
+    // ---- 采集 + 编码（独立线程：截屏和编码器都是同步调用；硬件编码器也是等到这一帧的输出才返回）----
 
     private void VideoLoop()
     {
         IFrameSource? source = null;
-        H264Encoder? encoder = null;
+        IVideoEncoder? encoder = null;
         QualityPlanner? planner = null;
+        // 上一帧（比较变化用）：只和同一种格式、同样每行字节数的帧比（截屏中途从桌面复制退回 GDI 时，NV12 换成了 BGRA）
         var previous = Array.Empty<byte>();
+        var previousFormat = FrameFormat.Bgra;
+        var previousStride = 0;
         var hasPrevious = false;
         var changed = Array.Empty<bool>();
+        // 锁屏期间快速线路保活时重编的那一帧（NV12）：BGRA 的来源每编一帧都在这里转好；桌面复制直接给 NV12，进锁屏时才从最后一帧拷过来
         var nv12 = Array.Empty<byte>();
         var fallbackRefine = 0;
         // 下一帧最早什么时候采：按小数毫秒排（30 fps 是 33.3 ms 一帧，取整成 33 ms 实际会到 30.3 fps，超过上限）
@@ -928,6 +946,59 @@ public sealed class SessionRunner : IAsyncDisposable
         var lastQuality = 0;
         var nv12Valid = false;
         IReadOnlyList<ScreenInfo> announced = [];
+        // 最近一次采到的画面和它的屏幕（画面是来源的缓冲区，下一次采集前有效）：进锁屏时留作保活的那一帧；桌面复制被拒时拿来重试
+        CapturedFrame? lastFrame = null;
+        ScreenInfo? lastScreen = null;
+        // 这次远程里硬件编码器出过错：之后只用软件编码器（之后每次重建也是）
+        var softwareOnly = false;
+        // 下一轮照常重建一遍编码器（锁屏时临时换上了软件编码器：解锁后发配置、记日志、换新的画质规划）
+        var rebuildWanted = false;
+        string? encoderNote = null;
+        // 日志、遥测里记的截屏方式（来源最近一次采集实际用的；同一块显示器上中途变了——桌面复制出错退回 GDI——再记一笔）
+        var pipelineCapture = "";
+        // 系统没在锁屏、桌面复制却说是安全桌面：从什么时候起（-1 = 不是这样），记过没有
+        long sourceSecureSince = -1;
+        var sourceSecureWarned = false;
+
+        // 建编码器：这次远程里硬件出过错就直接用软件的；否则按探测验证过的挑（同一张显卡上的优先），挑不上是软件的（note 说为什么）
+        IVideoEncoder CreateEncoder(int width, int height, VideoSettings settings, ScreenInfo screen)
+        {
+            if (softwareOnly) return new H264Encoder(width, height, settings.Fps, settings.MaxKbps, quality: 30);
+            var validated = _validatedEncoders();
+            // 桌面复制第一次采集之后才知道这块显示器接在哪张卡上；不知道是 0
+            var vendor = (source as IAdapterAwareSource)?.AdapterVendorId(screen) ?? 0;
+            var created = VideoEncoders.Create(width, height, settings.Fps, settings.MaxKbps, validated, vendor, out var note);
+            if (note != encoderNote)
+            {
+                encoderNote = note;
+                if (note is not null)
+                {
+                    AgentLog.Info($"编码器：{note}");
+                    // 探测验证过的硬件编码器这次起不来才是要查的问题（没有验证过的、用环境变量指定了软件编码器的都不算；
+                    // 和 VideoEncoders 认环境变量的写法一样，software / sw 都算）
+                    var forcedSoftware = EncoderChoice.ParseSwitch(Environment.GetEnvironmentVariable(VideoEncoders.SwitchVariable)) == EncoderSwitch.Software;
+                    if (!created.IsHardware && validated.Count > 0 && !forcedSoftware) _telemetry?.OnError($"硬件编码器没用上：{note}");
+                }
+            }
+            return created;
+        }
+
+        // 硬件编码器出错（驱动出错、超时）：记下原因，这个编码器本进程里不再选，这次远程之后只用软件编码器；不结束远程，下一帧是关键帧。
+        // 出错的那个放到后台线程上关：连着超时多半是它在驱动里卡住了，关它（END_OF_STREAM、ShutdownObject）也可能卡住，
+        // 在采集线程上关就一直建不了软件编码器、画面停住。之后采集线程不会再碰它（MF 的对象在线程池的 MTA 线程上关没问题）
+        void HardwareEncoderFailed(IVideoEncoder failed, Exception ex)
+        {
+            var reason = ex is EncoderFailedException ? ex.Message : $"{ex.GetType().Name}：{ex.Message}";
+            if (ex is EncoderFailedException) AgentLog.Warn($"硬件编码器 {failed.Name} 出错，这次远程改用软件编码器：{reason}");
+            else AgentLog.Error($"硬件编码器 {failed.Name} 出了意外的错，这次远程改用软件编码器", ex);
+            _telemetry?.OnError($"硬件编码器 {failed.Name} 出错，改用软件编码器：{reason}");
+            VideoEncoders.MarkFailed(failed.Name, reason);
+            softwareOnly = true;
+            DisposeInBackground(failed, $"出错的硬件编码器 {failed.Name}");
+            Interlocked.Exchange(ref _encodedSize, 0);
+            _keyRequested = true;
+        }
+
         var encodeDelayMs = TestDelayMs(TestEncodeDelayVariable);
         if (encodeDelayMs > 0) AgentLog.Info($"测试：每编一帧多等 {encodeDelayMs} ms × 像素数 ÷ 1280×720，最多 1000 ms（{TestEncodeDelayVariable}，装成编码很慢的电脑）");
         var captureDelayMs = TestDelayMs(TestCaptureDelayVariable);
@@ -937,14 +1008,13 @@ public sealed class SessionRunner : IAsyncDisposable
         try
         {
             source = _sourceFactory();
-            var realScreen = source is GdiScreenSource;
-            // 遥测里记的截屏方式（测试画面不是真的截屏）
-            var captureName = realScreen ? "GDI" : "测试画面";
+            // 抓的是真屏幕（GDI、桌面复制）才查锁屏；测试画面不查
+            var realScreen = source.IsRealScreen;
             while (!_cts.IsCancellationRequested)
             {
                 if (!_peer || _connection is null)
                 {
-                    encoder?.Dispose();
+                    DisposeQuietly(encoder, "编码器");
                     encoder = null;
                     Interlocked.Exchange(ref _encodedSize, 0);
                     hasPrevious = false;
@@ -952,6 +1022,7 @@ public sealed class SessionRunner : IAsyncDisposable
                     secure = false;
                     _secureDesktop = false;
                     lastDesktopCheck = -10_000;
+                    sourceSecureSince = -1;
                     Thread.Sleep(50);
                     continue;
                 }
@@ -988,17 +1059,51 @@ public sealed class SessionRunner : IAsyncDisposable
                 }
                 nextDue = Math.Max(nextDue + frameInterval, now);
 
-                // 锁屏 / UAC 提示：截到的是黑屏，告诉控制端原因
+                // 锁屏 / UAC 提示：截不到桌面（GDI 截到黑屏，桌面复制被拒），告诉控制端原因
                 if (realScreen && now - lastDesktopCheck >= 1000)
                 {
                     lastDesktopCheck = now;
-                    var s = !Desktop.IsInputDesktopNormal();
+                    // 输入桌面不是普通桌面（UAC、Ctrl+Alt+Del），或者这个会话锁着屏（Windows 11 的锁屏有时输入桌面还是 Default，
+                    // 见 HardwareInfo.SessionLocked）；再加上截屏自己知道的：桌面复制被拒（E_ACCESSDENIED），它比这个每秒一次的检查先知道
+                    var locked = HardwareInfo.ScreenLocked();
+                    // 系统已经不锁屏了、桌面复制还说被拒：它得再采一次才知道现在能不能用了（采到的不要；解锁后从整幅比较重新开始）
+                    if (!locked && secure && source.SecureDesktop && lastScreen is { } retry && lastFrame is { } last)
+                        source.Capture(retry, last.Width, last.Height);
+                    var s = locked || source.SecureDesktop;
+                    if (s && !locked)
+                    {
+                        if (sourceSecureSince < 0) sourceSecureSince = now;
+                        else if (!sourceSecureWarned && now - sourceSecureSince >= SourceSecureWarnMs)
+                        {
+                            sourceSecureWarned = true;
+                            AgentLog.Warn($"系统没在锁屏，截屏（{source.Name}）却一直说在安全桌面、被拒：控制端那边一直显示锁屏");
+                            _telemetry?.OnError("系统没在锁屏，桌面复制却一直被拒");
+                        }
+                    }
+                    else sourceSecureSince = -1;
                     if (s != secure)
                     {
                         secure = s;
                         _secureDesktop = s;
                         Send(RemoteFrames.Status(s ? RemoteStatusCode.SecureDesktop : RemoteStatusCode.Ok, s ? "对方电脑在锁屏或系统安全提示界面" : ""));
-                        if (!s) _keyRequested = true;
+                        if (s)
+                        {
+                            // 留下锁屏前的最后一帧给快速线路保活：桌面复制给的 NV12 是来源的缓冲区（下一次采集就变了），拷一份。
+                            // BGRA 的来源编每一帧时已经转在 nv12 里了
+                            if (lastFrame is { Format: FrameFormat.Nv12 } kept && encoder is not null && kept.Width == encoder.Width && kept.Height == encoder.Height)
+                            {
+                                var keptSize = kept.Width * kept.Height * 3 / 2;
+                                if (nv12.Length < keptSize) nv12 = new byte[keptSize];
+                                kept.Data.AsSpan(0, keptSize).CopyTo(nv12);
+                                nv12Valid = true;
+                            }
+                        }
+                        else
+                        {
+                            _keyRequested = true;
+                            // 锁屏期间可能为了让桌面复制重试采过（那几次的变化提示没用上）：整幅重新比较
+                            hasPrevious = false;
+                        }
                     }
                 }
                 if (secure)
@@ -1015,13 +1120,26 @@ public sealed class SessionRunner : IAsyncDisposable
                             {
                                 lastLine = held;
                                 _keyRequested = false;
-                                encoder.RequestKeyFrame();
                             }
                             var again = Math.Max((uint)now, lastTimestamp + 1);
-                            if (encoder.Encode(nv12, TimeSpan.FromMilliseconds(again)) is { } same)
+                            try
                             {
-                                lastTimestamp = again;
-                                held.Publisher.SendVideo(again, same.Data);
+                                if (wantKey) encoder.RequestKeyFrame();
+                                if (encoder.Encode(nv12.AsSpan(0, encoder.Width * encoder.Height * 3 / 2), TimeSpan.FromMilliseconds(again)) is { } same)
+                                {
+                                    lastTimestamp = again;
+                                    held.Publisher.SendVideo(again, same.Data);
+                                }
+                            }
+                            catch (Exception ex) when (encoder.IsHardware)
+                            {
+                                // 锁屏期间还得接着保活：先换上同样大小的软件编码器（下一次保活是关键帧），解锁后再照常重建一遍
+                                var (heldWidth, heldHeight, heldFps) = (encoder.Width, encoder.Height, encoder.Fps);
+                                HardwareEncoderFailed(encoder, ex);
+                                encoder = null;
+                                encoder = new H264Encoder(heldWidth, heldHeight, heldFps, built?.MaxKbps ?? settings.MaxKbps, quality: 30);
+                                Interlocked.Exchange(ref _encodedSize, ((long)heldWidth << 32) | (uint)heldHeight);
+                                rebuildWanted = true;
                             }
                             lastSentAt = now;
                         }
@@ -1082,15 +1200,46 @@ public sealed class SessionRunner : IAsyncDisposable
                 }
                 _autoFlags = settings.AutoResolution ? (int)auto.Flags : 0;
                 var (width, height) = settings.AutoResolution ? auto.Size : settings.Box(screen.Bounds.Width, screen.Bounds.Height);
-                if (encoder is null || planner is null || _reconfigure || _announce || !ReferenceEquals(settings, built)
+
+                // 采集（含比较变化）、编码（含转 NV12）各用了多久：统计里报给控制端，自动档据此判断这台电脑忙不忙得过来。
+                // 先采集、再（需要时）重建编码器：桌面复制第一次采集时才知道这块显示器接在哪张卡上（编码器挑同一张卡上的），
+                // 日志里也要写这一帧实际是怎么截的（桌面复制建不起来、这一帧已经退回 GDI 的话写的是 GDI）
+                var captureStart = Stopwatch.GetTimestamp();
+                var frame = source.Capture(screen, width, height);
+                // 测试钩子：截屏慢，截多大都一样慢
+                if (captureDelayMs > 0) Thread.Sleep(captureDelayMs);
+                var captureTicks = Stopwatch.GetTimestamp() - captureStart;
+                (lastFrame, lastScreen) = (frame, screen);
+                var captureName = source.Name;
+                if (pipelineCapture.Length > 0 && captureName != pipelineCapture && screen == _current)
+                {
+                    // 同一块显示器上截屏方式变了：桌面复制出错（显卡驱动重置、同时复制桌面的程序太多……），这次远程退回了 GDI
+                    // （换了显示器时变了不算：那块可能本来就没验证过桌面复制）
+                    AgentLog.Warn($"截屏改用 {captureName}（之前是 {pipelineCapture}）");
+                    _telemetry?.OnError($"截屏改用 {captureName}");
+                    pipelineCapture = captureName;
+                    if (encoder is not null) _telemetry?.SetPipeline(encoder.Name, encoder.QualityMode, pipelineCapture);
+                }
+
+                if (rebuildWanted || encoder is null || planner is null || _reconfigure || _announce || !ReferenceEquals(settings, built)
                     || encoder.Width != width || encoder.Height != height || encoder.Fps != settings.Fps || screen != _current)
                 {
                     _reconfigure = false;
+                    rebuildWanted = false;
                     built = settings;
-                    encoder?.Dispose();
-                    encoder = new H264Encoder(width, height, settings.Fps, settings.MaxKbps, quality: 30);
+                    // 先关旧的再建新的（GeForce 上同时开着的硬件编码会话有上限）；建不起来抛出时 finally 里别再关一次
+                    DisposeQuietly(encoder, "编码器");
+                    encoder = null;
+                    encoder = CreateEncoder(width, height, settings, screen);
+                    // 这次远程第一次采集、刚换了显示器时桌面复制就建不起来（同时复制桌面的程序太多、视频处理器建不起来……），
+                    // 上面"同一块显示器上变了"那一处不管（之前没记过、或者是另一块显示器）：在这里记进遥测的出错。
+                    // 名字和上次记的一样就不再记（中途退回的上面已经记过；退回后整个这次远程都是这个名字，换显示器、重连都不变）。
+                    // 日志不用再写：ScreenCapture 退回时记过原因，下面"编码 …"那一行最后也写着截屏方式
+                    if (captureName != pipelineCapture && captureName.StartsWith(DdaFallbackPrefix, StringComparison.Ordinal))
+                        _telemetry?.OnError($"截屏改用 {captureName}");
+                    pipelineCapture = captureName;
                     Interlocked.Exchange(ref _encodedSize, ((long)width << 32) | (uint)height);
-                    _telemetry?.SetPipeline(SoftwareEncoderName, encoder.QualityMode, captureName);
+                    _telemetry?.SetPipeline(encoder.Name, encoder.QualityMode, pipelineCapture);
                     planner = new QualityPlanner(width, height, settings.Ceiling);
                     changed = new bool[FrameTiles.Count(width, height)];
                     _net.SetMax(settings.MaxKbps);
@@ -1114,8 +1263,9 @@ public sealed class SessionRunner : IAsyncDisposable
                         AutoResolutionReason.Cpu => "（电脑忙不过来，降了分辨率）",
                         _ => "",
                     };
+                    // 编码器、截屏方式加在最后（e2e 按前面那一截认这一行）
                     AgentLog.Info($"编码 {width}x{height} {settings.Fps} fps，码率上限 {settings.MaxKbps} kbps，显示器 {screen.Index}，画质 {settings.Name}{lowered}" +
-                        (encoder.QualityMode ? "" : "（这台电脑的编码器不支持按质量，用固定码率）"));
+                        (encoder.QualityMode ? "" : "（这台电脑的编码器不支持按质量，用固定码率）") + $"，编码器 {encoder.Name}，截屏 {pipelineCapture}");
                 }
                 else if (_resendConfig)
                 {
@@ -1125,14 +1275,18 @@ public sealed class SessionRunner : IAsyncDisposable
                     Send(RemoteFrames.VideoConfig(new VideoConfigFrame(RemoteVideoCodec.H264, width, height, settings.Fps, screen.Index, Features())));
                 }
 
-                // 采集（含比较变化）、编码（含转 NV12）各用了多久：统计里报给控制端，自动档据此判断这台电脑忙不忙得过来
-                var captureStart = Stopwatch.GetTimestamp();
-                var frame = source.Capture(screen, width, height);
-                // 测试钩子：截屏慢，截多大都一样慢
-                if (captureDelayMs > 0) Thread.Sleep(captureDelayMs);
-                var length = frame.Stride * frame.Height;
-                var changedTiles = FrameTiles.Diff(hasPrevious ? previous.AsSpan(0, length) : default, frame.Bgra.AsSpan(0, length), width, height, frame.Stride, changed);
-                var captureTicks = Stopwatch.GetTimestamp() - captureStart;
+                // 比较变化（算在采集里）。来源说了哪些块可能变了就只比那几块（桌面复制）；没有上一帧时整幅都算变了，用不着它
+                var diffStart = Stopwatch.GetTimestamp();
+                if (frame.Format != previousFormat || frame.Stride != previousStride) hasPrevious = false;
+                var nv12Frame = frame.Format == FrameFormat.Nv12;
+                var length = nv12Frame ? width * height * 3 / 2 : frame.Stride * frame.Height;
+                ReadOnlySpan<byte> current = frame.Data.AsSpan(0, length);
+                ReadOnlySpan<byte> before = hasPrevious ? previous.AsSpan(0, length) : default;
+                ReadOnlySpan<bool> hint = hasPrevious && frame.ChangedHint is { } given && given.Length == changed.Length ? given : default;
+                var changedTiles = nv12Frame
+                    ? FrameTiles.DiffNv12(before, current, width, height, changed, hint)
+                    : FrameTiles.Diff(before, current, width, height, frame.Stride, changed, hint);
+                captureTicks += Stopwatch.GetTimestamp() - diffStart;
                 changedLastTime = changedTiles > 0;
                 var key = _keyRequested;
                 var sustained = now - lastChangeAt < 300;
@@ -1141,6 +1295,7 @@ public sealed class SessionRunner : IAsyncDisposable
                 // 快速线路上屏幕不动也要隔一阵发一帧（内容没变，编出来很小），不然 Cloudflare 会把这条轨道回收掉
                 var keepAlive = line is not null && now - lastSentAt >= LineKeepAliveMs;
                 var learn = true;
+                int? bitrate = null;
                 if (encoder.QualityMode)
                 {
                     if (key || changedTiles > 0)
@@ -1165,33 +1320,57 @@ public sealed class SessionRunner : IAsyncDisposable
                 {
                     if (changedTiles == 0 && fallbackRefine <= 0 && !key && !keepAlive) continue;
                     fallbackRefine = changedTiles > 0 ? (int)Math.Ceiling(FallbackRefineMs / frameInterval) : Math.Max(0, fallbackRefine - 1);
-                    encoder.SetBitrate(Math.Clamp(net.TargetKbps, MinKbps, settings.MaxKbps));
+                    bitrate = Math.Clamp(net.TargetKbps, MinKbps, settings.MaxKbps);
                 }
                 if (changedTiles > 0)
                 {
                     lastChangeAt = now;
                     if (previous.Length < length) previous = new byte[length];
-                    frame.Bgra.AsSpan(0, length).CopyTo(previous);
+                    current.CopyTo(previous);
+                    (previousFormat, previousStride) = (frame.Format, frame.Stride);
                     hasPrevious = true;
                 }
 
+                // 编码器的输入：桌面复制在显卡上已经转好了 NV12（BT.709、16–235，和编码器的输入类型一样），直接编；BGRA 在这里转（算在编码里）
                 var size = width * height * 3 / 2;
-                if (nv12.Length < size) nv12 = new byte[size];
                 var convertStart = Stopwatch.GetTimestamp();
-                Nv12.FromBgra(frame.Bgra, frame.Stride, width, height, nv12);
-                var encodeTicks = Stopwatch.GetTimestamp() - convertStart;
-                nv12Valid = true;
-                if (key)
+                ReadOnlySpan<byte> input;
+                if (nv12Frame)
                 {
-                    _keyRequested = false;
-                    encoder.RequestKeyFrame();
+                    input = current;
+                    nv12Valid = false; // nv12 里不是这一帧了（进锁屏时再从最后一帧拷）
                 }
-                encoder.SetQuality(quality);
-                lastQuality = quality;
+                else
+                {
+                    if (nv12.Length < size) nv12 = new byte[size];
+                    Nv12.FromBgra(frame.Bgra, frame.Stride, width, height, nv12);
+                    input = nv12.AsSpan(0, size);
+                    nv12Valid = true;
+                }
+                var encodeTicks = Stopwatch.GetTimestamp() - convertStart;
                 // 时间戳也是这一帧的编号：控制端按它确认，必须一帧比一帧大
                 var ts = Math.Max((uint)_clock.ElapsedMilliseconds, lastTimestamp + 1);
                 var encodeStart = Stopwatch.GetTimestamp();
-                var output = encoder.Encode(nv12, TimeSpan.FromMilliseconds(ts));
+                EncodedFrame? output;
+                try
+                {
+                    if (key)
+                    {
+                        _keyRequested = false;
+                        encoder.RequestKeyFrame();
+                    }
+                    if (bitrate is { } kbps) encoder.SetBitrate(kbps);
+                    encoder.SetQuality(quality);
+                    output = encoder.Encode(input, TimeSpan.FromMilliseconds(ts));
+                }
+                catch (Exception ex) when (encoder.IsHardware)
+                {
+                    // 这一帧不发了；下一轮马上重建成软件编码器（不等出错的那个关完），从关键帧开始
+                    HardwareEncoderFailed(encoder, ex);
+                    encoder = null;
+                    continue;
+                }
+                lastQuality = quality;
                 // 测试钩子：编码的活随像素数变，1280×720 上多等的就是设的那么多
                 if (encodeDelayMs > 0)
                     Thread.Sleep((int)Math.Min(Math.Round(encodeDelayMs * ((double)width * height / (1280 * 720))), 1000));
@@ -1210,7 +1389,15 @@ public sealed class SessionRunner : IAsyncDisposable
                     // 降到了更小的一级是"电脑忙降的"，回到了更大的一级是"降了没用退回去"
                     _telemetry?.OnAutoStep(auto.Rung > rungBefore ? SessionTelemetry.AutoStep.Cpu : SessionTelemetry.AutoStep.CpuUndo);
                 }
-                if (output is not { } encoded) continue;
+                if (output is not { } encoded)
+                {
+                    // 硬件编码器这一帧没等到（超时、它没要输入）：这一帧已经记成了 previous，下一轮比出来没变化，
+                    // 画面不动（画质也补到顶了、中继上没有保活）就一直不再编，控制端一直看不到这次的变化。
+                    // 下一轮整幅编一个关键帧重发（硬件编码器自己也会强制关键帧，画质规划按关键帧算）；连着几次这样它会抛出、换软件编码器。
+                    // 软件编码器的 null 不一样：输出下一次调用时就出来了
+                    if (encoder.IsHardware) _keyRequested = true;
+                    continue;
+                }
                 lastTimestamp = ts;
                 // 两条线路都按"中继上这一帧的大小"记账（6 字节帧头 + 数据），画质规划学到的东西换线路后还能用
                 var bytes = 6 + encoded.Data.Length;
@@ -1245,9 +1432,37 @@ public sealed class SessionRunner : IAsyncDisposable
         finally
         {
             if (fineTimer) timeEndPeriod(1);
-            encoder?.Dispose();
-            source?.Dispose();
+            // 这里抛出去就是整个程序崩掉（线程上没人接）：显卡驱动关的时候出错也只记一笔
+            DisposeQuietly(encoder, "编码器");
+            DisposeQuietly(source, "截屏");
         }
+    }
+
+    /// <summary>关掉编码器 / 截屏：硬件编码器、桌面复制关的时候驱动可能出错，记一笔就算了。</summary>
+    private static void DisposeQuietly(IDisposable? disposable, string what)
+    {
+        if (disposable is null) return;
+        try
+        {
+            disposable.Dispose();
+        }
+        catch (Exception ex)
+        {
+            AgentLog.Warn($"关掉{what}时出错：{ex.Message}");
+        }
+    }
+
+    /// <summary>在线程池上关（出错的硬件编码器：关它可能卡在驱动里，别让采集线程等）；5 秒还没关完记一笔，之后关完了再记一笔。</summary>
+    private static void DisposeInBackground(IDisposable disposable, string what)
+    {
+        var dispose = Task.Run(() => DisposeQuietly(disposable, what));
+        _ = Task.Run(async () =>
+        {
+            if (await Task.WhenAny(dispose, Task.Delay(DisposeSlowMs)) == dispose) return;
+            AgentLog.Warn($"关掉{what}过了 {DisposeSlowMs / 1000} 秒还没关完（多半卡在显卡驱动里）：远程照常用软件编码器");
+            await dispose;
+            AgentLog.Info($"{what}关完了");
+        });
     }
 
     private RemoteFeatures Features()

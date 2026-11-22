@@ -3,6 +3,8 @@
   <PropertyGroup>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!-- 编进来的 Agent\Nv12.cs 用了指针 -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
@@ -35,6 +37,13 @@
     <Compile Include="..\..\src\PrivateChat.Agent\Session\VideoSettings.cs" Link="Agent\VideoSettings.cs" />
     <Compile Include="..\..\src\PrivateChat.Agent\Session\AutoResolution.cs" Link="Agent\AutoResolution.cs" />
     <Compile Include="..\..\src\PrivateChat.Agent\Video\FrameSource.cs" Link="Agent\FrameSource.cs" />
+    <!-- 桌面复制截屏里的纯计算：变化区域 → 画面上的块、画鼠标指针（拿 Nv12.cs 的 BGRA → NV12 对照颜色公式；它用了指针，要允许 unsafe） -->
+    <Compile Include="..\..\src\PrivateChat.Agent\Video\CaptureTiles.cs" Link="Agent\CaptureTiles.cs" />
+    <Compile Include="..\..\src\PrivateChat.Agent\Video\Dxgi\CursorOverlay.cs" Link="Agent\CursorOverlay.cs" />
+    <Compile Include="..\..\src\PrivateChat.Agent\Video\Nv12.cs" Link="Agent\Nv12.cs" />
+    <!-- 选编码器、硬件编码器逐帧 QP 的换算、认"这一帧的输出"：同样是纯计算（IVideoEncoder.cs 里是接口和 ValidatedEncoder） -->
+    <Compile Include="..\..\src\PrivateChat.Agent\Video\IVideoEncoder.cs" Link="Agent\IVideoEncoder.cs" />
+    <Compile Include="..\..\src\PrivateChat.Agent\Video\EncoderChoice.cs" Link="Agent\EncoderChoice.cs" />
     <!-- 遥测：一次远程里被控端这边的汇总（百分位、每样用了几秒、计数）：同样是纯计算 -->
     <Compile Include="..\..\src\PrivateChat.Agent\Session\SessionTelemetry.cs" Link="Agent\SessionTelemetry.cs" />
     <!-- 快速线路（经 Cloudflare Realtime）里的纯计算：H.264 的 RTP 分片、码率控制 -->

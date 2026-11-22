@@ -5,6 +5,8 @@
 // E2E_VIDEO=画质（JSON，和网页记在 localStorage['remote.video'] 里的一样，只写 current 也行），比如
 //   E2E_VIDEO='{"current":{"mode":4,"maxWidth":1280,"maxHeight":800,"fps":30,"maxKbps":4000}}'
 // 不给就是网页默认的自动。mode：0 自动、1 流畅、2 清晰、3 原画、4 自定义（自定义的几个数得是网页上能选的）
+// PRIVATECHAT_AGENT_ENCODER=auto|hardware|software、PRIVATECHAT_AGENT_CAPTURE=auto|dxgi|gdi 原样交给被控端（比如 hardware 量硬件编码器）；
+// 每一段都打出被控端用的编码器和截屏方式（这里是忙碌的测试画面，截屏总是"测试画面"）
 //
 // 怎么读这些数字：被控端和浏览器都在这台电脑上。标准线路在这里是"本机 → 本机的服务器 → 本机"，
 // 比真实部署（出公网到 Cloudflare、经隧道回家里的服务器、再出去）快得多；快速线路则是真的出去到 Cloudflare 再回来。
@@ -23,6 +25,14 @@ const COMPOSE = process.env.E2E_COMPOSE || `docker compose -f "${path.resolve(RO
 const AGENT = process.env.E2E_AGENT_EXE || path.resolve(ROOT, 'src/PrivateChat.Agent/bin/Debug/net11.0-windows/PrivateChat.Agent.exe')
 const SECONDS = Number(process.env.E2E_SECONDS || 30)
 const VIDEO = process.env.E2E_VIDEO || ''
+/** 原样交给被控端的编码器、截屏开关（没设就是被控端的默认 auto） */
+const PIPELINE_ENV = Object.fromEntries(['PRIVATECHAT_AGENT_ENCODER', 'PRIVATECHAT_AGENT_CAPTURE']
+  .filter((name) => process.env[name]).map((name) => [name, process.env[name]]))
+/** "编码 …"那一行最后写的编码器和截屏方式（"…，编码器 X，截屏 Y"；老版本被控端没有这一截） */
+const pipelineOf = (line) => ({
+  encoder: line?.match(/，编码器 (.+?)，截屏 /)?.[1] ?? '（没写）',
+  capture: line?.match(/，截屏 (.+)$/)?.[1]?.trim() ?? '（没写）',
+})
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 async function until(fn, timeout = 15000, every = 200) {
   const deadline = Date.now() + timeout
@@ -62,8 +72,9 @@ function cleanup() {
   dir = path.join(os.tmpdir(), `pc-agent-lines-${Date.now()}`)
   fs.mkdirSync(dir, { recursive: true })
   let out = ''
+  if (Object.keys(PIPELINE_ENV).length) console.log(`被控端带着：${Object.entries(PIPELINE_ENV).map(([k, v]) => `${k}=${v}`).join(' ')}`)
   agent = spawn(AGENT, ['--headless', '--server', BASE, '--data-dir', dir, '--name', name, '--consent', 'accept', '--source', 'busy', '--dry-input', path.join(dir, 'input.jsonl')],
-    { env: { ...process.env, PRIVATECHAT_AGENT_TEST: '1' } })
+    { env: { ...process.env, PRIVATECHAT_AGENT_TEST: '1', ...PIPELINE_ENV } })
   agent.stdout.on('data', (d) => { out += d.toString() })
   agent.stderr.on('data', (d) => { out += d.toString() })
   const code = await until(() => out.match(/DEVICE-CODE: (\d{8})/)?.[1], 30000)
@@ -110,12 +121,15 @@ function cleanup() {
     const title = await statsLine.getAttribute('title', { timeout: 1000 }).catch(() => null)
     const badges = (await page.locator('[data-testid=remote-slow], [data-testid=remote-busy]').allTextContents().catch(() => [])).join('、')
     const menu = await page.locator('[data-testid=remote-video]').textContent({ timeout: 1000 }).catch(() => '')
-    const encoding = out.split(/\r?\n/).filter((l) => /编码 \d+x\d+/.test(l)).at(-1)?.replace(/^\S+ \[\w+\] /, '') ?? '（没有）'
+    const encodeLine = out.split(/\r?\n/).filter((l) => /编码 \d+x\d+/.test(l)).at(-1)
+    const encoding = encodeLine?.replace(/^\S+ \[\w+\] /, '') ?? '（没有）'
+    const pipeline = pipelineOf(encodeLine)
     console.log(`\n== ${label} ==  工具栏：${toolbar}；画面 ${size}`)
+    console.log(`   编码器 ${pipeline.encoder}；截屏 ${pipeline.capture}`)
     console.log(`   ${menu || '画质：（老版本的两档）'}；被控端最后一次：${encoding}`)
     console.log(`   ${title ?? '（统计上没有说明）'}${badges ? `；提示：${badges}` : ''}`)
     console.log(`   看到的帧率 ${measured.fps} 帧/秒；端到端延迟 中位 ${measured.median} ms / 九成以内 ${measured.p90} ms / 最大 ${measured.max} ms；最长一次画面不动 ${measured.longestFreeze} ms`)
-    return measured
+    return { ...measured, encoder: pipeline.encoder, capture: pipeline.capture }
   }
 
   const relay = await measure('标准线路（经本机的中继）')

@@ -6,11 +6,14 @@ namespace PrivateChat.Agent.Video;
 /// <summary>
 /// GDI 截屏：BitBlt / StretchBlt（HALFTONE 缩放）屏幕 DC 到一张 32 位 DIB，再画上鼠标指针。
 /// 进程是 Per-Monitor V2 DPI 感知（Program 里设置），坐标都是物理像素。
-/// 比桌面复制（DXGI Desktop Duplication）慢一些，但在远程桌面会话、多显卡、显示器热插拔下都能用，v1 足够。
+/// 比桌面复制（<see cref="DxgiScreenSource"/>）慢得多（一帧 17–33 ms），但在远程桌面会话、多显卡、显示器热插拔下都能用：
+/// 桌面复制没经探测验证、或者用着出了错时退回这里（见 <see cref="ScreenCaptures"/>）。
 /// UAC 提示和锁屏在安全桌面上，截不到（截到黑屏），见 docs/DESIGN.md 4.8 的已知限制。
 /// </summary>
 public sealed class GdiScreenSource : IFrameSource
 {
+    public const string GdiName = "GDI";
+
     private IntPtr _memDc;
     private IntPtr _bitmap;
     private IntPtr _oldBitmap;
@@ -19,8 +22,15 @@ public sealed class GdiScreenSource : IFrameSource
     private int _height;
     private byte[] _buffer = [];
 
-    public IReadOnlyList<ScreenInfo> Screens()
-        => [.. Screen.AllScreens.Select((s, i) => new ScreenInfo(i, s.Bounds, s.Primary))];
+    /// <summary>Screen.AllScreens 的顺序就是显示器编号（网页上选显示器发的就是它）；DeviceName 给桌面复制找显卡输出。每帧都调，要便宜。</summary>
+    public static IReadOnlyList<ScreenInfo> List()
+        => [.. Screen.AllScreens.Select((s, i) => new ScreenInfo(i, s.Bounds, s.Primary, s.DeviceName))];
+
+    public IReadOnlyList<ScreenInfo> Screens() => List();
+
+    public bool IsRealScreen => true;
+
+    public string Name => GdiName;
 
     public CapturedFrame Capture(ScreenInfo screen, int width, int height)
     {
@@ -39,7 +49,7 @@ public sealed class GdiScreenSource : IFrameSource
                 Native.SetBrushOrgEx(_memDc, 0, 0, IntPtr.Zero);
                 Native.StretchBlt(_memDc, 0, 0, width, height, screenDc, b.X, b.Y, b.Width, b.Height, Native.SRCCOPY);
             }
-            DrawCursor(b, width, height);
+            DrawCursor(_memDc, b, width, height);
         }
         finally
         {
@@ -53,7 +63,11 @@ public sealed class GdiScreenSource : IFrameSource
         return new CapturedFrame(_buffer, width, height, stride);
     }
 
-    private void DrawCursor(Rectangle bounds, int width, int height)
+    /// <summary>
+    /// 把现在的鼠标指针画到 hdc 上（hdc 是 bounds 这块显示器缩放到 width × height 的画面）：位置按比例缩放，指针原始大小（DrawIconEx DI_NORMAL）。
+    /// 指针不在这块显示器上、或者隐藏着时不画。桌面复制自己画指针时（<see cref="CursorOverlay"/>）照着这个的样子。
+    /// </summary>
+    public static void DrawCursor(IntPtr hdc, Rectangle bounds, int width, int height)
     {
         var info = new Native.CURSORINFO { cbSize = Marshal.SizeOf<Native.CURSORINFO>() };
         if (!Native.GetCursorInfo(ref info) || (info.flags & Native.CURSOR_SHOWING) == 0 || info.hCursor == IntPtr.Zero) return;
@@ -68,7 +82,7 @@ public sealed class GdiScreenSource : IFrameSource
         }
         var x = (int)((info.ptScreenPos.X - bounds.X) * (double)width / bounds.Width) - hotX;
         var y = (int)((info.ptScreenPos.Y - bounds.Y) * (double)height / bounds.Height) - hotY;
-        Native.DrawIconEx(_memDc, x, y, info.hCursor, 0, 0, 0, IntPtr.Zero, Native.DI_NORMAL);
+        Native.DrawIconEx(hdc, x, y, info.hCursor, 0, 0, 0, IntPtr.Zero, Native.DI_NORMAL);
     }
 
     private void EnsureBitmap(int width, int height)

@@ -9,6 +9,13 @@ public static class FrameTiles
 
     /// <summary>逐块比较两幅 BGRA 画面，changed 里记下每块变没变，返回变了几块。previous 为空算全变。</summary>
     public static int Diff(ReadOnlySpan<byte> previous, ReadOnlySpan<byte> current, int width, int height, int stride, Span<bool> changed)
+        => Diff(previous, current, width, height, stride, changed, default);
+
+    /// <summary>
+    /// 同上，只比较 candidates 里标着"可能变了"的块（其余算没变）；candidates 为空就全比。
+    /// 桌面复制会告诉哪些区域变了，按这个只比那几块，省下整屏比较的时间。
+    /// </summary>
+    public static int Diff(ReadOnlySpan<byte> previous, ReadOnlySpan<byte> current, int width, int height, int stride, Span<bool> changed, ReadOnlySpan<bool> candidates)
     {
         var count = 0;
         var index = 0;
@@ -17,11 +24,55 @@ public static class FrameTiles
             var rows = Math.Min(Size, height - top);
             for (var left = 0; left < width; left += Size, index++)
             {
+                if (!candidates.IsEmpty && !candidates[index])
+                {
+                    changed[index] = false;
+                    continue;
+                }
                 var bytes = Math.Min(Size, width - left) * 4;
                 var differs = previous.IsEmpty;
                 for (var y = 0; y < rows && !differs; y++)
                 {
                     var offset = (top + y) * stride + left * 4;
+                    differs = !current.Slice(offset, bytes).SequenceEqual(previous.Slice(offset, bytes));
+                }
+                changed[index] = differs;
+                if (differs) count++;
+            }
+        }
+        return count;
+    }
+
+    /// <summary>
+    /// 逐块比较两幅紧凑排列的 NV12（先 Y 再交错的 UV），一块 = 它的 Y 和对应的 UV。previous 为空算全变；
+    /// candidates 不为空时只比标着"可能变了"的块。
+    /// </summary>
+    public static int DiffNv12(ReadOnlySpan<byte> previous, ReadOnlySpan<byte> current, int width, int height, Span<bool> changed, ReadOnlySpan<bool> candidates = default)
+    {
+        var count = 0;
+        var index = 0;
+        var uvStart = width * height;
+        for (var top = 0; top < height; top += Size)
+        {
+            var rows = Math.Min(Size, height - top);
+            for (var left = 0; left < width; left += Size, index++)
+            {
+                if (!candidates.IsEmpty && !candidates[index])
+                {
+                    changed[index] = false;
+                    continue;
+                }
+                var bytes = Math.Min(Size, width - left);
+                var differs = previous.IsEmpty;
+                for (var y = 0; y < rows && !differs; y++)
+                {
+                    var offset = (top + y) * width + left;
+                    differs = !current.Slice(offset, bytes).SequenceEqual(previous.Slice(offset, bytes));
+                }
+                // UV 每行对应两行 Y，宽度一样（U、V 交错）
+                for (var y = top / 2; y < (top + rows + 1) / 2 && !differs; y++)
+                {
+                    var offset = uvStart + y * width + left;
                     differs = !current.Slice(offset, bytes).SequenceEqual(previous.Slice(offset, bytes));
                 }
                 changed[index] = differs;
