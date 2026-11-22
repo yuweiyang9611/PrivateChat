@@ -29,10 +29,14 @@ export const FrameType = {
   SetTransport: 0x1d,
   ReceiverReport: 0x1e,
   MaxFps: 0x1f,
+  SetVideo: 0x20,
 } as const
 
-/** 被控端支持的可选功能（VideoConfig 的最后一个字节；老版本没有，按 0 算） */
-export const Features = { Audio: 1, AdaptiveBitrate: 2, Realtime: 4 } as const
+/** 被控端支持的可选功能（VideoConfig 的最后一个字节；老版本没有，按 0 算）。VideoSettings：认识 SetVideo（被控端 0.8.6 起） */
+export const Features = { Audio: 1, AdaptiveBitrate: 2, Realtime: 4, VideoSettings: 8 } as const
+
+/** Stats 的标志位（被控端 0.8.6 起）。LoweredForNetwork / LoweredForCpu：自动画质因为网络慢 / 电脑忙不过来降了分辨率；CpuBound：这一阵采集加编码一帧要花掉一帧的大部分时间 */
+export const StatsFlags = { LoweredForNetwork: 1, LoweredForCpu: 2, CpuBound: 4 } as const
 
 /**
  * 画面和声音走哪条线路。Relay：经我们的服务器中继（WebSocket）；Realtime：经 Cloudflare Realtime（WebRTC）。
@@ -50,8 +54,70 @@ export interface ReceiverReport { lossPermille: number; receivedKbps: number; ji
 /** 声音的编码：1 = Opus（48 kHz，一包 20 ms） */
 export const AudioCodec = { Opus: 1 } as const
 
+/** 老的两档画质（SetQuality）：0.8.5 及以前的被控端只认识这个；0.8.6 起收到过 SetVideo 就不理它了 */
 export const Quality = { Smooth: 0, Sharp: 1 } as const
 export type QualityPreset = (typeof Quality)[keyof typeof Quality]
+
+/** 画质（SetVideo）：自动按网速和对方电脑的性能调分辨率；其余几档分辨率固定。码率都是上限，网络慢时照样往下调 */
+export const VideoMode = { Auto: 0, Smooth: 1, Clear: 2, Original: 3, Custom: 4 } as const
+export type VideoModeId = (typeof VideoMode)[keyof typeof VideoMode]
+/** 按模式编号取名字（界面文案、testid 用） */
+export const VIDEO_MODE_KEYS = ['auto', 'smooth', 'clear', 'original', 'custom'] as const
+export type VideoModeKey = (typeof VIDEO_MODE_KEYS)[number]
+
+/** maxWidth × maxHeight：画面按比例缩进这个框里（不放大），0×0 = 原始分辨率；fps 最高 30；maxKbps 码率上限 */
+export interface VideoSettings { mode: VideoModeId; maxWidth: number; maxHeight: number; fps: number; maxKbps: number }
+
+/** 各档的数（以网页这份为准：发给被控端的就是这些数） */
+export const VIDEO_PRESETS: Readonly<Record<Exclude<VideoModeKey, 'custom'>, Readonly<VideoSettings>>> = {
+  auto: { mode: VideoMode.Auto, maxWidth: 1920, maxHeight: 1200, fps: 30, maxKbps: 8000 },
+  smooth: { mode: VideoMode.Smooth, maxWidth: 1280, maxHeight: 800, fps: 30, maxKbps: 4000 },
+  clear: { mode: VideoMode.Clear, maxWidth: 1920, maxHeight: 1200, fps: 30, maxKbps: 8000 },
+  original: { mode: VideoMode.Original, maxWidth: 0, maxHeight: 0, fps: 30, maxKbps: 16000 },
+}
+const PRESET_BY_MODE = [VIDEO_PRESETS.auto, VIDEO_PRESETS.smooth, VIDEO_PRESETS.clear, VIDEO_PRESETS.original]
+
+/** 自定义里能选的：分辨率（[0, 0] = 原始）、帧率、码率上限（kbps） */
+export const CUSTOM_RESOLUTIONS: ReadonlyArray<readonly [number, number]> = [[0, 0], [2560, 1600], [1920, 1200], [1600, 1000], [1280, 800], [960, 600]]
+export const CUSTOM_FPS: readonly number[] = [30, 24, 20, 15, 10, 5]
+export const CUSTOM_KBPS: readonly number[] = [1000, 2000, 4000, 8000, 12000, 16000, 20000]
+export const CUSTOM_DEFAULT: Readonly<VideoSettings> = { mode: VideoMode.Custom, maxWidth: 1920, maxHeight: 1200, fps: 30, maxKbps: 8000 }
+
+/** 老被控端（只认识 SetQuality）用哪一档最接近 */
+export function legacyQualityOf(s: VideoSettings): QualityPreset {
+  switch (s.mode) {
+    case VideoMode.Auto:
+    case VideoMode.Smooth:
+      return Quality.Smooth
+    case VideoMode.Clear:
+    case VideoMode.Original:
+      return Quality.Sharp
+    default:
+      return s.maxWidth === 0 || s.maxHeight === 0 || s.maxWidth > 1280 ? Quality.Sharp : Quality.Smooth
+  }
+}
+
+/** 自定义的几个值都得是列表里的，否则 null */
+function customOf(raw: unknown): VideoSettings | null {
+  if (!raw || typeof raw !== 'object') return null
+  const { maxWidth, maxHeight, fps, maxKbps } = raw as Record<string, unknown>
+  if (!CUSTOM_RESOLUTIONS.some(([w, h]) => w === maxWidth && h === maxHeight)) return null
+  if (typeof fps !== 'number' || !CUSTOM_FPS.includes(fps) || typeof maxKbps !== 'number' || !CUSTOM_KBPS.includes(maxKbps)) return null
+  return { mode: VideoMode.Custom, maxWidth: maxWidth as number, maxHeight: maxHeight as number, fps, maxKbps }
+}
+
+/**
+ * 这台设备上记着的画质（localStorage 里的 JSON，可能是旧的、坏的）→ 现在用哪一档、自定义里选过什么。
+ * 几个固定档只认模式编号，数按现在的表来；不认识的一律当自动，自定义不对就用默认的
+ */
+export function normalizeVideoSettings(raw: unknown): { current: VideoSettings; custom: VideoSettings } {
+  const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  const mode = o.current && typeof o.current === 'object' ? (o.current as Record<string, unknown>).mode : undefined
+  const preset = typeof mode === 'number' ? PRESET_BY_MODE[mode] : undefined
+  const current = preset ? { ...preset } : mode === VideoMode.Custom ? customOf(o.current) : null
+  const custom = customOf(o.custom) ?? (current?.mode === VideoMode.Custom ? { ...current } : { ...CUSTOM_DEFAULT })
+  return { current: current ?? { ...VIDEO_PRESETS.auto }, custom }
+}
 
 export const SpecialKey = { CtrlAltDel: 1, Win: 2, PrintScreen: 3, TaskManager: 4, AltTab: 5 } as const
 export type SpecialKeyId = (typeof SpecialKey)[keyof typeof SpecialKey]
@@ -65,7 +131,7 @@ export type AgentFrame =
   | { type: 'video'; timestamp: number; key: boolean; data: Uint8Array }
   | { type: 'monitors'; monitors: MonitorInfo[] }
   | { type: 'clipboard'; text: string }
-  | { type: 'stats'; fps: number; kbps: number; cpu: number; rtt: number; target: number; max: number }
+  | { type: 'stats'; fps: number; kbps: number; cpu: number; rtt: number; target: number; max: number; captureMs: number; encodeMs: number; flags: number }
   | { type: 'audio'; timestamp: number; codec: number; channels: number; data: Uint8Array }
   | { type: 'ping'; sequence: number }
   | { type: 'status'; code: number; message: string }
@@ -101,10 +167,12 @@ export function parseAgentFrame(buffer: ArrayBuffer): AgentFrame | null {
       return { type: 'clipboard', text: utf8.decode(b.subarray(1)) }
     case FrameType.Stats:
       if (b.length < 7) return null
-      // 目标码率、档位上限是 0.7.0 加的：老版本没有，按 0 算
+      // 目标码率、档位上限是 0.7.0 加的；每帧的采集 / 编码耗时（0.1 ms 为单位）和标志位是 0.8.6 加的：老版本没有，按 0 算
       return {
         type: 'stats', fps: b[1]!, kbps: v.getUint16(2, true), cpu: b[4]!, rtt: v.getUint16(5, true),
         target: b.length >= 11 ? v.getUint16(7, true) : 0, max: b.length >= 11 ? v.getUint16(9, true) : 0,
+        captureMs: b.length >= 13 ? v.getUint16(11, true) / 10 : 0, encodeMs: b.length >= 15 ? v.getUint16(13, true) / 10 : 0,
+        flags: b.length >= 16 ? b[15]! : 0,
       }
     case FrameType.Status:
       if (b.length < 2) return null
@@ -173,6 +241,14 @@ export const encode = {
   }),
   selectMonitor: (index: number) => frame(FrameType.SelectMonitor, 1, (_, b) => { b[1] = index }),
   setQuality: (preset: QualityPreset) => frame(FrameType.SetQuality, 1, (_, b) => { b[1] = preset }),
+  /** 画质（被控端 0.8.6 起）：模式、最大宽高（0×0 = 原始）、帧率（0 = 30）、码率上限（0 = 这一档默认的）。老版本被控端不认识，直接忽略 */
+  setVideo: (s: VideoSettings) => frame(FrameType.SetVideo, 8, (v, b) => {
+    b[1] = s.mode
+    v.setUint16(2, clampTo(s.maxWidth, 0xffff), true)
+    v.setUint16(4, clampTo(s.maxHeight, 0xffff), true)
+    b[6] = clampTo(s.fps, 255)
+    v.setUint16(7, clampTo(s.maxKbps, 0xffff), true)
+  }),
   requestKeyFrame: () => frame(FrameType.RequestKeyFrame, 0),
   specialKey: (id: SpecialKeyId) => frame(FrameType.SpecialKey, 1, (_, b) => { b[1] = id }),
   text: (value: string) => text(FrameType.Text, value),

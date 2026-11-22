@@ -2,7 +2,9 @@
 // Agent 用测试画面（四色象限 + 移动黑块，两块假显示器 1280×720 / 1920×1080），键鼠不注入系统、写到日志文件——
 // 不碰这台电脑的真实屏幕和鼠标键盘。E2E_REAL_SCREEN=1 时最后再用真实屏幕跑一遍（只检查尺寸和非黑屏，不截图）。
 // 覆盖：下载安装包、设备码添加（管理员替爸爸添加）、主人实时看到在线 / 被远程提醒、远程控制（自动同意）、
-// 画面像素、声音（测试音）、键鼠 / 滚轮 / 文字 / 特殊键 / 剪贴板、画质与切换显示器、结束与记录、只看模式不注入、拒绝、
+// 画面像素、声音（测试音）、键鼠 / 滚轮 / 文字 / 特殊键 / 剪贴板、画质菜单（自动 / 清晰 / 原画 / 自定义，记在这台设备上）与切换显示器、
+// 结束与记录、只看模式不注入（画质照样能换）、对方电脑忙不过来时自动画质降分辨率并提示（编码故意放慢：降了管用，留着；
+// 截屏故意放慢：降了也没快多少，退回去，不再降）、拒绝、
 // 免同意名单（勾上后不经同意直接连、移出后立即结束）、同意窗口没人点时取消 / 改用 PIN（窗口马上收起、PIN 立刻连上）、移除电脑。
 // 加 --agent-tls13：被控端不直连 compose 栈，而是经本机一个只收 TLS 1.3 的入口（e2e/tls13-proxy.cjs），
 // 并强制用程序自带的 TLS 1.3（Windows 10 上的做法）——同一套用例再跑一遍，另外断言三条连接都是 TLS 1.3。
@@ -69,11 +71,16 @@ async function login(page, who) {
 /** --realtime：带着指向假 SFU 的那组环境变量重建 api 容器，等它能用 */
 async function recreateApi() {
   execSync(`${COMPOSE} up -d --no-deps api`, { env: { ...process.env, ...FAKE_SFU_ENV }, stdio: 'ignore' })
+  return apiHealthy()
+}
+
+/** 等 api 重建后能用（最多 90 秒） */
+function apiHealthy() {
   return until(async () => (await fetch(BASE + '/healthz').catch(() => null))?.ok, 90000, 500)
 }
 
-/** 起一个无界面 Agent；返回进程、它的输出（累积）、键鼠日志路径 */
-function startAgent(dir, consent, source = 'pattern') {
+/** 起一个无界面 Agent；返回进程、它的输出（累积）、键鼠日志路径。extraEnv：这一次额外带的环境变量（测试钩子） */
+function startAgent(dir, consent, source = 'pattern', extraEnv = {}) {
   fs.mkdirSync(dir, { recursive: true })
   const inputLog = path.join(dir, 'input.jsonl')
   const args = ['--headless', '--server', tls ? tls.url : BASE, '--data-dir', dir, '--name', 'E2E 测试电脑', '--consent', consent]
@@ -85,6 +92,7 @@ function startAgent(dir, consent, source = 'pattern') {
   else env.PRIVATECHAT_AGENT_REALTIME = 'off'
   // 强制走程序自带的 TLS 1.3，只信任测试入口那张临时证书
   if (tls) Object.assign(env, { PRIVATECHAT_AGENT_TLS: 'bundled', PRIVATECHAT_AGENT_TEST_CA: tls.cert })
+  Object.assign(env, extraEnv)
   const proc = spawn(AGENT, args, { env })
   agents.add(proc)
   proc.on('exit', () => agents.delete(proc))
@@ -111,6 +119,24 @@ const canvasSize = (page) => page.evaluate(() => {
   const c = document.querySelector('[data-testid=remote-canvas]')
   return c ? `${c.width}x${c.height}` : ''
 })
+/** 工具栏上显示的解码帧率 */
+const shownFps = async (page) => Number((await page.locator('[data-testid=remote-stats]').textContent().catch(() => '')).match(/(\d+) fps/)?.[1] ?? 0)
+/** 被控端输出里从 from 起的"编码 …"那几行（检查失败时打出来看） */
+const encodeLines = (agent, from = 0) => agent.out.slice(from).match(/编码 \d+x\d+[^\r\n]*/g) ?? []
+/** 被控端输出里从 from 起自动画质说的那几行 */
+const autoLines = (agent, from = 0) => agent.out.slice(from).match(/自动画质：[^\r\n]*/g) ?? []
+
+/** 画质菜单里选一项：auto / smooth / clear / original / custom */
+async function pickVideo(page, key) {
+  await page.locator('[data-testid=remote-video]').click()
+  await page.locator(`[data-testid=remote-video-${key}]`).click()
+}
+
+/** 自定义那一行的下拉框里选一项（按显示的文字整串比较："5 帧"不能选成"15 帧"） */
+async function pickOption(page, testid, label) {
+  await page.locator(`[data-testid=${testid}]`).click()
+  await page.locator('.el-select-dropdown__item:visible').filter({ hasText: new RegExp(`^\\s*${label}\\s*$`) }).click()
+}
 
 /** 鼠标移到画布上的相对位置（考虑 object-fit: contain 的黑边） */
 async function moveOnCanvas(page, fx, fy) {
@@ -135,14 +161,18 @@ async function moveOnCanvas(page, fx, fy) {
     for (const d of [dir, dir + '-real']) try { fs.rmSync(d, { recursive: true, force: true }) } catch { /* 进程还占着 */ }
   }
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) process.on(signal, () => { cleanup(); process.exit(1) })
-  // 测完把 api 还原成原来的配置（按 .env）
+  // 测完把 api 还原成原来的配置（按 .env），并等它重新起来：npm run e2e 里紧接着的下一套测试一上来就要连它，
+  // 没等的话被控端第一次申请设备码正好撞上 api 重启（经 --agent-tls13 的入口时表现成 TLS 连接写不进去），那套测试就在第一步失败
   const restoreApi = async () => {
     if (!REALTIME) return
     execSync(`${COMPOSE} up -d --no-deps api`, { stdio: 'ignore' })
+    if (!(await apiHealthy())) console.log('api 还原配置后 90 秒还没起来')
   }
 
   execSync(`dotnet build "${path.resolve(ROOT, 'src/PrivateChat.Agent')}" -nologo -v q`, { stdio: 'inherit' })
   sql("insert into users (id, email, username, display_name, password_hash, role, elder_mode, created_at) select '01a1b1b0-0000-7000-8000-0000000000b0', 'bob@example.com', 'bob', '爸爸', password_hash, 'Member', false, now() from users where email='admin@example.com' on conflict (id) do nothing")
+  // 上一次中途失败没走到"移除电脑"那一步：留下的同名电脑先作废，不然设备列表里会有两台"E2E 测试电脑"
+  sql("update devices set revoked_at = now(), token_hash = null where kind = 'Agent' and name = 'E2E 测试电脑' and revoked_at is null")
 
   // 安装包随 web 镜像发布
   const head = await fetch(BASE + '/downloads/PrivateChat.Agent.exe', { method: 'HEAD' })
@@ -218,7 +248,7 @@ async function moveOnCanvas(page, fx, fy) {
   await admin.waitForURL(/\/remote\//, { timeout: 10000 })
   const sessionId = admin.url().split('/remote/')[1]
   const streaming = await until(async () => (await admin.locator('[data-testid=remote-stats]').textContent().catch(() => '')).includes('1280×720'), 20000)
-  check('对方同意后画面开始传输（1280×720，流畅档）', !!streaming, await admin.locator('[data-testid=remote-stats]').textContent().catch(() => ''))
+  check('对方同意后画面开始传输（1280×720，默认的自动画质）', !!streaming, await admin.locator('[data-testid=remote-stats]').textContent().catch(() => ''))
   await sleep(800)
   const colors = { tl: await pixel(admin, 0.25, 0.2), tr: await pixel(admin, 0.75, 0.2), bl: await pixel(admin, 0.25, 0.8), br: await pixel(admin, 0.75, 0.8) }
   check('解码出的画面就是测试画面（左上红、右上绿、左下蓝、右下白）',
@@ -280,7 +310,38 @@ async function moveOnCanvas(page, fx, fy) {
   }, 10000)
   check('再打开又有声音', !!again, again ?? (await audioNow()))
   const netLog = agent.out.match(/网络：目标码率 (\d+) kbps（上限 (\d+)），线路往返 (\d+) ms/)
-  check('被控端在按网络状况定码率（本机直连：往返很短，码率没有被压到最低）', !!netLog && Number(netLog[1]) >= 300 && Number(netLog[2]) === 2500 && Number(netLog[3]) < 200, netLog?.[0])
+  // 上限是自动画质的 8 Mbps
+  check('被控端在按网络状况定码率（本机直连：往返很短，码率没有被压到最低）', !!netLog && Number(netLog[1]) >= 300 && Number(netLog[2]) === 8000 && Number(netLog[3]) < 200, netLog?.[0])
+  check('网页上有画质菜单（被控端认识 SetVideo），没有老版本的两档按钮',
+    (await admin.locator('[data-testid=remote-video]').count()) === 1 && (await admin.locator('[data-testid=remote-quality-smooth]').count()) === 0,
+    { menu: await admin.locator('[data-testid=remote-video]').textContent().catch(() => null), legacy: await admin.locator('[data-testid=remote-quality-smooth]').count() })
+  /** 统计上挂着的每帧采集 / 编码耗时、标志位、鼠标停上去看到的说明；有没有"忙不过来"的提示 */
+  const statsEl = admin.locator('[data-testid=remote-stats]')
+  const statsAttr = (name) => statsEl.getAttribute(name, { timeout: 1000 }).catch(() => null)
+  const perFrame = async () => ({
+    capture: Number(await statsAttr('data-capture-ms')), encode: Number(await statsAttr('data-encode-ms')),
+    flags: Number(await statsAttr('data-flags')), title: await statsAttr('title'), busy: await admin.locator('[data-testid=remote-busy]').count(),
+  })
+  /** 盯着看 ms 毫秒：每 500 ms 记一次画布尺寸、解码帧率、统计里的每帧耗时和标志、有没有"忙不过来"的提示 */
+  const watch = async (ms) => {
+    const from = Date.now()
+    const seen = []
+    while (Date.now() - from < ms) {
+      const p = await perFrame()
+      seen.push({ at: Date.now() - from, size: await canvasSize(admin), fps: await shownFps(admin), capture: p.capture, encode: p.encode, flags: p.flags, busy: p.busy })
+      await sleep(500)
+    }
+    return seen
+  }
+  const busyBadge = admin.locator('[data-testid=remote-busy]')
+  /** "忙不过来"的提示上写的什么、鼠标停上去看到什么（没有提示时都是 null） */
+  const badgeNow = async () => ({
+    badge: (await busyBadge.textContent({ timeout: 500 }).catch(() => null))?.trim() ?? null,
+    badgeTitle: await busyBadge.getAttribute('title', { timeout: 500 }).catch(() => null),
+  })
+  const timed = await until(async () => { const p = await perFrame(); return p.encode > 0 && /采集 [\d.]+ ms，编码 [\d.]+ ms/.test(p.title ?? '') ? p : null }, 10000)
+  // 只看有没有报上来；忙不忙看下面专门的一段（这台电脑这会儿忙的话，测试画面也可能被标成忙不过来）
+  check('统计里带着对方电脑每帧的采集、编码耗时（鼠标停在统计上能看到）', !!timed, timed ?? (await perFrame()))
   // 新网页一连上就告诉被控端"跟不上时我会说"，被控端从此按最高 30 帧发（没说过的是旧网页，按 20 帧）
   const hellos = () => (agent.out.match(/控制端跟不上时会说：按最高 30 帧发/g) ?? []).length
   check('控制端连上后告诉被控端跟不上时会说，被控端按最高 30 帧发', hellos() >= 1, agent.out.match(/控制端(跟不上|解码)[^\r\n]*/)?.[0])
@@ -327,24 +388,35 @@ async function moveOnCanvas(page, fx, fy) {
     const moved = await until(() => inputs(agent).length > inputsBefore, 5000)
     check('走快速线路时键鼠照常（它们仍走中继）', !!moved)
     const fastLog = await until(() => agent.out.match(/网络：目标码率 (\d+) kbps（上限 (\d+)），线路往返 \d+ ms（快速线路）/), 8000)
-    check('被控端改用快速线路自己的码率控制', !!fastLog && Number(fastLog[1]) >= 300 && Number(fastLog[2]) === 2500, fastLog?.[0])
+    check('被控端改用快速线路自己的码率控制', !!fastLog && Number(fastLog[1]) >= 300 && Number(fastLog[2]) === 8000, fastLog?.[0])
 
-    // 在快速线路上换画质：被控端重建编码器（清晰档码率上限 6 Mbps），从关键帧接着发，线路不变；再换回来。
-    // 两档都是最高 30 fps、测试画面 1280x720 两档都放得下：日志里只有码率上限能看出换的是哪一档
+    // 在快速线路上换画质：被控端重建编码器，从关键帧接着发，线路不变。先换成自定义、分辨率选 960×600
+    // （测试画面 1280x720 按比例缩成 960x540，码率上限是自定义默认的 8 Mbps），再换成流畅（1280x720 放得下，上限 4 Mbps），
+    // 最后换回默认的自动（后面的用例按自动跑）
+    const switchFrom = agent.out.length
     let rebuilt = agent.out.length
-    await admin.locator('[data-testid=remote-quality-sharp]').click()
-    const sharp = await until(() => /编码 1280x720 30 fps，码率上限 6000 kbps/.test(agent.out.slice(rebuilt)), 8000)
+    await pickVideo(admin, 'custom')
+    const customRow = await admin.locator('[data-testid=remote-video-custom-row]').waitFor({ timeout: 5000 }).then(() => true, () => false)
+    await pickOption(admin, 'remote-video-res', '960×600')
+    const custom960 = await until(() => /编码 960x540 30 fps，码率上限 8000 kbps/.test(agent.out.slice(rebuilt)), 8000)
     await sleep(2000)
-    const sharpOk = !!sharp && (await lineNow()) === 'realtime' && (await fpsNow()) >= 5 && (await statsLine.textContent()).includes('快速线路')
+    const customOk = customRow && !!custom960 && (await lineNow()) === 'realtime' && (await fpsNow()) >= 5 && (await statsLine.textContent()).includes('快速线路')
     rebuilt = agent.out.length
-    await admin.locator('[data-testid=remote-quality-smooth]').click()
-    const smooth = await until(() => /编码 1280x720 30 fps，码率上限 2500 kbps/.test(agent.out.slice(rebuilt)), 8000)
+    await pickVideo(admin, 'smooth')
+    const smooth = await until(() => /编码 1280x720 30 fps，码率上限 4000 kbps/.test(agent.out.slice(rebuilt)), 8000)
+    await sleep(2000)
+    const smoothOk = !!smooth && (await lineNow()) === 'realtime' && (await fpsNow()) >= 5
+    const rowClosed = (await admin.locator('[data-testid=remote-video-custom-row]').count()) === 0
+    rebuilt = agent.out.length
+    await pickVideo(admin, 'auto')
+    const auto = await until(() => /编码 1280x720 30 fps，码率上限 8000 kbps/.test(agent.out.slice(rebuilt)), 8000)
     // 鼠标从工具栏上挪开：提示条出现在顶部正中，鼠标停在它上面的话它不会自己消失，还会挡住下面要点的按钮
     await moveOnCanvas(admin, 0.5, 0.5)
     await sleep(2000)
-    check('快速线路上换画质：编码器重建后画面接着出，仍在快速线路上，中继上没有画面帧',
-      sharpOk && !!smooth && (await lineNow()) === 'realtime' && (await fpsNow()) >= 5 && relayed.video === quietFrom.video,
-      { sharp: !!sharp, smooth: !!smooth, line: await lineNow(), fps: await fpsNow(), relayFrames: relayed.video - quietFrom.video })
+    check('快速线路上换画质（自定义 960×600 → 流畅 → 自动）：编码器重建后画面接着出，仍在快速线路上，中继上没有画面帧',
+      customOk && smoothOk && rowClosed && !!auto && (await lineNow()) === 'realtime' && (await fpsNow()) >= 5 && relayed.video === quietFrom.video,
+      { customRow, custom: !!custom960, smooth: !!smooth, rowClosedAfterPreset: rowClosed, auto: !!auto, line: await lineNow(), fps: await fpsNow(),
+        relayFrames: relayed.video - quietFrom.video, agent: encodeLines(agent, switchFrom) })
 
     // 假 SFU 那一头：被控端发来的画面在解；故意丢掉的 2% 的包靠重发补上了
     const publisher = (await sfu.summary()).find((s) => s.published.length > 0 && s.state === 'connected')
@@ -353,7 +425,7 @@ async function moveOnCanvas(page, fx, fy) {
     await sleep(3000)
     const sfuAfter = await received()
     // 重发管用的标志：对面要过包（NACK）、画面一直在解，而且没有因为缺包去要关键帧（PLI 没涨）。
-    // 不看分辨率：假 SFU 转码后发给网页的码率很低，被控端按"收到的比发出的少得多"降了码率，流畅档会跟着降一档分辨率
+    // 不看分辨率：假 SFU 转码后发给网页的码率很低，被控端按"收到的比发出的少得多"降了码率，自动画质会跟着降一档分辨率
     check('被控端发到 SFU 的画面一直在解；故意丢的包靠重发补上了，不用重新要关键帧',
       sfuAfter.framesDecoded - sfuBefore.framesDecoded >= 20 && sfuAfter.nackCount > 0 && sfuAfter.pliCount === sfuBefore.pliCount && sfuAfter.frameWidth >= 960,
       { decoded: sfuAfter.framesDecoded - sfuBefore.framesDecoded, nack: sfuAfter.nackCount, lost: sfuAfter.packetsLost, pli: [sfuBefore.pliCount, sfuAfter.pliCount], freezes: sfuAfter.freezeCount, size: `${sfuAfter.frameWidth}x${sfuAfter.frameHeight}` })
@@ -451,10 +523,12 @@ async function moveOnCanvas(page, fx, fy) {
       return a.state === 'playing' && a.peak > 0.1 ? a : null
     }, 10000)
     check('回到标准线路后声音也回到中继', !!soundBack, soundBack ?? (await audioNow()))
-    // 快速线路上因为码率低降过的分辨率，回到中继后按中继自己的情况重新判断
+    // 快速线路上因为码率低（自动画质）降过的分辨率，回到中继后按中继自己的情况重新判断
     const fullSize = await until(async () => (await canvasSize(admin)) === '1280x720', 10000)
+    // 没回到 1280×720 时看是哪样拦住的：这次远程里自动画质因为电脑忙降过（之后往回升要先估每帧用时），还是网络那边
     check('回到标准线路后画面是原来的 1280×720', !!fullSize,
-      { size: await canvasSize(admin), agent: agent.out.slice(mark).match(/(编码 \d+x\d+|目标码率 \d+ kbps)[^\r\n]*/g)?.slice(-6) })
+      { size: await canvasSize(admin), perFrame: await perFrame(), auto: agent.out.match(/自动画质：[^\r\n]*/g)?.slice(-6),
+        agent: agent.out.slice(mark).match(/(编码 \d+x\d+|目标码率 \d+ kbps)[^\r\n]*/g)?.slice(-6) })
     // 再手动切回快速线路：后面要看它彻底接不上时怎么办
     await lineSwitch.click()
     const fastAgain = await until(async () => (await lineNow()) === 'realtime', 25000)
@@ -585,15 +659,42 @@ async function moveOnCanvas(page, fx, fy) {
   check('粘贴时把本机剪贴板的文字写到对方剪贴板', !!(await until(() => agent.out.includes('剪贴板写入 4 字'), 5000)))
 
   // 画质、切换显示器
-  await admin.locator('[data-testid=remote-quality-sharp]').click()
+  let videoMark = agent.out.length
+  await pickVideo(admin, 'clear')
   await admin.locator('[data-testid=remote-monitor]').click()
   await admin.locator('.el-select-dropdown__item', { hasText: '显示器 2' }).click()
   const second = await until(async () => (await canvasSize(admin)) === '1920x1080' && near(await pixel(admin, 0.75, 0.8), [255, 255, 0]), 15000)
-  check('清晰档 + 切到第二块显示器：1920×1080，右下象限是黄色', !!second, { size: await canvasSize(admin), br: await pixel(admin, 0.75, 0.8) })
+  check('清晰 + 切到第二块显示器：1920×1080，右下象限是黄色', !!second, { size: await canvasSize(admin), br: await pixel(admin, 0.75, 0.8), agent: encodeLines(agent, videoMark) })
   const before2 = inputs(agent).length
   await moveOnCanvas(admin, 0.5, 0.5)
   const move2 = await until(() => inputs(agent).slice(before2).reverse().find((e) => e.t === 'move'), 5000)
   check('第二块显示器上的坐标换算到虚拟桌面（1280 + 960, 540）', !!move2 && Math.abs(move2.x - 2240) <= 4 && Math.abs(move2.y - 540) <= 4, move2)
+
+  // 原画：第二块显示器按原始的 1920×1080 编码，码率上限 16 Mbps
+  videoMark = agent.out.length
+  await pickVideo(admin, 'original')
+  const original = await until(() => /编码 1920x1080 30 fps，码率上限 16000 kbps/.test(agent.out.slice(videoMark)), 8000)
+  const originalShown = await until(async () => (await canvasSize(admin)) === '1920x1080' && (await shownFps(admin)) >= 5, 8000)
+  check('原画：第二块显示器原样 1920×1080，码率上限 16 Mbps，画面接着出', !!original && !!originalShown,
+    { size: await canvasSize(admin), fps: await shownFps(admin), agent: encodeLines(agent, videoMark) })
+
+  // 自定义 1280×800 / 15 帧 / 2 Mbps：1920×1080 按比例缩进 1280×800 的框里是 1280×720；每一项改了都马上用上，并记在这台设备上
+  videoMark = agent.out.length
+  await pickVideo(admin, 'custom')
+  const customRow = await admin.locator('[data-testid=remote-video-custom-row]').waitFor({ timeout: 5000 }).then(() => true, () => false)
+  await pickOption(admin, 'remote-video-res', '1280×800')
+  await pickOption(admin, 'remote-video-fps', '15 帧')
+  await pickOption(admin, 'remote-video-kbps', '2 Mbps')
+  const custom = await until(() => /编码 1280x720 15 fps，码率上限 2000 kbps/.test(agent.out.slice(videoMark)), 10000)
+  const customShown = await until(async () => (await canvasSize(admin)) === '1280x720', 10000)
+  const storedVideo = await admin.evaluate(() => { try { return JSON.parse(localStorage.getItem('remote.video') ?? 'null') } catch { return 'bad json' } })
+  const want = { mode: 4, maxWidth: 1280, maxHeight: 800, fps: 15, maxKbps: 2000 }
+  const isWanted = (s) => !!s && typeof s === 'object' && Object.keys(want).every((k) => s[k] === want[k])
+  check('自定义 1280×800 / 15 帧 / 2 Mbps：第二块显示器缩成 1280×720 编码、每秒 15 帧、码率上限 2 Mbps；选择记在这台设备上',
+    customRow && !!custom && !!customShown && isWanted(storedVideo?.current) && isWanted(storedVideo?.custom),
+    { customRow, size: await canvasSize(admin), stored: storedVideo, menu: await admin.locator('[data-testid=remote-video]').textContent().catch(() => null), agent: encodeLines(agent, videoMark) })
+  await admin.locator('[data-testid=remote-video-custom-close]').click()
+  check('自定义那一行能收起', (await admin.locator('[data-testid=remote-video-custom-row]').count()) === 0)
 
   // 结束
   await admin.locator('[data-testid=remote-end]').click()
@@ -602,8 +703,9 @@ async function moveOnCanvas(page, fx, fy) {
   const audit = sql(`select end_reason || ',' || bytes_relayed from remote_sessions where id = '${sessionId}'`)
   check('记录里有结束原因和转发流量', audit.startsWith('controller,') && Number(audit.split(',')[1]) > 10_000, audit)
 
-  // ---- 只看模式：点击不会注入 ----
+  // ---- 只看模式：点击不会注入；画质照样能换 ----
   await admin.goto(BASE + '/devices')
+  videoMark = agent.out.length
   await card.locator('[data-testid=device-view]').click()
   await admin.waitForURL(/\/remote\//)
   const viewStreaming = await until(async () => (await admin.locator('[data-testid=remote-stats]').textContent().catch(() => '')).includes('fps'), 20000)
@@ -616,8 +718,137 @@ async function moveOnCanvas(page, fx, fy) {
   await sleep(1500)
   check('只看模式：键鼠不会到对方电脑', inputs(agent).length === before3, inputs(agent).slice(before3))
   check('只看模式没有特殊键、输入文字按钮', (await admin.locator('[data-testid=remote-type]').count()) === 0)
-  await admin.locator('[data-testid=remote-end]').click()
-  await admin.locator('[data-testid=remote-ended]').waitFor({ timeout: 10000 })
+  // 上一次在自定义里选的（1280×800 / 15 帧 / 2 Mbps）记在这台设备上：这一次一开始就按它来（第一块显示器 1280×720 放得下）
+  const remembered = await until(() => /编码 1280x720 15 fps，码率上限 2000 kbps/.test(agent.out.slice(videoMark)), 10000)
+  const viewFrom = videoMark
+  videoMark = agent.out.length
+  await pickVideo(admin, 'auto')
+  const viewAuto = await until(() => /编码 1280x720 30 fps，码率上限 8000 kbps/.test(agent.out.slice(videoMark)), 8000)
+  check('画质记在这台设备上，下一次远程照样用；只看模式也能换画质（换成自动，被控端重建编码器）', !!remembered && !!viewAuto,
+    { remembered: !!remembered, auto: !!viewAuto, menu: await admin.locator('[data-testid=remote-video]').textContent().catch(() => null), agent: encodeLines(agent, viewFrom) })
+  check('只看模式下换画质也不会有键鼠到对方电脑', inputs(agent).length === before3, inputs(agent).slice(before3))
+  // 没加钩子时这台电脑跟得上测试画面：自动画质在 1280×720 上一直动着跑 6 秒（比"连续 3 秒忙不过来就降"长一倍），
+  // 不降分辨率、不标忙、不提示。不然下面"对方电脑忙不过来"那一段什么也证明不了（不加钩子也会降）
+  const calm = await watch(6000)
+  const calmLog = autoLines(agent, viewFrom)
+  const calmOk = !calmLog.some((l) => l.includes('电脑忙不过来'))
+    && calm.every((s) => s.size === '1280x720' && (s.flags & 6) === 0 && s.busy === 0)
+    // 真的一直在出帧、统计也报上来了（不然上面几样是 0 只是因为没东西可看）
+    && calm.some((s) => s.fps >= 5) && calm.at(-1).encode > 0
+  const calmCost = calm.map((s) => Math.round((s.capture + s.encode) * 10) / 10)
+  check('不加钩子时测试画面不算忙：自动画质动着跑 6 秒，还是 1280×720，没有降分辨率、没有标忙、没有"对方电脑忙不过来"',
+    calmOk,
+    calmOk ? { perFrameMs: { min: Math.min(...calmCost), max: Math.max(...calmCost) } }
+      : { seen: calm, log: calmLog, agent: encodeLines(agent, viewFrom), ...(await badgeNow()) })
+  /** 点"结束"，等页面显示已结束。等不到时先把服务器上这次会话的状态、被控端最后几行打出来再抛（光一个超时看不出卡在哪） */
+  const endHere = async () => {
+    await admin.locator('[data-testid=remote-end]').click()
+    try {
+      await admin.locator('[data-testid=remote-ended]').waitFor({ timeout: 10000 })
+    } catch (e) {
+      const row = sql("select state || ',' || coalesce(end_reason, '-') || ',' || coalesce(to_char(ended_at, 'HH24:MI:SS.MS'), '-') from remote_sessions order by started_at desc limit 1")
+      console.log('  结束后 10 秒没显示"已结束"：服务器上最近一次会话', row, '；页面上', await admin.locator('[data-testid=remote-view]').getAttribute('data-state').catch(() => '?'),
+        '；被控端最后几行', JSON.stringify(agent.out.slice(-700)))
+      throw e
+    }
+  }
+  await endHere()
+
+  // ---- 对方电脑忙不过来，两种慢法。每一种都只在这一段重启一次被控端带上测试钩子，别的用例不受它拖累；
+  // 后面"对方拒绝"那一段重启被控端时不带钩子 ----
+  /** 重启被控端，这一次带上测试钩子 extraEnv；回到默认的自动画质，发起远程控制。返回发起之前被控端输出到了哪 */
+  const controlWithHook = async (extraEnv) => {
+    agent.proc.kill()
+    await until(() => agent.proc.exitCode !== null, 5000)
+    agent = startAgent(dir, 'accept', 'pattern', extraEnv)
+    await until(() => agent.out.includes('已连接服务器'), 20000)
+    await admin.goto(BASE + '/devices')
+    // 回到默认的自动（不管前面的用例选过什么）
+    await admin.evaluate(() => localStorage.removeItem('remote.video'))
+    await card.locator('[data-testid=device-online]', { hasText: '在线' }).waitFor({ timeout: 10000 })
+    const from = agent.out.length
+    await card.locator('[data-testid=device-control]').click()
+    await admin.waitForURL(/\/remote\//, { timeout: 10000 })
+    return from
+  }
+  /** 被控端说的"测试：…"（钩子开没开），检查失败时打出来看 */
+  const hookLines = () => agent.out.match(/测试：[^\r\n]*/g) ?? []
+
+  // 一、编码慢：被控端每编一帧故意多睡一会儿（PRIVATECHAT_AGENT_TEST_ENCODE_DELAY_MS=45，按像素数折算：1280×720 睡 45 ms，
+  // 960×540 睡 25 ms），像弱电脑上的软件编码，分辨率低了就快。30 帧时一帧只有 33 ms：自动画质要在几秒内把分辨率降一档
+  // （测试画面 1280×720 → 960×540），网页上提示对方电脑忙不过来。降了确实省时间，这一档留着、不退回去：
+  // 测试画面本身在 Debug 版上 1280×720 每帧约 10 ms（采集 3 + 编码 8，上面"不算忙"那一段量到 9–11 ms），
+  // 降之前 10 + 45 ≈ 55 ms（以前跑出来降的那一刻是 60 ms），降之后约 6 + 25 ≈ 31 ms——线程睡得多、电脑降频时
+  // 960×540 上实际干活也就 15 ms 左右，合 40 ms——都比降之前的八成五（47–51 ms）少得多
+  const cpuMark = await controlWithHook({ PRIVATECHAT_AGENT_TEST_ENCODE_DELAY_MS: '45' })
+  const cpuFull = await until(async () => (await canvasSize(admin)) === '1280x720', 20000)
+  // 降之前（画面还是 1280×720 时）统计里报的每帧编码耗时：看故意多睡的 45 ms 算没算进编码里
+  const cpuBefore = []
+  const cpuLog = await until(async () => {
+    const p = await perFrame()
+    if ((await canvasSize(admin)) === '1280x720') cpuBefore.push(p.encode)
+    return agent.out.slice(cpuMark).match(/自动画质：电脑忙不过来[^\r\n]*/)?.[0]
+  }, 20000)
+  const cpuSmall = await until(async () => (await canvasSize(admin)) === '960x540', 10000)
+  const cpuBadge = await until(async () => {
+    const p = await perFrame()
+    return p.busy > 0 && (p.flags & 6) !== 0 ? p : null
+  }, 8000)
+  const cpuNow = { ...(await perFrame()), ...(await badgeNow()) }
+  check('对方电脑编码跟不上：自动画质把分辨率从 1280×720 降到 960×540，被控端说明原因，网页提示对方电脑忙不过来',
+    !!cpuFull && !!cpuLog && !!cpuSmall && !!cpuBadge,
+    { started1280: !!cpuFull, log: cpuLog, size: await canvasSize(admin), ...cpuNow, agent: encodeLines(agent, cpuMark), hooks: hookLines() })
+  // 降了管用：之后 6 秒（被控端在新的一档上量 2 秒就有结论，没用的话那时就退回去了）一直是 960×540，
+  // 统计里标着"因为电脑忙降了分辨率"（头 1.5 秒里可能还是降之前那一秒的统计，不看），被控端没说"降了也没快多少"
+  const cpuKept = await watch(6000)
+  const cpuAuto = autoLines(agent, cpuMark)
+  const keptOk = !!cpuSmall && cpuKept.every((s) => s.size === '960x540') && cpuKept.filter((s) => s.at >= 1500).every((s) => (s.flags & 2) !== 0)
+    && !cpuAuto.some((l) => l.includes('降了分辨率也没快多少'))
+  check('编码慢时降一档确实省了时间：之后 6 秒还是 960×540（标着因为电脑忙降了分辨率），没有因为"降了也没快多少"退回去', keptOk,
+    keptOk ? undefined : { seen: cpuKept, log: cpuAuto, agent: encodeLines(agent, cpuMark), hooks: hookLines() })
+  // 故意多睡的算在编码里，而且按像素数折算：1280×720 时 45 ms，960×540 时 25 ms（这会儿统计里已经全是 960×540 的帧）
+  const cpuAfter = await perFrame()
+  const encodeAt1280 = Math.max(0, ...cpuBefore)
+  check('统计里报的每帧编码耗时算上了故意多睡的时间（1280×720 时 45 ms，960×540 时按像素数折成 25 ms）',
+    encodeAt1280 >= 40 && cpuAfter.encode >= 24, { at1280: encodeAt1280, at960: cpuAfter.encode, capture: cpuAfter.capture })
+  check('降了分辨率之后画面照样在出', (await until(async () => (await shownFps(admin)) >= 3, 8000)) !== null, { fps: await shownFps(admin) })
+  await endHere()
+
+  // 二、截屏慢：被控端每采一帧故意多睡 90 ms（PRIVATECHAT_AGENT_TEST_CAPTURE_DELAY_MS），分辨率多大都一样——像真实电脑上
+  // GDI 截屏慢（按原尺寸截，缩小还要多费事），降分辨率不省时间。自动画质事先不知道慢在哪，照样先降一档；在 960×540 上量 2 秒，
+  // 每帧还是一百来 ms，降一档省下的几毫秒远不到 15%，就退回 1280×720，这次远程里不再因为电脑忙降。
+  // 不用 45 ms：线程睡得多时这台电脑上图案本身的开销在两种尺寸下差不多，"省了几成"落在 15% 上下，量出来的结果时有时无（28 次里 7 次没退回）
+  // 网页上照样提示对方电脑忙不过来（标着忙、没标"降了分辨率"），鼠标停上去看得到慢在采集上
+  const capMark = await controlWithHook({ PRIVATECHAT_AGENT_TEST_CAPTURE_DELAY_MS: '90' })
+  const capFull = await until(async () => (await canvasSize(admin)) === '1280x720', 20000)
+  const capDown = await until(() => agent.out.slice(capMark).match(/自动画质：电脑忙不过来[^\r\n]*/)?.[0], 20000)
+  const capUndo = capDown ? await until(() => agent.out.slice(capMark).match(/自动画质：降了分辨率也没快多少[^\r\n]*/)?.[0], 15000) : null
+  // 退回去了：被控端最后一次重建编码器是 1280×720，网页上的画面也回到 1280×720
+  const capBack = capUndo
+    ? await until(async () => (encodeLines(agent, capMark).at(-1) ?? '').startsWith('编码 1280x720') && (await canvasSize(admin)) === '1280x720', 10000)
+    : null
+  // 退回之后不再因为电脑忙降：之后 6 秒（比"连续 3 秒忙不过来就降"长一倍）一直是 1280×720
+  const capKept = await watch(6000)
+  const capAuto = autoLines(agent, capMark)
+  const capEncode = encodeLines(agent, capMark)
+  const capLast = capEncode.at(-1) ?? ''
+  const capNow = { ...(await perFrame()), ...(await badgeNow()) }
+  const capSeen = { log: capAuto, agent: capEncode, seen: capKept, now: capNow, hooks: hookLines() }
+  const downAt = capAuto.findIndex((l) => l.includes('电脑忙不过来'))
+  const undoAt = capAuto.findIndex((l) => l.includes('降了分辨率也没快多少'))
+  const capStepped = !!capFull && !!capDown && !!capUndo && downAt >= 0 && undoAt > downAt && capUndo.includes('回到 1280x720')
+    && capEncode.some((l) => l.startsWith('编码 960x540')) && !!capBack
+    && /^编码 1280x720 30 fps，码率上限 8000 kbps/.test(capLast) && !capLast.includes('降了分辨率')
+  check('对方电脑截屏慢：自动画质照样先降到 960×540，量了发现每帧没快多少，退回 1280×720，被控端说明多半慢在截屏上',
+    capStepped, capStepped ? { down: capDown, undo: capUndo } : capSeen)
+  const capStayed = capKept.length > 0 && capKept.every((s) => s.size === '1280x720') && capAuto.filter((l) => l.includes('电脑忙不过来')).length === 1
+  check('退回之后这次远程里不再因为电脑忙降分辨率：之后 6 秒一直是 1280×720', capStayed, capStayed ? undefined : capSeen)
+  const capBusy = capNow.busy > 0 && (capNow.flags & 4) !== 0 && (capNow.flags & 2) === 0 && capNow.badge === '对方电脑忙不过来'
+  check('网页上照样提示对方电脑忙不过来（统计里标着忙，没标"因为电脑忙降了分辨率"）', capBusy,
+    capBusy ? { flags: capNow.flags, title: capNow.badgeTitle } : capSeen)
+  check('统计里报的每帧采集耗时算上了故意多睡的 90 ms（不算在编码里）', capNow.capture >= 85 && capNow.encode < 40,
+    { capture: capNow.capture, encode: capNow.encode, title: capNow.title })
+  await endHere()
 
   // ---- 对方拒绝 ----
   agent.proc.kill()
@@ -721,8 +952,7 @@ async function moveOnCanvas(page, fx, fy) {
   check('同意窗口还挂着时用 PIN 直接连：窗口收起，被控端立刻开始，几秒内出画面',
     !!poppedAgain && agent.out.slice(mark).includes('同意窗口关闭') && !!startedAfter && !!pinStream,
     { startedAfterMs: startedAfter, pictureAfterMs: Date.now() - pinAt })
-  await admin.locator('[data-testid=remote-end]').click()
-  await admin.locator('[data-testid=remote-ended]').waitFor({ timeout: 10000 })
+  await endHere()
 
   // ---- 移除电脑：Agent 回到设备码登记 ----
   await admin.goto(BASE + '/devices')
@@ -785,10 +1015,10 @@ async function moveOnCanvas(page, fx, fy) {
   const failed = results.filter((r) => !r.ok)
   console.log(`\n${results.length - failed.length}/${results.length} passed`)
   process.exit(failed.length ? 1 : 0)
-})().catch((e) => {
+})().catch(async (e) => {
   console.error(e)
   for (const proc of agents) try { proc.kill() } catch { /* 已退出 */ }
-  if (REALTIME) try { execSync(`${COMPOSE} up -d --no-deps api`, { stdio: 'ignore' }) } catch { /* 还原不了就算了 */ }
+  if (REALTIME) try { execSync(`${COMPOSE} up -d --no-deps api`, { stdio: 'ignore' }); await apiHealthy() } catch { /* 还原不了就算了 */ }
   try { void sfu?.close() } catch { /* 已关 */ }
   process.exit(1)
 })

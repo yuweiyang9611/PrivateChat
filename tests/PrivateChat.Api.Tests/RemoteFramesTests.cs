@@ -57,11 +57,17 @@ public class RemoteFramesTests
         // 最后一个字节：支持的可选功能（0.7.0 加的；老网页只读前 8 个字节）
         Assert.Equal([0x01, 1, 0x80, 0x07, 0x38, 0x04, 20, 1, 0], RemoteFrames.VideoConfig(new VideoConfigFrame(RemoteVideoCodec.H264, 1920, 1080, 20, 1)));
         Assert.Equal(3, RemoteFrames.VideoConfig(new VideoConfigFrame(RemoteVideoCodec.H264, 1920, 1080, 20, 1, RemoteFeatures.Audio | RemoteFeatures.AdaptiveBitrate))[8]);
+        // 位 3：认得 SetVideo（0.8.6 起）
+        Assert.Equal(11, RemoteFrames.VideoConfig(new VideoConfigFrame(RemoteVideoCodec.H264, 1920, 1080, 30, 1, RemoteFeatures.Audio | RemoteFeatures.AdaptiveBitrate | RemoteFeatures.VideoSettings))[8]);
         var frame = RemoteFrames.VideoFrame(0x01020304, true, [9, 9]);
         Assert.Equal([0x02, 4, 3, 2, 1, 1, 9, 9], frame);
         Assert.Equal([0x04, 1, 0, 0x00, 0x05, 0xD0, 0x02, 1], RemoteFrames.Monitors([new MonitorInfo(0, 1280, 720, true)]));
-        // 后 4 个字节：目标码率、档位上限（0.7.0 加的）
-        Assert.Equal([0x06, 20, 0xE8, 0x03, 100, 85, 0, 0x58, 0x02, 0xC4, 0x09], RemoteFrames.Stats(new StatsFrame(20, 1000, 140, 85, 600, 2500)));
+        // 第 7–10 字节：目标码率、档位上限（0.7.0 加的）；再后面 5 个：每帧采集、编码用时（0.1 ms）和标志（0.8.6 加的，老网页只读前 11 个）
+        Assert.Equal([0x06, 20, 0xE8, 0x03, 100, 85, 0, 0x58, 0x02, 0xC4, 0x09, 0, 0, 0, 0, 0], RemoteFrames.Stats(new StatsFrame(20, 1000, 140, 85, 600, 2500)));
+        Assert.Equal([0x06, 20, 0xE8, 0x03, 100, 85, 0, 0x58, 0x02, 0x40, 0x1F, 0x7B, 0, 0xC8, 0x01, 6],
+            RemoteFrames.Stats(new StatsFrame(20, 1000, 140, 85, 600, 8000, 123, 456, RemoteStatsFlags.LoweredForCpu | RemoteStatsFlags.CpuBound)));
+        // 超出范围的数夹住，不回绕
+        Assert.Equal([0, 0, 0xFF, 0xFF], RemoteFrames.Stats(new StatsFrame(0, 0, 0, 0, CaptureMs10: -5, EncodeMs10: 70_000))[11..15]);
         Assert.Equal([0x08, 4, 3, 2, 1, 1, 2, 7, 7], RemoteFrames.Audio(0x01020304, RemoteAudioCodec.Opus, 2, [7, 7]));
         Assert.Equal([0x09, 0x2A, 0, 0, 0], RemoteFrames.Ping(42));
         Assert.Equal([0x07, 1, (byte)'x'], RemoteFrames.Status(RemoteStatusCode.SecureDesktop, "x"));
@@ -89,6 +95,26 @@ public class RemoteFramesTests
         Assert.False(RemoteFrames.IsInput(RemoteFrameType.ReceiverReport));
         // 只看模式下控制端也会跟不上
         Assert.False(RemoteFrames.IsInput(RemoteFrameType.MaxFps));
+        // 只看模式下也可以换画质（中继只按 IsInput 过滤，照样转给被控端）
+        Assert.False(RemoteFrames.IsInput(RemoteFrameType.SetVideo));
+    }
+
+    [Fact]
+    public void SetVideo_carries_the_quality_menu()
+    {
+        // 档位、最大宽高（u16）、帧率（u8）、码率上限（u16 kbps）
+        var bytes = RemoteFrames.SetVideo(RemoteVideoMode.Custom, 1280, 800, 15, 2000);
+        Assert.Equal([0x20, 4, 0x00, 0x05, 0x20, 0x03, 15, 0xD0, 0x07], bytes);
+        Assert.Equal(new ControlFrame.SetVideo(RemoteVideoMode.Custom, 1280, 800, 15, 2000), RemoteFrames.ParseControl(bytes));
+        // 原始分辨率是 0×0，帧率、码率 0 = 这一档默认的（被控端再按档位补上）
+        Assert.Equal(new ControlFrame.SetVideo(RemoteVideoMode.Original, 0, 0, 0, 0), RemoteFrames.ParseControl(RemoteFrames.SetVideo(RemoteVideoMode.Original, 0, 0, 0, 0)));
+        Assert.Equal(new ControlFrame.SetVideo(RemoteVideoMode.Auto, 1920, 1200, 30, 8000), RemoteFrames.ParseControl([0x20, 0, 0x80, 0x07, 0xB0, 0x04, 30, 0x40, 0x1F]));
+        // 超出范围的数夹住，不回绕
+        Assert.Equal(new ControlFrame.SetVideo(RemoteVideoMode.Clear, 65535, 0, 255, 65535), RemoteFrames.ParseControl(RemoteFrames.SetVideo(RemoteVideoMode.Clear, 99_999, -1, 999, 99_999)));
+
+        Assert.Null(RemoteFrames.ParseControl([0x20, 5, 0x00, 0x05, 0x20, 0x03, 15, 0xD0, 0x07])); // 没有这一档
+        Assert.Null(RemoteFrames.ParseControl(bytes.AsSpan(0, 8))); // 太短
+        Assert.Null(RemoteFrames.ParseControl([0x20]));
     }
 
     [Fact]

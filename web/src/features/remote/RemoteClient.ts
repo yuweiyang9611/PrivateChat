@@ -1,4 +1,4 @@
-import { codecFromAnnexB, encode, Features, parseAgentFrame, Transport, TransportState, type MonitorInfo, type QualityPreset } from './protocol'
+import { codecFromAnnexB, encode, Features, legacyQualityOf, parseAgentFrame, Transport, TransportState, type MonitorInfo, type QualityPreset, type VideoSettings } from './protocol'
 import { RemoteAudio } from './RemoteAudio'
 import { RemoteRealtime, pageVisible, realtimeSupported } from './RemoteRealtime'
 import { FrameRateGovernor } from './FrameRateGovernor'
@@ -10,8 +10,15 @@ export function webCodecsSupported(): boolean {
 
 export type LinkState = 'connecting' | 'waiting-agent' | 'streaming' | 'reconnecting' | 'closed'
 
-/** target：被控端按网络状况定的码率上限；max：当前画质档位的上限（老版本被控端两个都是 0） */
-export interface RemoteStats { fps: number; kbps: number; cpu: number; rtt: number; decoded: number; target: number; max: number }
+/**
+ * target：被控端按网络状况定的码率上限；max：当前画质档位的上限（老版本被控端两个都是 0）。
+ * captureMs / encodeMs：对方电脑上每帧采集、编码平均花多久；flags：StatsFlags（这三个 0.8.6 起才有，老版本是 0）。
+ * fpsCap：这边请对方每秒最多发几帧（MaxFps，中继线路上这边解码跟不上时才有），0 = 没限
+ */
+export interface RemoteStats {
+  fps: number; kbps: number; cpu: number; rtt: number; decoded: number; target: number; max: number
+  captureMs: number; encodeMs: number; flags: number; fpsCap: number
+}
 
 /** 声音的状态：off 没开；playing 在放；blocked 浏览器要先点一下页面才让出声；unsupported 这个浏览器放不了 */
 export type AudioState = 'off' | 'playing' | 'blocked' | 'unsupported'
@@ -76,6 +83,8 @@ export class RemoteClient {
   private decodedLastSecond = 0
   private readonly ctx: CanvasRenderingContext2D | null
   private quality: QualityPreset | null = null
+  /** 选过的画质（SetVideo）；只用老的两档（老被控端）时是 null */
+  private video: VideoSettings | null = null
   private monitor: number | null = null
   private wantAudio = false
   private audio: RemoteAudio | null = null
@@ -195,9 +204,26 @@ export class RemoteClient {
     ws.send(frame)
   }
 
+  /**
+   * 选画质。连上之前调也行：先记着，对方连上来时发（见 onNotice）。
+   * 新被控端认 SetVideo、不理后面那条 SetQuality；老被控端（0.8.5 及以前）不认识 SetVideo，按 SetQuality 用最接近的一档
+   */
+  setVideo(s: VideoSettings): void {
+    this.video = { ...s }
+    this.quality = legacyQualityOf(s)
+    this.sendVideo()
+  }
+
+  /** 老被控端的两档画质（工具栏上只给老被控端显示这个）：之后只发 SetQuality */
   setQuality(q: QualityPreset): void {
+    this.video = null
     this.quality = q
     this.send(encode.setQuality(q))
+  }
+
+  private sendVideo(): void {
+    if (this.video) this.send(encode.setVideo(this.video))
+    if (this.quality !== null) this.send(encode.setQuality(this.quality))
   }
 
   selectMonitor(index: number): void {
@@ -423,7 +449,9 @@ export class RemoteClient {
       if (this.peer) {
         // Agent（重新）连上：它会从关键帧开始；把这边选过的画质、显示器、要不要声音再告诉它一遍
         this.needKey = true
-        if (this.quality !== null) this.send(encode.setQuality(this.quality))
+        // 画质：SetVideo 后面跟一条 SetQuality（新被控端不理它，老被控端只认它）。收到 VideoConfig 时不要再发：
+        // 老被控端每收到一次 SetQuality 都会重发 VideoConfig，那样就来回没完了
+        this.sendVideo()
         if (this.monitor !== null) this.send(encode.selectMonitor(this.monitor))
         this.send(encode.setAudio(this.wantAudio))
         // 告诉它这边跟不上时会说（MaxFps，现在不限）：被控端 0.8.4 起收到过这一条才按最高 30 帧发，
@@ -470,7 +498,10 @@ export class RemoteClient {
         this.on.monitors?.(f.monitors)
         return
       case 'stats':
-        this.on.stats?.({ fps: f.fps, kbps: f.kbps, cpu: f.cpu, rtt: f.rtt, decoded: this.decodedLastSecond, target: f.target, max: f.max })
+        this.on.stats?.({
+          fps: f.fps, kbps: f.kbps, cpu: f.cpu, rtt: f.rtt, decoded: this.decodedLastSecond, target: f.target, max: f.max,
+          captureMs: f.captureMs, encodeMs: f.encodeMs, flags: f.flags, fpsCap: this.governor.cap,
+        })
         return
       case 'ping':
         // 原样回去：被控端量的是这一来一回的时间，所以收到就回，不等别的

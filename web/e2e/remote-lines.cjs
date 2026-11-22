@@ -2,6 +2,9 @@
 // 先在标准线路（经我们的中继）上量端到端延迟和帧率，再切到快速线路（经 Cloudflare Realtime）量一遍。
 // 快速线路走的是真的 Cloudflare：api 要配着真实凭据，会产生一点点流量，所以要 E2E_REAL_CF=1 才跑。
 // 用法：cd web && E2E_REAL_CF=1 node e2e/remote-lines.cjs      （E2E_SECONDS=每条线路量多少秒，默认 30）
+// E2E_VIDEO=画质（JSON，和网页记在 localStorage['remote.video'] 里的一样，只写 current 也行），比如
+//   E2E_VIDEO='{"current":{"mode":4,"maxWidth":1280,"maxHeight":800,"fps":30,"maxKbps":4000}}'
+// 不给就是网页默认的自动。mode：0 自动、1 流畅、2 清晰、3 原画、4 自定义（自定义的几个数得是网页上能选的）
 //
 // 怎么读这些数字：被控端和浏览器都在这台电脑上。标准线路在这里是"本机 → 本机的服务器 → 本机"，
 // 比真实部署（出公网到 Cloudflare、经隧道回家里的服务器、再出去）快得多；快速线路则是真的出去到 Cloudflare 再回来。
@@ -19,6 +22,7 @@ const COMPOSE = process.env.E2E_COMPOSE || `docker compose -f "${path.resolve(RO
 // E2E_AGENT_EXE=别的 PrivateChat.Agent.exe：拿发布出来的安装包（单文件版）跑，而不是本机的调试版
 const AGENT = process.env.E2E_AGENT_EXE || path.resolve(ROOT, 'src/PrivateChat.Agent/bin/Debug/net11.0-windows/PrivateChat.Agent.exe')
 const SECONDS = Number(process.env.E2E_SECONDS || 30)
+const VIDEO = process.env.E2E_VIDEO || ''
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 async function until(fn, timeout = 15000, every = 200) {
   const deadline = Date.now() + timeout
@@ -41,6 +45,12 @@ function cleanup() {
   if (process.env.E2E_REAL_CF !== '1') {
     console.log('这个脚本会经真实的 Cloudflare Realtime 传画面（一点点流量）。要跑请加 E2E_REAL_CF=1')
     process.exit(2)
+  }
+  if (VIDEO) {
+    let parsed = null
+    try { parsed = JSON.parse(VIDEO) } catch { /* 下面报 */ }
+    if (!parsed || typeof parsed !== 'object' || !parsed.current || typeof parsed.current.mode !== 'number')
+      throw new Error(`E2E_VIDEO 要是 {"current":{"mode":…}} 这样的 JSON，现在是：${VIDEO}`)
   }
   const realtime = execSync(`${COMPOSE} exec -T api printenv CloudflareRealtime__BaseUrl CloudflareRealtime__AppId`).toString().trim().split(/\r?\n/)
   if (!/rtc\.live\.cloudflare\.com/.test(realtime[0] ?? '') || !realtime[1] || realtime[1].startsWith('e2e-'))
@@ -65,6 +75,12 @@ function cleanup() {
   await context.addInitScript(() => {
     try { if (!localStorage.getItem('remote.transport')) localStorage.setItem('remote.transport', 'relay') } catch { /* about:blank */ }
   })
+  // 指定了画质：页面加载之前写进去（网页打开远程时按它来）
+  if (VIDEO) {
+    await context.addInitScript((video) => {
+      try { localStorage.setItem('remote.video', video) } catch { /* about:blank */ }
+    }, VIDEO)
+  }
   const page = await context.newPage()
   page.on('pageerror', (e) => console.log('  [pageerror]', String(e).slice(0, 200)))
   await page.goto(BASE + '/')
@@ -90,7 +106,14 @@ function cleanup() {
     const measured = summarize(await sample(page, SECONDS), SECONDS)
     const toolbar = await statsLine.textContent().catch(() => '')
     const size = await page.evaluate(() => { const c = document.querySelector('[data-testid=remote-canvas]'); return `${c.width}x${c.height}` })
+    // 鼠标停在统计上看到的（对方电脑每帧采集 / 编码多久、码率）、提示条、画质菜单上写的
+    const title = await statsLine.getAttribute('title', { timeout: 1000 }).catch(() => null)
+    const badges = (await page.locator('[data-testid=remote-slow], [data-testid=remote-busy]').allTextContents().catch(() => [])).join('、')
+    const menu = await page.locator('[data-testid=remote-video]').textContent({ timeout: 1000 }).catch(() => '')
+    const encoding = out.split(/\r?\n/).filter((l) => /编码 \d+x\d+/.test(l)).at(-1)?.replace(/^\S+ \[\w+\] /, '') ?? '（没有）'
     console.log(`\n== ${label} ==  工具栏：${toolbar}；画面 ${size}`)
+    console.log(`   ${menu || '画质：（老版本的两档）'}；被控端最后一次：${encoding}`)
+    console.log(`   ${title ?? '（统计上没有说明）'}${badges ? `；提示：${badges}` : ''}`)
     console.log(`   看到的帧率 ${measured.fps} 帧/秒；端到端延迟 中位 ${measured.median} ms / 九成以内 ${measured.p90} ms / 最大 ${measured.max} ms；最长一次画面不动 ${measured.longestFreeze} ms`)
     return measured
   }
@@ -104,7 +127,7 @@ function cleanup() {
   }
   const fast = connected ? await measure('快速线路（经真实的 Cloudflare Realtime）') : null
   // 被控端日志里和线路、码率有关的几行（E2E_VERBOSE=1 全打；再加 PRIVATECHAT_AGENT_REALTIME=verbose 还有控制端每秒的汇报）
-  const lines = out.split(/\r?\n/).filter((l) => /网络：|快速线路/.test(l))
+  const lines = out.split(/\r?\n/).filter((l) => /网络：|快速线路|自动画质|画质改成/.test(l))
   for (const line of process.env.E2E_VERBOSE ? lines : lines.slice(-8)) console.log('   ' + line.replace(/^\S+ \[\w+\] /, ''))
 
   await page.locator('[data-testid=remote-end]').click()

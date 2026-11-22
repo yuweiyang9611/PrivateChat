@@ -23,6 +23,8 @@ namespace PrivateChat.Agent;
 ///     PRIVATECHAT_AGENT_TLS=bundled|system   强制用程序自带的 TLS 1.3 / 系统的 TLS（默认：系统没有 TLS 1.3 时用自带的）
 ///     PRIVATECHAT_AGENT_TEST_RTP_DROP=0.02   快速线路上故意丢掉这个比例的画面包（只在 PRIVATECHAT_AGENT_TEST=1 时生效，自动化测试用）
 ///     PRIVATECHAT_AGENT_TEST_CA=FILE.pem     自带的 TLS 只信任这个根证书（只在 PRIVATECHAT_AGENT_TEST=1 时生效，自动化测试用）
+///     PRIVATECHAT_AGENT_TEST_ENCODE_DELAY_MS=45   每编一帧多等这么多毫秒 × 像素数 ÷ 1280×720，装成一台编码很慢的电脑（只在 PRIVATECHAT_AGENT_TEST=1 时生效，自动化测试用）
+///     PRIVATECHAT_AGENT_TEST_CAPTURE_DELAY_MS=45  每截一次屏多等这么多毫秒（不管截多大），装成一台截屏很慢的电脑（只在 PRIVATECHAT_AGENT_TEST=1 时生效，自动化测试用）
 /// </summary>
 internal static class Program
 {

@@ -39,6 +39,7 @@ public enum RemoteFrameType : byte
     SetTransport = 0x1D,    // 让画面和声音改走哪条线路
     ReceiverReport = 0x1E,  // 快速线路下，控制端每秒报一次自己收得怎么样
     MaxFps = 0x1F,          // 控制端解码 / 画画跟不上：请被控端每秒最多发几帧（0 = 不限）。老版本被控端不认识，直接忽略
+    SetVideo = 0x20,        // 画质菜单：档位 + 分辨率 / 帧率 / 码率上限（被控端 0.8.6 起；收到过它之后不再理 SetQuality）
 }
 
 /// <summary>
@@ -69,9 +70,28 @@ public enum RemoteFeatures : byte
     AdaptiveBitrate = 2,
     /// <summary>画面和声音可以改走 Cloudflare Realtime（控制端发 SetTransport 切换）。服务器没配 Realtime 时不带这一位。</summary>
     Realtime = 4,
+    /// <summary>认得 SetVideo（画质菜单：自动 / 流畅 / 清晰 / 原画 / 自定义）。0.8.6 起总是带着；没有这一位的老被控端只认 SetQuality。</summary>
+    VideoSettings = 8,
 }
 
+/// <summary>老的两档画质（SetQuality）。被控端 0.8.6 起换成 SetVideo，这个只留给老版本：流畅 → 流畅档，清晰 → 清晰档。</summary>
 public enum RemoteQualityPreset : byte { Smooth = 0, Sharp = 1 }
+
+/// <summary>画质菜单的档位（SetVideo）。只有自动会随网速和电脑性能改分辨率；其余的分辨率固定，码率仍在上限以下随网络调。</summary>
+public enum RemoteVideoMode : byte { Auto = 0, Smooth = 1, Clear = 2, Original = 3, Custom = 4 }
+
+/// <summary>Stats 的最后一个字节（被控端 0.8.6 起）。</summary>
+[Flags]
+public enum RemoteStatsFlags : byte
+{
+    None = 0,
+    /// <summary>自动档因为网络慢降了分辨率。</summary>
+    LoweredForNetwork = 1,
+    /// <summary>自动档因为电脑忙不过来（采集加编码赶不上帧率）降了分辨率。</summary>
+    LoweredForCpu = 2,
+    /// <summary>这一秒里编了至少 5 帧，平均每帧采集加编码用掉了一帧时间的八成五以上：这台电脑是瓶颈。</summary>
+    CpuBound = 4,
+}
 
 public enum RemoteSpecialKey : byte { CtrlAltDel = 1, Win = 2, PrintScreen = 3, TaskManager = 4, AltTab = 5 }
 
@@ -93,8 +113,12 @@ public enum RemoteSessionState { Pending, Active, Ended }
 
 public sealed record VideoConfigFrame(RemoteVideoCodec Codec, int Width, int Height, int Fps, int Monitor, RemoteFeatures Features = RemoteFeatures.None);
 public sealed record MonitorInfo(int Index, int Width, int Height, bool IsPrimary);
-/// <summary>TargetKbps：按网络状况定的码率上限；MaxKbps：当前画质档位的上限。两者差得多说明网络慢、已自动降画质。</summary>
-public sealed record StatsFrame(int Fps, int Kbps, int CpuPercent, int RttMs, int TargetKbps = 0, int MaxKbps = 0);
+/// <summary>
+/// TargetKbps：按网络状况定的码率上限；MaxKbps：当前画质档位的上限。两者差得多说明网络慢、已自动降画质。
+/// CaptureMs10 / EncodeMs10：这一秒里平均每编一帧，采集（含比较变化）/ 编码（含转 NV12）用了多久，单位 0.1 ms（0.8.6 起）。
+/// </summary>
+public sealed record StatsFrame(int Fps, int Kbps, int CpuPercent, int RttMs, int TargetKbps = 0, int MaxKbps = 0,
+    int CaptureMs10 = 0, int EncodeMs10 = 0, RemoteStatsFlags Flags = RemoteStatsFlags.None);
 
 /// <summary>控制端发来的一帧（解析后）。</summary>
 public abstract record ControlFrame
@@ -125,6 +149,11 @@ public abstract record ControlFrame
     /// 由它直接说一声，被控端就少发几帧，而不是把码率越压越低。
     /// </summary>
     public sealed record MaxFps(int Fps) : ControlFrame;
+    /// <summary>
+    /// 画质菜单：档位、最大宽高（都是 0 = 原始分辨率）、帧率（0 = 30）、码率上限 kbps（0 = 这一档默认的）。
+    /// 数是网页定的，被控端只夹到能接受的范围（见 Agent 的 VideoSettings.From）。
+    /// </summary>
+    public sealed record SetVideo(RemoteVideoMode Mode, int MaxWidth, int MaxHeight, int Fps, int MaxKbps) : ControlFrame;
 }
 
 public static class RemoteFrames
@@ -177,9 +206,10 @@ public static class RemoteFrames
         return b;
     }
 
+    /// <summary>16 字节：老网页只读前 11 个（到 maxKbps），后面的采集 / 编码耗时和标志是 0.8.6 加的。</summary>
     public static byte[] Stats(StatsFrame f)
     {
-        var b = new byte[11];
+        var b = new byte[16];
         b[0] = (byte)RemoteFrameType.Stats;
         b[1] = (byte)Math.Clamp(f.Fps, 0, 255);
         BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(2), (ushort)Math.Clamp(f.Kbps, 0, ushort.MaxValue));
@@ -187,6 +217,9 @@ public static class RemoteFrames
         BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(5), (ushort)Math.Clamp(f.RttMs, 0, ushort.MaxValue));
         BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(7), (ushort)Math.Clamp(f.TargetKbps, 0, ushort.MaxValue));
         BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(9), (ushort)Math.Clamp(f.MaxKbps, 0, ushort.MaxValue));
+        BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(11), (ushort)Math.Clamp(f.CaptureMs10, 0, ushort.MaxValue));
+        BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(13), (ushort)Math.Clamp(f.EncodeMs10, 0, ushort.MaxValue));
+        b[15] = (byte)f.Flags;
         return b;
     }
 
@@ -270,6 +303,9 @@ public static class RemoteFrames
             RemoteFrameType.Pong when p.Length >= 4 => new ControlFrame.Pong(BinaryPrimitives.ReadUInt32LittleEndian(p)),
             RemoteFrameType.SetTransport when p.Length >= 1 && p[0] <= 1 => new ControlFrame.SetTransport((RemoteTransport)p[0]),
             RemoteFrameType.MaxFps when p.Length >= 1 => new ControlFrame.MaxFps(p[0]),
+            RemoteFrameType.SetVideo when p.Length >= 8 && p[0] <= 4 => new ControlFrame.SetVideo((RemoteVideoMode)p[0],
+                BinaryPrimitives.ReadUInt16LittleEndian(p[1..]), BinaryPrimitives.ReadUInt16LittleEndian(p[3..]), p[5],
+                BinaryPrimitives.ReadUInt16LittleEndian(p[6..])),
             RemoteFrameType.ReceiverReport when p.Length >= 9 => new ControlFrame.ReceiverReport(
                 BinaryPrimitives.ReadUInt16LittleEndian(p), BinaryPrimitives.ReadUInt16LittleEndian(p[2..]),
                 BinaryPrimitives.ReadUInt16LittleEndian(p[4..]), p[6], BinaryPrimitives.ReadUInt16LittleEndian(p[7..])),
@@ -315,6 +351,18 @@ public static class RemoteFrames
     }
 
     public static byte[] MaxFps(int fps) => [(byte)RemoteFrameType.MaxFps, (byte)Math.Clamp(fps, 0, 255)];
+
+    public static byte[] SetVideo(RemoteVideoMode mode, int maxWidth, int maxHeight, int fps, int maxKbps)
+    {
+        var b = new byte[9];
+        b[0] = (byte)RemoteFrameType.SetVideo;
+        b[1] = (byte)mode;
+        BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(2), (ushort)Math.Clamp(maxWidth, 0, ushort.MaxValue));
+        BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(4), (ushort)Math.Clamp(maxHeight, 0, ushort.MaxValue));
+        b[6] = (byte)Math.Clamp(fps, 0, 255);
+        BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(7), (ushort)Math.Clamp(maxKbps, 0, ushort.MaxValue));
+        return b;
+    }
 
     public static byte[] FrameAck(uint timestampMs)
     {

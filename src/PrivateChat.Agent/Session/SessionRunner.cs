@@ -19,6 +19,8 @@ namespace PrivateChat.Agent.Session;
 /// - 码率跟着网络走（<see cref="NetworkEstimator"/>）：控制端解码后回 FrameAck、对探测包回 Pong，据此估出线路能传多快，
 ///   发出去的数据按这个速度记账，账上欠多了就先不采——网络慢时少发几帧，延迟不会越积越高。
 /// - 每一帧用什么质量由 <see cref="QualityPlanner"/> 定：画面大变时先糊一点马上送到，停下来再一步步补清晰。
+/// - 画质：控制端的画质菜单（SetVideo，<see cref="VideoSettings"/>）定分辨率、帧率、码率上限；默认自动档，
+///   分辨率随网速和这台电脑的性能调（<see cref="AutoResolution"/>）。每秒的统计里带上采集、编码一帧平均用了多久，控制端据此提示"对方电脑忙不过来"。
 /// - 静止画面不编码（按 64×64 的块比较）。
 /// - 声音：控制端要求时（SetAudio）采这台电脑正在播放的声音，Opus 编码后和画面走同一条连接。
 /// - 断线（网络切换）30 秒内自动重连；服务端以 4001 关闭表示会话结束。
@@ -27,27 +29,19 @@ namespace PrivateChat.Agent.Session;
 /// </summary>
 public sealed class SessionRunner : IAsyncDisposable
 {
-    /// <summary>画质档位。MaxKbps 是码率上限（实际用多少看网络和画面），Ceiling 是静止后补到的质量。</summary>
-    /// <summary>LegacyFps：控制端没说过它会在跟不上时告诉这边（还没更新的旧网页）时用的帧率，就是以前的帧率。</summary>
-    private readonly record struct Preset(int MaxWidth, int MaxHeight, int Fps, int LegacyFps, int MaxKbps, int Ceiling);
-
     /// <summary>
-    /// 流畅：最大 1280×800、最高 30 fps、上限 2.5 Mbps、质量 70（QP 24）；清晰：最大 1920×1200、最高 30 fps、上限 6 Mbps、质量 85（QP 20）。
-    /// 30 帧是上限：画面不动时不发，变化大时码率预算不够也会少发；控制端跟不上时它会请这边少发（MaxFps）。
-    /// 控制端得先说一声它会这么做（连上后发一个 MaxFps），才按 30 帧发；没说过的（还没更新的旧网页）照旧按 20 / 15 帧：
-    /// 旧网页在慢设备上跟不上 30 帧又说不出来，中继线路会把它的确认来得晚当成网络堵，码率越压越低。
+    /// 帧率按画质设置的发（最高 30）：画面不动时不发，变化大时码率预算不够也会少发；控制端跟不上时它会请这边少发（MaxFps）。
+    /// 控制端得先说一声它会这么做（连上后发一个 MaxFps），才按设置的帧率发；没说过的（还没更新的旧网页）照旧按以前流畅 / 清晰两档的帧率：
+    /// 画面长边不超过 1280 时 20 帧，再大 15 帧。旧网页在慢设备上跟不上 30 帧又说不出来，中继线路会把它的确认来得晚当成网络堵，码率越压越低。
     /// </summary>
-    private static readonly Preset[] Presets = [new(1280, 800, 30, 20, 2500, 70), new(1920, 1200, 30, 15, 6000, 85)];
+    private const int LegacyFps = 20, LegacyLargeFps = 15, LegacyLargeAbove = 1280;
     private const int MinKbps = 100;
     private const int StartKbps = 600;
     /// <summary>
-    /// 流畅档在网络很慢时自动降到这个尺寸：这个编码器把质量压到最低，1280×800 的整屏变化一帧也要几十 KB，
-    /// 300 kbps 的线路上就是一两秒一帧；像素少一半，同样的码率帧率高一倍。码率连续 5 秒低于 400 kbps 时降，连续 10 秒高于 900 kbps 时恢复。
-    /// 清晰档不降（选它的人要的就是分辨率）。
+    /// 没发过 SetVideo 的控制端（旧网页）在统计里看到的码率上限最多这么多：它按"目标码率低于上限的四成"提示网络较慢，
+    /// 这样门槛是 2000 kbps，和新网页一样（以前流畅档报 2500、清晰档 6000）。
     /// </summary>
-    private static readonly (int Width, int Height) WeakSize = (960, 600);
-    private const int WeakBelowKbps = 400;
-    private const int WeakAboveKbps = 900;
+    private const int LegacyReportedMaxKbps = 5000;
     /// <summary>编码器不接受"按质量"时的老办法：变化停止后这么久里继续出帧，让固定码率的编码器把画质补上来（按时间算，不随帧率变）。</summary>
     private const int FallbackRefineMs = 400;
     /// <summary>控制端请求的每秒最多几帧（MaxFps）：-1 = 它没说过（旧网页，按老帧率），0 = 不限，其余是上限。换了控制端就作废。</summary>
@@ -60,6 +54,16 @@ public sealed class SessionRunner : IAsyncDisposable
     public const string TestRtpDropVariable = "PRIVATECHAT_AGENT_TEST_RTP_DROP";
     /// <summary>自动化测试用（只在 PRIVATECHAT_AGENT_TEST=1 时生效）：快速线路上每隔这么多秒丢掉一个画面包，而且不补发（谁也补不回来的包）。</summary>
     public const string TestRtpLoseVariable = "PRIVATECHAT_AGENT_TEST_RTP_LOSE_EVERY";
+    /// <summary>
+    /// 自动化测试用（只在 PRIVATECHAT_AGENT_TEST=1 时生效）：装成一台编码很慢的电脑——每编一帧多等这么多毫秒 × 这一帧的像素数 ÷ 1280×720
+    /// （算在编码用时里，最多 1000 ms）。编码的活随像素数变：分辨率降一级就省一截。
+    /// </summary>
+    public const string TestEncodeDelayVariable = "PRIVATECHAT_AGENT_TEST_ENCODE_DELAY_MS";
+    /// <summary>
+    /// 自动化测试用（只在 PRIVATECHAT_AGENT_TEST=1 时生效）：装成一台截屏很慢的电脑——每截一次屏多等这么多毫秒（算在采集用时里，最多 1000 ms），
+    /// 不管截多大。GDI 截屏按原始尺寸截、缩小还要另外缩放，降分辨率省不了它。
+    /// </summary>
+    public const string TestCaptureDelayVariable = "PRIVATECHAT_AGENT_TEST_CAPTURE_DELAY_MS";
     /// <summary>快速线路：发布之后这么久还没连上 Cloudflare 就算了。</summary>
     private static readonly TimeSpan LineConnectTimeout = TimeSpan.FromSeconds(8);
     /// <summary>接通之后控制端这么久还没说收到画面：它那边没接上，回中继。</summary>
@@ -85,7 +89,7 @@ public sealed class SessionRunner : IAsyncDisposable
     private readonly IAgentUi _ui;
     private readonly CancellationTokenSource _cts = new();
     private readonly TaskCompletionSource<string> _finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly NetworkEstimator _net = new(MinKbps, Presets[0].MaxKbps, StartKbps);
+    private readonly NetworkEstimator _net = new(MinKbps, VideoSettings.Auto.MaxKbps, StartKbps);
     private readonly ConcurrentDictionary<uint, long> _pings = new();
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private Thread? _video;
@@ -99,10 +103,20 @@ public sealed class SessionRunner : IAsyncDisposable
     private volatile bool _reconfigure;
     private volatile bool _audioOn;
     private volatile int _monitor = -1;
-    private volatile int _quality;
+    /// <summary>画质设置：控制端什么都没说时是自动档。</summary>
+    private volatile VideoSettings _settings = VideoSettings.Auto;
+    /// <summary>这次会话里收到过 SetVideo：之后的 SetQuality 不理（新网页两个都发，后者是给老被控端看的）。</summary>
+    private volatile bool _videoSettingsSeen;
     private volatile ScreenInfo? _current;
     private int _framesSent;
     private long _bytesSent;
+    /// <summary>主路径上编过的帧：采集（含比较变化）、编码（含转 NV12）各用了多少 Stopwatch 刻度，一共几帧。统计线程每秒算平均。</summary>
+    private long _captureTicks;
+    private long _encodeTicks;
+    private int _measuredFrames;
+    /// <summary>采集线程写：自动档因为什么降了分辨率（<see cref="RemoteStatsFlags"/> 的低两位）、现在按每秒几帧发。</summary>
+    private volatile int _autoFlags;
+    private volatile int _fpsInUse;
     private volatile int _lineRttMs;
     private uint _pingSequence;
     private uint _clipboardSeq;
@@ -330,6 +344,10 @@ public sealed class SessionRunner : IAsyncDisposable
         {
             _announce = true;
             _keyRequested = true;
+            // 上一个控制端发过 SetVideo，不等于新来的也会发：顶掉它的可能是还没更新的旧网页（PWA 要点了更新才换），
+            // 它只会发 SetQuality，不重新看的话它的流畅 / 清晰怎么点都不管用。画质设置本身留着（和以前一样，新来的想改会再说）。
+            // 中继先发对端已连上的通知、再转发新控制端的帧：新网页的 SetVideo 一定在这之后到
+            _videoSettingsSeen = false;
         }
         _peer = connected;
         AgentLog.Info(connected ? "控制端已连上，开始发画面" : "控制端不在，暂停采集");
@@ -369,8 +387,23 @@ public sealed class SessionRunner : IAsyncDisposable
                 _keyRequested = true;
                 if (VerboseLine) AgentLog.Info("快速线路：控制端经控制通道要关键帧");
                 return;
+            case ControlFrame.SetVideo v:
+                var video = VideoSettings.From(v);
+                _videoSettingsSeen = true;
+                // 网页每次重连都把设置再发一遍：没变就什么都不动（自动档降过的分辨率、"一分钟不升"都留着）
+                if (video == _settings)
+                {
+                    AgentLog.Info($"画质没变：{video.Name}");
+                    return;
+                }
+                _settings = video;
+                _reconfigure = true;
+                AgentLog.Info($"画质改成 {video.Name}：{video.Summary}");
+                return;
             case ControlFrame.SetQuality q:
-                _quality = (int)q.Preset;
+                // 新网页先发 SetVideo、再发它给老被控端看（老的不认识 SetVideo）：收到过 SetVideo 就以那个为准
+                if (_videoSettingsSeen) return;
+                _settings = VideoSettings.FromLegacy(q.Preset);
                 _reconfigure = true;
                 return;
             case ControlFrame.MaxFps m:
@@ -624,6 +657,12 @@ public sealed class SessionRunner : IAsyncDisposable
             && double.TryParse(Environment.GetEnvironmentVariable(TestRtpLoseVariable), System.Globalization.CultureInfo.InvariantCulture, out var seconds) && seconds > 0
             ? (long)(seconds * 1000) : 0;
 
+    /// <summary>测试用的"多等多少毫秒"钩子（见 <see cref="TestEncodeDelayVariable"/>、<see cref="TestCaptureDelayVariable"/>）：没开就是 0，最多 1000。</summary>
+    private static int TestDelayMs(string variable)
+        => Environment.GetEnvironmentVariable("PRIVATECHAT_AGENT_TEST") == "1"
+            && int.TryParse(Environment.GetEnvironmentVariable(variable), System.Globalization.CultureInfo.InvariantCulture, out var ms) && ms > 0
+            ? Math.Min(ms, 1000) : 0;
+
     /// <summary>
     /// 不走快速线路了，画面和声音回到中继（采集线程发现线路变了会从关键帧开始）。
     /// only 不为空时只在当前线路就是它时才停；state 不为空时告诉控制端。
@@ -703,6 +742,9 @@ public sealed class SessionRunner : IAsyncDisposable
         var wallBefore = _clock.Elapsed;
         var framesBefore = Volatile.Read(ref _framesSent);
         var bytesBefore = Interlocked.Read(ref _bytesSent);
+        var measuredBefore = Volatile.Read(ref _measuredFrames);
+        var captureBefore = Interlocked.Read(ref _captureTicks);
+        var encodeBefore = Interlocked.Read(ref _encodeTicks);
         var tick = 0;
         var lastTarget = 0;
         Line? lastLine = null;
@@ -728,6 +770,9 @@ public sealed class SessionRunner : IAsyncDisposable
                 var wall = _clock.Elapsed;
                 var frames = Volatile.Read(ref _framesSent);
                 var bytes = Interlocked.Read(ref _bytesSent);
+                var measured = Volatile.Read(ref _measuredFrames);
+                var captureTicks = Interlocked.Read(ref _captureTicks);
+                var encodeTicks = Interlocked.Read(ref _encodeTicks);
                 var seconds = Math.Max(0.001, (wall - wallBefore).TotalSeconds);
                 var cpuPercent = (int)((cpu - cpuBefore).TotalSeconds / seconds / Environment.ProcessorCount * 100);
                 // 画面走哪条线路，码率和往返时间就报哪条的
@@ -743,7 +788,12 @@ public sealed class SessionRunner : IAsyncDisposable
                 {
                     // 往返时间：探测包量到的线路延迟；老版本网页不回探测包，就用最近一帧画面从发出到确认的时间
                     var rtt = line is not null ? line.Rate.LastRttMs : _lineRttMs > 0 ? _lineRttMs : _net.LastRttMs;
-                    Send(RemoteFrames.Stats(new StatsFrame((int)Math.Round((frames - framesBefore) / seconds), (int)((bytes - bytesBefore) * 8 / 1000 / seconds), cpuPercent, rtt, target, net.MaxKbps)));
+                    var (captureMs10, encodeMs10, flags) = FrameCost(measured - measuredBefore, captureTicks - captureBefore, encodeTicks - encodeBefore);
+                    // 没发过 SetVideo 的是旧网页：它按"目标码率低于上限的四成"提示网络较慢，上限 8000 时 3200 kbps 以下都算慢，
+                    // 而画面不动时目标码率不往上涨，快网上也常年显示网络较慢。报给它的上限最多 5000：门槛是 2000 kbps，和新网页一样
+                    var max = _videoSettingsSeen ? net.MaxKbps : Math.Min(net.MaxKbps, LegacyReportedMaxKbps);
+                    Send(RemoteFrames.Stats(new StatsFrame((int)Math.Round((frames - framesBefore) / seconds), (int)((bytes - bytesBefore) * 8 / 1000 / seconds), cpuPercent, rtt, target, max,
+                        captureMs10, encodeMs10, flags)));
                     // 码率明显变了记一笔：事后看日志能知道当时网络怎么样
                     if (lastTarget == 0 || Math.Abs(target - lastTarget) > lastTarget / 3)
                     {
@@ -752,11 +802,27 @@ public sealed class SessionRunner : IAsyncDisposable
                     }
                 }
                 (cpuBefore, wallBefore, framesBefore, bytesBefore) = (cpu, wall, frames, bytes);
+                (measuredBefore, captureBefore, encodeBefore) = (measured, captureTicks, encodeTicks);
             }
         }
         catch (OperationCanceledException)
         {
         }
+    }
+
+    /// <summary>
+    /// 这一秒里平均每编一帧，采集、编码各用了多久（0.1 ms），和统计里该带的标志：自动档降没降分辨率、为什么降；
+    /// 编了至少 5 帧、而且采集加编码平均占了一帧时间的八成五以上，就是这台电脑忙不过来了（CpuBound）。
+    /// </summary>
+    private (int CaptureMs10, int EncodeMs10, RemoteStatsFlags Flags) FrameCost(int frames, long captureTicks, long encodeTicks)
+    {
+        var flags = (RemoteStatsFlags)_autoFlags;
+        if (frames <= 0) return (0, 0, flags);
+        var captureMs = captureTicks * 1000.0 / Stopwatch.Frequency / frames;
+        var encodeMs = encodeTicks * 1000.0 / Stopwatch.Frequency / frames;
+        if (frames >= 5 && _fpsInUse is > 0 and var fps && captureMs + encodeMs >= AutoResolution.BusyShare * 1000.0 / fps)
+            flags |= RemoteStatsFlags.CpuBound;
+        return ((int)Math.Round(captureMs * 10), (int)Math.Round(encodeMs * 10), flags);
     }
 
     /// <summary>这台电脑上复制了新文字 → 发给控制端。会话开始前剪贴板里已有的内容不发（可能是密码）。</summary>
@@ -796,15 +862,25 @@ public sealed class SessionRunner : IAsyncDisposable
         long lastChangeAt = -10_000;
         long lastSentAt = -10_000;
         uint lastTimestamp = 0;
-        var weak = false;
-        long? slowSince = null;
-        long? fastSince = null;
+        // 自动档的分辨率；autoFor / autoScreen：它是按哪份设置、哪块屏幕排的级（设置的值或屏幕变了就从最大的一级重新开始；
+        // 按值比：网页重连时重发的同一份设置不算变。离开自动档时忘掉 autoFor，之后再回到自动档也从头开始）
+        var auto = new AutoResolution();
+        VideoSettings? autoFor = null;
+        ScreenInfo? autoScreen = null;
+        // 上一次采集时画面有没有变：网络很慢时两次采集之间会隔好几百毫秒，"最近 300 ms 变过"不够用来判断画面还在不在动
+        var changedLastTime = false;
+        // 现在这个编码器是按哪份设置建的
+        VideoSettings? built = null;
         var secure = false;
         Line? lastLine = null;
         IRateController? lastNet = null;
         var lastQuality = 0;
         var nv12Valid = false;
         IReadOnlyList<ScreenInfo> announced = [];
+        var encodeDelayMs = TestDelayMs(TestEncodeDelayVariable);
+        if (encodeDelayMs > 0) AgentLog.Info($"测试：每编一帧多等 {encodeDelayMs} ms × 像素数 ÷ 1280×720，最多 1000 ms（{TestEncodeDelayVariable}，装成编码很慢的电脑）");
+        var captureDelayMs = TestDelayMs(TestCaptureDelayVariable);
+        if (captureDelayMs > 0) AgentLog.Info($"测试：每截一次屏多等 {captureDelayMs} ms，不管截多大（{TestCaptureDelayVariable}，装成截屏很慢的电脑）");
         // 系统计时器默认 15.6 ms 一跳，Sleep(几毫秒) 会睡到下一跳：每帧都晚到下一跳，30 fps 实际只有二十出头。会话期间调到 1 ms
         var fineTimer = timeBeginPeriod(1) == 0;
         try
@@ -832,11 +908,20 @@ public sealed class SessionRunner : IAsyncDisposable
                     continue;
                 }
 
-                var preset = Presets[Math.Clamp(_quality, 0, Presets.Length - 1)];
-                // 控制端说它跟不上时按它说的帧率发；它没说过会说（旧网页）就按以前的帧率发。
-                // 编码器按档位的帧率建，不跟着变：按质量编码时那只是名义上的帧率（极少数只能按固定码率编的电脑上，
+                var settings = _settings;
+                // 离开了自动档：忘掉它是按哪份设置排的级，之后再切回自动档从最大的一级重新开始（放在这里：下面几处提前 continue 的轮次也算看到了）
+                if (!settings.AutoResolution) autoFor = null;
+                // 控制端说它跟不上时按它说的帧率发；它没说过会说（旧网页）就按以前的帧率发（看现在编的画面有多大）。
+                // 编码器按设置的帧率建，不跟着变：按质量编码时那只是名义上的帧率（极少数只能按固定码率编的电脑上，
                 // 发得比名义帧率少时每帧还是按名义帧率分码率，实际码率会低一些）
-                var fps = _clientMaxFps switch { < 0 => preset.LegacyFps, 0 => preset.Fps, var cap => Math.Min(cap, preset.Fps) };
+                var longSide = encoder is null ? 0 : Math.Max(encoder.Width, encoder.Height);
+                var fps = _clientMaxFps switch
+                {
+                    < 0 => Math.Min(settings.Fps, longSide <= LegacyLargeAbove ? LegacyFps : LegacyLargeFps),
+                    0 => settings.Fps,
+                    var cap => Math.Min(cap, settings.Fps),
+                };
+                _fpsInUse = fps;
                 var frameInterval = 1000.0 / fps;
                 // 码率预算、在途帧数按整毫秒算就够了
                 var frameMs = (int)Math.Round(frameInterval);
@@ -901,10 +986,10 @@ public sealed class SessionRunner : IAsyncDisposable
                 }
                 if (!ReferenceEquals(net, lastNet))
                 {
-                    // 码率改由另一条线路的那一套来定：之前那条线路"一直很慢"的结论不作数了，分辨率从头判断
+                    // 码率改由另一条线路的那一套来定：之前那条线路"一直很慢"的结论不作数了，自动档因为网络慢降的分辨率退回去重新判断
                     lastNet = net;
-                    weak = false;
-                    slowSince = fastSince = null;
+                    if (settings.AutoResolution && settings == autoFor && auto.OnNetworkChanged(frameInterval, now) is { } back)
+                        AgentLog.Info(back);
                 }
 
                 net.Tick(now);
@@ -917,33 +1002,39 @@ public sealed class SessionRunner : IAsyncDisposable
                 // 码率预算用完了、或者前面的帧还堵在路上：先不采，等一等（延迟不累积）
                 if (!net.CanSend(now, frameMs)) continue;
 
-                // 网络持续很慢：流畅档降一档分辨率（见 WeakSize）
-                var target = net.TargetKbps;
-                slowSince = target < WeakBelowKbps ? slowSince ?? now : null;
-                fastSince = target > WeakAboveKbps ? fastSince ?? now : null;
-                if (!weak && slowSince is { } slow && now - slow >= 5000) weak = true;
-                else if (weak && fastSince is { } fast && now - fast >= 10_000) weak = false;
-                var shrink = weak && _quality == (int)RemoteQualityPreset.Smooth;
-
                 var screens = source.Screens();
                 var screen = screens.FirstOrDefault(s => s.Index == _monitor) ?? screens.FirstOrDefault(s => s.IsPrimary) ?? screens[0];
-                var (width, height) = FrameGeometry.Fit(screen.Bounds.Width, screen.Bounds.Height,
-                    shrink ? WeakSize.Width : preset.MaxWidth, shrink ? WeakSize.Height : preset.MaxHeight);
-                if (encoder is null || planner is null || _reconfigure || _announce || encoder.Width != width || encoder.Height != height || encoder.Fps != preset.Fps || screen != _current)
+                if (settings.AutoResolution)
+                {
+                    // 自动档：换了设置或屏幕就从最大的一级重新排；之后网络持续很慢降一级、够快了再升回去（见 AutoResolution）
+                    if (settings != autoFor || screen != autoScreen)
+                    {
+                        auto.Reset(screen.Bounds.Width, screen.Bounds.Height, settings);
+                        (autoFor, autoScreen) = (settings, screen);
+                    }
+                    // 画面在不在动：上一次采集时变了，或者最近 300 ms 里变过（和下面的 sustained 一样）
+                    var moving = changedLastTime || now - lastChangeAt < 300;
+                    if (auto.OnNetwork(net.TargetKbps, moving, frameInterval, now) is { } step) AgentLog.Info(step);
+                }
+                _autoFlags = settings.AutoResolution ? (int)auto.Flags : 0;
+                var (width, height) = settings.AutoResolution ? auto.Size : settings.Box(screen.Bounds.Width, screen.Bounds.Height);
+                if (encoder is null || planner is null || _reconfigure || _announce || !ReferenceEquals(settings, built)
+                    || encoder.Width != width || encoder.Height != height || encoder.Fps != settings.Fps || screen != _current)
                 {
                     _reconfigure = false;
+                    built = settings;
                     encoder?.Dispose();
-                    encoder = new H264Encoder(width, height, preset.Fps, preset.MaxKbps, quality: 30);
-                    planner = new QualityPlanner(width, height, preset.Ceiling);
+                    encoder = new H264Encoder(width, height, settings.Fps, settings.MaxKbps, quality: 30);
+                    planner = new QualityPlanner(width, height, settings.Ceiling);
                     changed = new bool[FrameTiles.Count(width, height)];
-                    _net.SetMax(preset.MaxKbps);
-                    line?.Rate.SetMax(preset.MaxKbps);
+                    _net.SetMax(settings.MaxKbps);
+                    line?.Rate.SetMax(settings.MaxKbps);
                     net.ForgetInFlight();
                     _current = screen;
                     hasPrevious = false;
                     nv12Valid = false;
                     _resendConfig = false;
-                    Send(RemoteFrames.VideoConfig(new VideoConfigFrame(RemoteVideoCodec.H264, width, height, preset.Fps, screen.Index, Features())));
+                    Send(RemoteFrames.VideoConfig(new VideoConfigFrame(RemoteVideoCodec.H264, width, height, settings.Fps, screen.Index, Features())));
                     if (_announce || !screens.SequenceEqual(announced))
                     {
                         Send(RemoteFrames.Monitors([.. screens.Select(s => new MonitorInfo(s.Index, s.Bounds.Width, s.Bounds.Height, s.IsPrimary))]));
@@ -951,20 +1042,32 @@ public sealed class SessionRunner : IAsyncDisposable
                     }
                     _announce = false;
                     _keyRequested = true;
-                    AgentLog.Info($"编码 {width}x{height} {preset.Fps} fps，码率上限 {preset.MaxKbps} kbps，显示器 {screen.Index}" +
-                        (shrink ? "（网络慢，降了分辨率）" : "") + (encoder.QualityMode ? "" : "（这台电脑的编码器不支持按质量，用固定码率）"));
+                    var lowered = !settings.AutoResolution ? "" : auto.Reason switch
+                    {
+                        AutoResolutionReason.Network => "（网络慢，降了分辨率）",
+                        AutoResolutionReason.Cpu => "（电脑忙不过来，降了分辨率）",
+                        _ => "",
+                    };
+                    AgentLog.Info($"编码 {width}x{height} {settings.Fps} fps，码率上限 {settings.MaxKbps} kbps，显示器 {screen.Index}，画质 {settings.Name}{lowered}" +
+                        (encoder.QualityMode ? "" : "（这台电脑的编码器不支持按质量，用固定码率）"));
                 }
                 else if (_resendConfig)
                 {
                     // 问到服务器有快速线路时第一份配置已经发出去了（问得太慢，没等到）：补发一次，控制端才知道有这条线路
                     _resendConfig = false;
                     AgentLog.Info("补发一次画面配置：服务器有快速线路");
-                    Send(RemoteFrames.VideoConfig(new VideoConfigFrame(RemoteVideoCodec.H264, width, height, preset.Fps, screen.Index, Features())));
+                    Send(RemoteFrames.VideoConfig(new VideoConfigFrame(RemoteVideoCodec.H264, width, height, settings.Fps, screen.Index, Features())));
                 }
 
+                // 采集（含比较变化）、编码（含转 NV12）各用了多久：统计里报给控制端，自动档据此判断这台电脑忙不忙得过来
+                var captureStart = Stopwatch.GetTimestamp();
                 var frame = source.Capture(screen, width, height);
+                // 测试钩子：截屏慢，截多大都一样慢
+                if (captureDelayMs > 0) Thread.Sleep(captureDelayMs);
                 var length = frame.Stride * frame.Height;
                 var changedTiles = FrameTiles.Diff(hasPrevious ? previous.AsSpan(0, length) : default, frame.Bgra.AsSpan(0, length), width, height, frame.Stride, changed);
+                var captureTicks = Stopwatch.GetTimestamp() - captureStart;
+                changedLastTime = changedTiles > 0;
                 var key = _keyRequested;
                 var sustained = now - lastChangeAt < 300;
                 var refining = false;
@@ -996,7 +1099,7 @@ public sealed class SessionRunner : IAsyncDisposable
                 {
                     if (changedTiles == 0 && fallbackRefine <= 0 && !key && !keepAlive) continue;
                     fallbackRefine = changedTiles > 0 ? (int)Math.Ceiling(FallbackRefineMs / frameInterval) : Math.Max(0, fallbackRefine - 1);
-                    encoder.SetBitrate(Math.Clamp(net.TargetKbps, MinKbps, preset.MaxKbps));
+                    encoder.SetBitrate(Math.Clamp(net.TargetKbps, MinKbps, settings.MaxKbps));
                 }
                 if (changedTiles > 0)
                 {
@@ -1008,7 +1111,9 @@ public sealed class SessionRunner : IAsyncDisposable
 
                 var size = width * height * 3 / 2;
                 if (nv12.Length < size) nv12 = new byte[size];
+                var convertStart = Stopwatch.GetTimestamp();
                 Nv12.FromBgra(frame.Bgra, frame.Stride, width, height, nv12);
+                var encodeTicks = Stopwatch.GetTimestamp() - convertStart;
                 nv12Valid = true;
                 if (key)
                 {
@@ -1019,7 +1124,24 @@ public sealed class SessionRunner : IAsyncDisposable
                 lastQuality = quality;
                 // 时间戳也是这一帧的编号：控制端按它确认，必须一帧比一帧大
                 var ts = Math.Max((uint)_clock.ElapsedMilliseconds, lastTimestamp + 1);
-                if (encoder.Encode(nv12, TimeSpan.FromMilliseconds(ts)) is not { } encoded) continue;
+                var encodeStart = Stopwatch.GetTimestamp();
+                var output = encoder.Encode(nv12, TimeSpan.FromMilliseconds(ts));
+                // 测试钩子：编码的活随像素数变，1280×720 上多等的就是设的那么多
+                if (encodeDelayMs > 0)
+                    Thread.Sleep((int)Math.Min(Math.Round(encodeDelayMs * ((double)width * height / (1280 * 720))), 1000));
+                encodeTicks += Stopwatch.GetTimestamp() - encodeStart;
+                Interlocked.Add(ref _captureTicks, captureTicks);
+                Interlocked.Add(ref _encodeTicks, encodeTicks);
+                Interlocked.Increment(ref _measuredFrames);
+                // 自动档只看画面持续在动时的帧：偶尔一帧（打字、鼠标）慢一点不要紧。
+                // 电脑忙降了一级、或者降了发现没快多少又退回去：下一轮按新的大小重建编码器
+                if (settings.AutoResolution && changedTiles > 0 && sustained
+                    && auto.OnFrameCost((captureTicks + encodeTicks) * 1000.0 / Stopwatch.Frequency, frameInterval, now) is { } cpuStep)
+                {
+                    AgentLog.Info(cpuStep);
+                    _autoFlags = (int)auto.Flags;
+                }
+                if (output is not { } encoded) continue;
                 lastTimestamp = ts;
                 // 两条线路都按"中继上这一帧的大小"记账（6 字节帧头 + 数据），画质规划学到的东西换线路后还能用
                 var bytes = 6 + encoded.Data.Length;
@@ -1058,7 +1180,7 @@ public sealed class SessionRunner : IAsyncDisposable
     }
 
     private RemoteFeatures Features()
-        => RemoteFeatures.Audio | RemoteFeatures.AdaptiveBitrate | (_realtimeOffered ? RemoteFeatures.Realtime : RemoteFeatures.None);
+        => RemoteFeatures.Audio | RemoteFeatures.AdaptiveBitrate | RemoteFeatures.VideoSettings | (_realtimeOffered ? RemoteFeatures.Realtime : RemoteFeatures.None);
 
     // ---- 声音（独立线程：采集是同步调用，10 ms 取一次）----
 

@@ -9,7 +9,10 @@ import { useRemoteStore } from '@/stores/remote'
 import { RemoteClient, webCodecsSupported, type AudioState, type LineProblem, type LineState, type LinkState, type RemoteStats } from './RemoteClient'
 import { realtimeSupported } from './RemoteRealtime'
 import { audioSupported } from './RemoteAudio'
-import { encode, Features, MAX_TEXT_BYTES, modifiersOf, normalizePoint, Quality, scanCodeOf, SpecialKey, StatusCode, utf8Length, WheelAccumulator, type MonitorInfo, type QualityPreset } from './protocol'
+import {
+  CUSTOM_FPS, CUSTOM_KBPS, CUSTOM_RESOLUTIONS, encode, Features, legacyQualityOf, MAX_TEXT_BYTES, modifiersOf, normalizePoint, normalizeVideoSettings, Quality, scanCodeOf, SpecialKey,
+  StatsFlags, StatusCode, utf8Length, VIDEO_MODE_KEYS, VIDEO_PRESETS, VideoMode, WheelAccumulator, type MonitorInfo, type QualityPreset, type VideoSettings,
+} from './protocol'
 import { formatKbps } from './format'
 
 const props = defineProps<{ id: string }>()
@@ -31,6 +34,16 @@ const blocked = ref<{ code: number; message: string } | null>(null)
 const unsupported = ref(!webCodecsSupported())
 /** 这个窗口的控制连接被别的窗口 / 设备顶掉了（会话还在，在那边用着） */
 const replaced = ref(false)
+/**
+ * 画质：记在这台设备上（现在用哪一档、自定义里选过什么），默认自动。
+ * 对方的程序是老版本（0.8.5 及以前，VideoConfig 里没有 VideoSettings 功能位）时只认识流畅 / 清晰两档：工具栏上给它原来的两个按钮（quality）
+ */
+const VIDEO_KEY = 'remote.video'
+const savedVideo = loadVideo()
+const videoSettings = ref<VideoSettings>(savedVideo.current)
+const customVideo = ref<VideoSettings>(savedVideo.custom)
+/** 自定义那一行（分辨率、帧率、码率上限）开着 */
+const customOpen = ref(false)
 const quality = ref<QualityPreset>(Quality.Smooth)
 /** 对方的远程协助程序支持哪些可选功能（声音、码率自动调）；老版本是 0 */
 const features = ref(0)
@@ -79,14 +92,79 @@ const soundTitle = computed(() => {
 })
 /** 对方的程序和这个浏览器都能走快速线路（服务器没配 Cloudflare Realtime 时对方不会声明支持） */
 const canFast = computed(() => (features.value & Features.Realtime) !== 0 && realtimeSupported())
-/** 对方电脑按网速把码率调到了档位上限的四成以下：告诉用户画面糊是因为网络 */
-const slow = computed(() => !!stats.value && stats.value.max > 0 && stats.value.target > 0 && stats.value.target < stats.value.max * 0.4)
+/**
+ * 告诉用户画面糊是因为网络：自动画质因为网速降了分辨率，或者码率被压到了档位上限的四成以下而且不到 2 Mbps
+ * （上限高的档位，5 Mbps 也够看清楚了，不算慢）
+ */
+const slow = computed(() => {
+  const s = stats.value
+  if (!s) return false
+  return (s.flags & StatsFlags.LoweredForNetwork) !== 0 || (s.target > 0 && s.max > 0 && s.target < s.max * 0.4 && s.target < 2000)
+})
+/** 对方电脑采集、编码跟不上（软件编码，电脑慢的话分辨率高、帧率高就忙不过来）：告诉用户卡是因为那边的电脑 */
+const busy = computed(() => !!stats.value && (stats.value.flags & (StatsFlags.CpuBound | StatsFlags.LoweredForCpu)) !== 0)
+const busyText = computed(() => t((stats.value?.flags ?? 0) & StatsFlags.LoweredForCpu ? 'remote.viewer.busyLowered' : 'remote.viewer.busy'))
+const busyTitle = computed(() => {
+  const s = stats.value
+  if (!s) return t('remote.viewer.busyTitleShort')
+  // 只是之前忙不过来、已经降了分辨率（这一会儿跟得上）：不报现在每帧花多久——降了以后变少了，报出来像是不忙
+  if ((s.flags & StatsFlags.CpuBound) === 0 && (s.flags & StatsFlags.LoweredForCpu) !== 0) return t('remote.viewer.busyLoweredTitle')
+  const total = s.captureMs + s.encodeMs
+  if (total <= 0) return t('remote.viewer.busyTitleShort')
+  // 对方按每秒几帧出：设的帧率；这边请它少发过的话按请的（和它判断忙不忙用的是同一个数）
+  const configured = video.value?.fps || 30
+  const fps = s.fpsCap > 0 ? Math.min(s.fpsCap, configured) : configured
+  const most = Math.floor(1000 / total)
+  const cost = { ms: ms(total), capture: ms(s.captureMs), encode: ms(s.encodeMs) }
+  // 按每帧花的时间算，每秒出不到这么多帧：说最多出几帧。还出得到（一帧的时间用掉八成五就算忙不过来）就说一帧的时间快用完了，
+  // 不报一个比现在的帧率还高的数
+  if (most < fps) return t('remote.viewer.busyTitle', { ...cost, fps: Math.max(1, most) })
+  return t('remote.viewer.busyTitleTight', { ...cost, fps, interval: Math.round(1000 / fps) })
+})
 const oldAgent = computed(() => !!video.value && (features.value & Features.AdaptiveBitrate) === 0)
 const statsText = computed(() => {
   if (!video.value || !stats.value) return ''
   const text = `${video.value.width}×${video.value.height} · ${stats.value.decoded} fps · ${formatKbps(stats.value.kbps)} · ${stats.value.rtt} ms`
   return line.value === 'realtime' ? `${text} · ${t('remote.viewer.lineFastActive')}` : text
 })
+/** 鼠标停在统计上时：对方电脑每帧采集、编码花多久（0.8.6 起），码率现在定在多少、最高多少 */
+const statsTitle = computed(() => {
+  const s = stats.value
+  if (!s) return undefined
+  const rate = { target: formatKbps(s.target), max: formatKbps(s.max) }
+  if (s.captureMs > 0 || s.encodeMs > 0) return t('remote.viewer.statsTitle', { capture: ms(s.captureMs), encode: ms(s.encodeMs), ...rate })
+  return s.max > 0 ? t('remote.viewer.statsTitleRate', rate) : undefined
+})
+/** 老版本的被控端只认识流畅 / 清晰两档：给它显示原来的两个按钮。还没收到 VideoConfig 时按新版本算 */
+const legacyQuality = computed(() => !!video.value && (features.value & Features.VideoSettings) === 0)
+const videoKey = computed(() => VIDEO_MODE_KEYS[videoSettings.value.mode])
+const videoItems = computed(() => [
+  { key: 'auto', name: t('remote.viewer.videoModes.auto'), detail: t('remote.viewer.videoAutoDetail') },
+  ...(['smooth', 'clear', 'original'] as const).map((key) => ({ key, name: t(`remote.viewer.videoModes.${key}`), detail: videoDetail(VIDEO_PRESETS[key]) })),
+  { key: 'custom', name: t('remote.viewer.videoCustomItem'), detail: videoDetail(customVideo.value) },
+])
+
+/** 毫秒数：保留一位小数，整数不带 .0 */
+function ms(n: number): string {
+  return String(Math.round(n * 10) / 10)
+}
+
+function resKey(w: number, h: number): string {
+  return `${w}x${h}`
+}
+
+function videoDetail(s: VideoSettings): string {
+  const res = s.maxWidth && s.maxHeight ? `${s.maxWidth}×${s.maxHeight}` : t('remote.viewer.videoNative')
+  return t('remote.viewer.videoDetail', { res, fps: s.fps, kbps: formatKbps(s.maxKbps) })
+}
+
+function loadVideo(): { current: VideoSettings; custom: VideoSettings } {
+  try {
+    return normalizeVideoSettings(JSON.parse(localStorage.getItem(VIDEO_KEY) ?? 'null'))
+  } catch {
+    return normalizeVideoSettings(null)
+  }
+}
 
 function loadFast(): boolean {
   try {
@@ -154,8 +232,8 @@ watch(() => props.id, (id, old) => {
   monitors.value = []
   stats.value = null
   blocked.value = null
-  quality.value = Quality.Smooth
   textOpen.value = false
+  customOpen.value = false
   void remote.get(id).catch(() => (notFound.value = true))
 })
 
@@ -212,6 +290,9 @@ function startClient(): void {
     },
   })
   client = c
+  // 画质按这台设备上记着的来：先交给它记着，对方连上来就发（老版本的程序按最接近的那一档）
+  quality.value = legacyQualityOf(videoSettings.value)
+  c.setVideo(videoSettings.value)
   // 选的是快速线路的话，等对方的程序报上来支持就去接（只用这条线路）
   c.setTransport(fast.value)
   c.connect()
@@ -266,9 +347,71 @@ async function again(): Promise<void> {
   }
 }
 
+/** 老版本的程序：两档里选一档。不记到这台设备上（记着的还是在新版本上选的），只记在这次远程里 */
 function setQuality(q: QualityPreset): void {
   quality.value = q
+  // 对方中途升级成新版本的话，菜单上显示的和它用着的一致（它会把这一档对到流畅 / 清晰）
+  videoSettings.value = { ...(q === Quality.Sharp ? VIDEO_PRESETS.clear : VIDEO_PRESETS.smooth) }
   client?.setQuality(q)
+}
+
+function sameVideo(a: VideoSettings, b: VideoSettings): boolean {
+  return a.mode === b.mode && a.maxWidth === b.maxWidth && a.maxHeight === b.maxHeight && a.fps === b.fps && a.maxKbps === b.maxKbps
+}
+
+/** 换画质：马上告诉对方，并记在这台设备上 */
+function applyVideo(s: VideoSettings): void {
+  const changed = !sameVideo(s, videoSettings.value)
+  videoSettings.value = s
+  // 老版本的两个按钮跟着这次发出去的 SetQuality 走：还没收到 VideoConfig 时在菜单里选过，对方原来是老版本的话，按钮上亮的就是它用着的那档
+  quality.value = legacyQualityOf(s)
+  try {
+    localStorage.setItem(VIDEO_KEY, JSON.stringify({ current: s, custom: customVideo.value }))
+  } catch {
+    // 无痕窗口等存不了：这次会话里照样生效
+  }
+  if (changed) client?.setVideo(s)
+}
+
+/** 画质菜单：几个固定档直接换；自定义…换成自定义里选的，并打开那一行 */
+function pickVideo(command: string): void {
+  if (command === 'custom') {
+    applyVideo({ ...customVideo.value })
+    customOpen.value = true
+    // 焦点回到画面：不然菜单收起后焦点落在画质按钮上，接着按的键到不了对方电脑（方向键、回车还会把菜单再打开）
+    stage.value?.focus()
+    return
+  }
+  const preset = VIDEO_PRESETS[command as keyof typeof VIDEO_PRESETS]
+  if (!preset) return
+  applyVideo({ ...preset })
+  customOpen.value = false
+  stage.value?.focus()
+}
+
+/** 自定义那一行里改了一项：马上按自定义用上 */
+function setCustom(patch: Partial<Omit<VideoSettings, 'mode'>>): void {
+  customVideo.value = { ...customVideo.value, ...patch, mode: VideoMode.Custom }
+  applyVideo({ ...customVideo.value })
+  refocusAfterSelect()
+}
+
+/**
+ * 下拉框里选完一项，焦点回到画面。el-select 发出选中的值之后才把焦点放回它自己的输入框，这里马上 focus 会被它盖掉，
+ * 所以等下一拍。不然接着按的方向键、回车被下拉框接走：打开菜单、换成别的选项，键也到不了对方电脑
+ */
+function refocusAfterSelect(): void {
+  void nextTick(() => stage.value?.focus())
+}
+
+function setCustomRes(key: string): void {
+  const r = CUSTOM_RESOLUTIONS.find(([w, h]) => resKey(w, h) === key)
+  if (r) setCustom({ maxWidth: r[0], maxHeight: r[1] })
+}
+
+function closeCustom(): void {
+  customOpen.value = false
+  stage.value?.focus()
 }
 
 function setFast(value: boolean): void {
@@ -290,6 +433,7 @@ function retryFast(): void {
 
 function selectMonitor(index: number): void {
   client?.selectMonitor(index)
+  refocusAfterSelect()
 }
 
 function toggleSound(): void {
@@ -511,15 +655,33 @@ watch(textOpen, (open) => {
       <div class="min-w-0 flex-1 truncate text-sm">
         <span class="font-medium">{{ session?.deviceName }}</span>
         <span v-if="session && !control" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #3a3530">{{ t('remote.viewer.viewOnly') }}</span>
-        <span v-if="statsText" class="ml-2 text-xs text-gray-400" :data-line="line" data-testid="remote-stats">{{ statsText }}</span>
+        <span
+          v-if="statsText" class="ml-2 text-xs text-gray-400" :data-line="line" :title="statsTitle"
+          :data-capture-ms="stats?.captureMs" :data-encode-ms="stats?.encodeMs" :data-flags="stats?.flags" data-testid="remote-stats"
+        >{{ statsText }}</span>
         <span v-if="slow" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #5c4514; color: #ffd98a" :title="t('remote.viewer.slowTitle', { target: formatKbps(stats!.target), max: formatKbps(stats!.max) })" data-testid="remote-slow">{{ t('remote.viewer.slow') }}</span>
         <span v-else-if="oldAgent" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #3a3530" :title="t('remote.viewer.oldAgentTitle')" data-testid="remote-old-agent">{{ t('remote.viewer.oldAgent') }}</span>
+        <span v-if="busy" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #5c4514; color: #ffd98a" :title="busyTitle" data-testid="remote-busy">{{ busyText }}</span>
       </div>
       <template v-if="state === 'Active' && !replaced">
-        <el-radio-group :model-value="quality" size="small" @update:model-value="(q) => setQuality(q as QualityPreset)">
+        <!-- 老版本的程序只认识两档 -->
+        <el-radio-group v-if="legacyQuality" :model-value="quality" size="small" @update:model-value="(q) => setQuality(q as QualityPreset)">
           <el-radio-button :value="Quality.Smooth" data-testid="remote-quality-smooth">{{ t('remote.viewer.smooth') }}</el-radio-button>
           <el-radio-button :value="Quality.Sharp" data-testid="remote-quality-sharp">{{ t('remote.viewer.sharp') }}</el-radio-button>
         </el-radio-group>
+        <el-dropdown v-else trigger="click" :teleported="false" @command="pickVideo">
+          <el-button size="small" :title="t('remote.viewer.videoTitle')" data-testid="remote-video">{{ t('remote.viewer.video', { name: t(`remote.viewer.videoModes.${videoKey}`) }) }}<el-icon class="ml-1"><ArrowDown /></el-icon></el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item v-for="item in videoItems" :key="item.key" :command="item.key" :divided="item.key === 'custom'" :data-testid="`remote-video-${item.key}`">
+                <div class="flex flex-col py-0.5 leading-tight">
+                  <span :style="item.key === videoKey ? 'color: var(--el-color-primary); font-weight: 500' : undefined">{{ item.name }}</span>
+                  <span class="text-xs" style="color: var(--el-text-color-secondary)">{{ item.detail }}</span>
+                </div>
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <el-radio-group v-if="canFast" :model-value="fast" size="small" :title="t('remote.viewer.lineTitle')" @update:model-value="(v) => setFast(v as boolean)">
           <el-radio-button :value="true" data-testid="remote-line-fast">{{ line === 'connecting' ? t('remote.viewer.lineConnecting') : t('remote.viewer.lineFast') }}</el-radio-button>
           <el-radio-button :value="false" data-testid="remote-line-standard">{{ t('remote.viewer.lineStandard') }}</el-radio-button>
@@ -551,6 +713,36 @@ watch(textOpen, (open) => {
     <div v-if="textOpen && state === 'Active' && !replaced" class="flex shrink-0 gap-2 px-3 py-2" style="background: #26231f">
       <el-input ref="textInput" v-model="textValue" :placeholder="t('remote.viewer.typePlaceholder')" data-testid="remote-text" @keydown.enter="sendText" />
       <el-button type="primary" data-testid="remote-text-send" @click="sendText()">{{ t('remote.viewer.send') }}</el-button>
+    </div>
+
+    <!-- 自定义画质：改一项马上用上 -->
+    <div
+      v-if="customOpen && state === 'Active' && !replaced && !legacyQuality"
+      class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2 text-xs" style="background: #26231f" data-testid="remote-video-custom-row"
+    >
+      <div class="flex items-center gap-1.5">
+        <span class="text-gray-300">{{ t('remote.viewer.videoRes') }}</span>
+        <el-select
+          :model-value="resKey(customVideo.maxWidth, customVideo.maxHeight)" size="small" class="!w-28" :teleported="false" data-testid="remote-video-res"
+          @update:model-value="(v) => setCustomRes(String(v))"
+        >
+          <el-option v-for="[w, h] in CUSTOM_RESOLUTIONS" :key="resKey(w, h)" :value="resKey(w, h)" :label="w && h ? `${w}×${h}` : t('remote.viewer.videoResNative')" />
+        </el-select>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <span class="text-gray-300">{{ t('remote.viewer.videoFps') }}</span>
+        <el-select :model-value="customVideo.fps" size="small" class="!w-20" :teleported="false" data-testid="remote-video-fps" @update:model-value="(v) => setCustom({ fps: Number(v) })">
+          <el-option v-for="f in CUSTOM_FPS" :key="f" :value="f" :label="t('remote.viewer.videoFpsOption', { n: f })" />
+        </el-select>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <span class="text-gray-300">{{ t('remote.viewer.videoKbps') }}</span>
+        <el-select :model-value="customVideo.maxKbps" size="small" class="!w-24" :teleported="false" data-testid="remote-video-kbps" @update:model-value="(v) => setCustom({ maxKbps: Number(v) })">
+          <el-option v-for="k in CUSTOM_KBPS" :key="k" :value="k" :label="`${k / 1000} Mbps`" />
+        </el-select>
+      </div>
+      <span class="min-w-[12rem] flex-1 text-gray-400">{{ t('remote.viewer.videoCustomHint') }}</span>
+      <el-button size="small" data-testid="remote-video-custom-close" @click="closeCustom">{{ t('remote.viewer.videoCustomClose') }}</el-button>
     </div>
 
     <!-- 画面 -->

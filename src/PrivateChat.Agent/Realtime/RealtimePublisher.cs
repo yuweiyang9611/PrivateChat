@@ -21,10 +21,11 @@ public sealed class RealtimePublisher : IDisposable
     private const int AudioPayloadType = 111;
     private const int VideoClock = 90000;
     /// <summary>
-    /// 自己留着准备补发的包数（2 的幂）。按包数算，所以能补多久看每秒发多少包：码率低时是最近几秒，
-    /// 清晰档跑满 6 Mbps（每秒八九百个包）时只有一秒多，比下面的 2 秒短——那时更早的包本来也该改要关键帧了。
+    /// 自己留着准备补发的包数（2 的幂）。按包数算，所以能补多久看每秒发多少包：码率低时远不止下面的 2 秒，
+    /// 原画跑满 16 Mbps（每秒一千七百个包左右）时约两秒半，码率上限最高的 20 Mbps 时也有两秒，和下面的补发时限差不多。
+    /// （以前 1024 个，16 Mbps 时只够 0.6 秒。）最多占 5 MB 左右。
     /// </summary>
-    private const int ResendSlots = 1024;
+    private const int ResendSlots = 4096;
     /// <summary>发出去超过这么久的包不再补发：对面早就改要关键帧了。</summary>
     private const long ResendWindowMs = 2000;
 
