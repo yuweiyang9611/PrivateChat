@@ -149,6 +149,19 @@ app.UseForwardedHeaders();
 // （手机掉线、笔记本合盖时不会有 FIN，不设超时的话连接会一直挂着，会话永远是"进行中"）
 app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(15), KeepAliveTimeout = TimeSpan.FromSeconds(30) });
 app.UseSerilogRequestLogging();
+// 浏览器在请求途中跳走 / 关页面：和 GlobalExceptionFilter 一样当成 499、不记成错误。
+// 取消也可能发生在进控制器之前（登录 cookie 校验要查库），那里的异常过滤器管不到，日志里就成了一条"responded 500"的 ERR
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next(context);
+    }
+    catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+    {
+        if (!context.Response.HasStarted) context.Response.StatusCode = 499;
+    }
+});
 app.UseAuthentication();
 app.UseAuthorization();
 
