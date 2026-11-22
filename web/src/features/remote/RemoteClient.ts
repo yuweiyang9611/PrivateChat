@@ -2,6 +2,7 @@ import { codecFromAnnexB, encode, Features, legacyQualityOf, parseAgentFrame, Tr
 import { RemoteAudio } from './RemoteAudio'
 import { RemoteRealtime, pageVisible, realtimeSupported } from './RemoteRealtime'
 import { FrameRateGovernor } from './FrameRateGovernor'
+import type { ViewerState, ViewerTelemetry } from './viewerTelemetry'
 
 /** 浏览器能不能解 H.264：要 WebCodecs（Chrome / Edge 94+、Safari 16.4+、Firefox 130+） */
 export function webCodecsSupported(): boolean {
@@ -62,6 +63,7 @@ export interface RemoteClientEvents {
  * 快速线路：被控端支持时（VideoConfig 的功能位），可以让画面和声音改经 Cloudflare Realtime 过来（{@link RemoteRealtime}），
  * 画到同一块 canvas 上；键鼠、剪贴板这些仍走这条 WebSocket。走哪条线路由用户选，两条线路之间不自动换：
  * 选了快速线路就只用它，接不上、中途断了都只是重新接它并提示用户，不拿中继的画面顶上。
+ * 遥测（{@link ViewerTelemetry}，由页面传进来、跨重连和接手留着）：每画一帧、要关键帧、请对方少发、线路出问题、解码出错时各记一笔，每秒给一次状态。
  */
 export class RemoteClient {
   private ws: WebSocket | null = null
@@ -107,11 +109,13 @@ export class RemoteClient {
   private readonly sessionId: string
   private readonly canvas: HTMLCanvasElement
   private readonly on: Partial<RemoteClientEvents>
+  private readonly telemetry: ViewerTelemetry | null
 
-  constructor(sessionId: string, canvas: HTMLCanvasElement, on: Partial<RemoteClientEvents>) {
+  constructor(sessionId: string, canvas: HTMLCanvasElement, on: Partial<RemoteClientEvents>, telemetry: ViewerTelemetry | null = null) {
     this.sessionId = sessionId
     this.canvas = canvas
     this.on = on
+    this.telemetry = telemetry
     this.ctx = canvas.getContext('2d', { alpha: false })
     document.addEventListener('visibilitychange', this.onVisibility)
     this.probeChannel.port1.onmessage = (e: MessageEvent<number>) => {
@@ -120,8 +124,20 @@ export class RemoteClient {
     }
   }
 
+  /** 遥测看的状态：页面在不在前台、连没连着对方、画面在哪条线路上 */
+  private get viewerState(): ViewerState {
+    return { visible: pageVisible(), connected: this.peer && !this.closed, line: this.line }
+  }
+
+  /** 状态变了：马上告诉遥测（页面进了后台、断线、换线路的那段时间不算卡住） */
+  private noteState(): void {
+    // 关了以后就不记了（时长停在关的那一刻，见 close）
+    if (!this.closed) this.telemetry?.update(performance.now(), this.viewerState)
+  }
+
   /** 页面回到前台：在后台时没去接（重新接）的快速线路，现在接；在后台时的帧率判断不作数，先缓一缓 */
   private readonly onVisibility = (): void => {
+    this.noteState()
     if (!pageVisible()) return
     this.governor.hold(performance.now(), 2000)
     this.requestRealtime()
@@ -152,6 +168,8 @@ export class RemoteClient {
         return
       }
       if (this.closed) return
+      this.noteState()
+      this.telemetry?.relayDropped()
       this.on.state?.('reconnecting')
       const delay = Math.min(5000, 500 * 2 ** this.retry++)
       this.retryTimer = window.setTimeout(() => this.connect(), delay)
@@ -160,6 +178,7 @@ export class RemoteClient {
     this.statsTimer = window.setInterval(() => {
       this.decodedLastSecond = this.decodedThisSecond
       this.decodedThisSecond = 0
+      this.telemetry?.tick(performance.now(), this.viewerState)
     }, 1000)
     window.clearInterval(this.governorTimer)
     this.governorTimer = window.setInterval(() => this.govern(), 500)
@@ -173,10 +192,14 @@ export class RemoteClient {
   private govern(): void {
     if (!this.peer || this.onFastLine || !pageVisible()) return
     const cap = this.governor.tick(performance.now(), this.fps)
-    if (cap !== null) this.send(encode.maxFps(cap))
+    if (cap !== null) {
+      this.send(encode.maxFps(cap))
+      this.telemetry?.maxFps(cap)
+    }
   }
 
   close(): void {
+    if (!this.closed) this.telemetry?.stop(performance.now())
     this.closed = true
     this.peer = false
     document.removeEventListener('visibilitychange', this.onVisibility)
@@ -306,6 +329,7 @@ export class RemoteClient {
     if (!this.onFastLine || this.realtime || this.realtimeAsked) return
     window.clearTimeout(this.realtimeTimer)
     this.realtimeFailures = 0
+    this.telemetry?.realtimeRetried()
     this.on.line?.('connecting')
     this.requestRealtime()
   }
@@ -321,6 +345,7 @@ export class RemoteClient {
         // 为中继这边解码请对方少发的帧数，快速线路上不作数（那边不靠这边确认）
         const uncapped = this.governor.reset()
         if (uncapped !== null) this.send(encode.maxFps(uncapped))
+        this.telemetry?.maxFps(0)
       }
       this.requestRealtime()
       return
@@ -357,7 +382,7 @@ export class RemoteClient {
     if (this.realtime && this.realtimeGeneration === generation) return
     this.dropRealtime()
     this.realtimeGeneration = generation
-    const realtime = new RemoteRealtime(this.sessionId, (video) => this.paint(video), {
+    const realtime = new RemoteRealtime(this.sessionId, (video, mediaMs) => this.paint(video, mediaMs), {
       first: () => {
         if (this.realtime !== realtime) return
         window.clearTimeout(this.realtimeTimer)
@@ -384,7 +409,10 @@ export class RemoteClient {
 
   private sendReport(realtime: RemoteRealtime): void {
     void realtime.report().then((report) => {
-      if (report && this.realtime === realtime) this.send(encode.receiverReport(report))
+      if (!report || this.realtime !== realtime) return
+      this.send(encode.receiverReport(report))
+      // 第一份还没有可比的，丢包、缓冲都是 0：不算进遥测
+      if (report.measured) this.telemetry?.realtimeReport(report)
     })
   }
 
@@ -401,6 +429,7 @@ export class RemoteClient {
     if (tellAgent) this.send(encode.setTransport(Transport.Relay))
     this.realtimeFailures++
     const delay = wasShowing && this.realtimeFailures === 1 ? REALTIME_QUICK_RETRY_MS : REALTIME_RETRY_DELAYS_MS[this.realtimeFailures - 1]
+    this.telemetry?.realtimeFailed(reason, delay !== undefined)
     this.setLine('connecting', { reason, retrying: delay !== undefined })
     if (delay !== undefined) this.realtimeTimer = window.setTimeout(() => this.requestRealtime(), delay)
   }
@@ -419,11 +448,12 @@ export class RemoteClient {
   private setLine(line: LineState, problem?: LineProblem): void {
     if (this.line === line && !problem) return
     this.line = line
+    this.noteState()
     this.on.line?.(line, problem)
   }
 
-  /** 快速线路出了一帧：画到同一块 canvas 上 */
-  private paint(video: HTMLVideoElement): void {
+  /** 快速线路出了一帧：画到同一块 canvas 上。mediaMs：这一帧在对方电脑上的时间（遥测用） */
+  private paint(video: HTMLVideoElement, mediaMs: number | null): void {
     if (this.closed || !video.videoWidth || !video.videoHeight) return
     if (this.canvas.width !== video.videoWidth || this.canvas.height !== video.videoHeight) {
       this.canvas.width = video.videoWidth
@@ -431,6 +461,7 @@ export class RemoteClient {
     }
     this.ctx?.drawImage(video, 0, 0, this.canvas.width, this.canvas.height)
     this.decodedThisSecond++
+    this.telemetry?.frame(performance.now(), mediaMs)
   }
 
   private onNotice(text: string): void {
@@ -443,8 +474,10 @@ export class RemoteClient {
       this.dropRealtime()
       // 它那边请求过的帧率上限也作废了：从头看
       this.governor.reset()
+      this.telemetry?.maxFps(0)
       this.realtimeFailures = 0
       this.line = this.onFastLine ? 'connecting' : 'relay'
+      this.noteState()
       this.on.line?.(this.line) // 之前提示过的问题也一并清掉
       if (this.peer) {
         // Agent（重新）连上：它会从关键帧开始；把这边选过的画质、显示器、要不要声音再告诉它一遍
@@ -498,6 +531,7 @@ export class RemoteClient {
         this.on.monitors?.(f.monitors)
         return
       case 'stats':
+        this.telemetry?.agentStats(f.fps)
         this.on.stats?.({
           fps: f.fps, kbps: f.kbps, cpu: f.cpu, rtt: f.rtt, decoded: this.decodedLastSecond, target: f.target, max: f.max,
           captureMs: f.captureMs, encodeMs: f.encodeMs, flags: f.flags, fpsCap: this.governor.cap,
@@ -549,7 +583,8 @@ export class RemoteClient {
     try {
       this.governor.received(timestamp, performance.now(), this.decoder.decodeQueueSize)
       this.decoder.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: timestamp * 1000, data }))
-    } catch {
+    } catch (e) {
+      this.telemetry?.error(`解码出错：${errorName(e)}`)
       this.dropDecoder()
     }
   }
@@ -564,11 +599,13 @@ export class RemoteClient {
           if (this.decoder !== decoder) return
           if (e.name === 'NotSupportedError') {
             // 这个浏览器解不了：断开，不要让 Agent 一直编关键帧
+            this.telemetry?.error(`浏览器解不了这种画面（${codec}）`)
             this.close()
             this.on.unsupported?.()
             return
           }
           // 解码出错（丢了一帧之类）：从下一个关键帧重新开始
+          this.telemetry?.error(`解码出错：${errorName(e)}`)
           this.dropDecoder()
         },
       })
@@ -578,7 +615,8 @@ export class RemoteClient {
       // 解码器刚建好，头几帧本来就慢
       this.governor.hold(performance.now(), 2000)
       this.codec = codec
-    } catch {
+    } catch (e) {
+      this.telemetry?.error(`建不了解码器（${codec}）：${errorName(e)}`)
       this.close()
       this.on.unsupported?.()
     }
@@ -596,6 +634,7 @@ export class RemoteClient {
     if (now - this.lastKeyRequest < 500) return
     this.lastKeyRequest = now
     this.send(encode.requestKeyFrame())
+    this.telemetry?.keyFrameRequest(now)
   }
 
   private draw(frame: VideoFrame): void {
@@ -611,8 +650,16 @@ export class RemoteClient {
       }
       this.ctx?.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height)
       this.decodedThisSecond++
+      // 帧的时间戳就是它在对方电脑上的时间（毫秒）
+      this.telemetry?.frame(performance.now(), timestamp)
     } finally {
       frame.close()
     }
   }
+}
+
+/** 出错的种类（DOMException 的 name），不带说明：说明里可能有别的东西 */
+function errorName(e: unknown): string {
+  if (e && typeof e === 'object' && 'name' in e && typeof e.name === 'string' && e.name) return e.name.slice(0, 60)
+  return '未知'
 }

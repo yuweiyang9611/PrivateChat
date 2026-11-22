@@ -36,6 +36,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<CallTrack> CallTracks => Set<CallTrack>();
 
     public DbSet<RemoteSession> RemoteSessions => Set<RemoteSession>();
+    public DbSet<DeviceTelemetry> DeviceTelemetry => Set<DeviceTelemetry>();
+    public DbSet<RemoteSessionTelemetry> RemoteSessionTelemetry => Set<RemoteSessionTelemetry>();
     public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<Job> Jobs => Set<Job>();
 
@@ -158,6 +160,22 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             e.HasIndex(x => x.TargetDeviceId, "open_per_device").IsUnique().HasFilter("ended_at IS NULL").HasDatabaseName("ix_remote_sessions_open_per_device");
             e.HasIndex(x => x.StartedAt);
             e.HasIndex(x => x.State).HasFilter("ended_at IS NULL");
+        });
+        // 远程协助遥测：硬件快照每台设备一行、每次远程一行，都跟着主表的行删
+        b.Entity<DeviceTelemetry>(e =>
+        {
+            e.HasKey(x => x.DeviceId);
+            e.Property(x => x.Data).HasColumnType("jsonb");
+            e.HasOne<Device>().WithOne().HasForeignKey<DeviceTelemetry>(x => x.DeviceId).OnDelete(DeleteBehavior.Cascade);
+        });
+        b.Entity<RemoteSessionTelemetry>(e =>
+        {
+            e.HasKey(x => x.SessionId);
+            e.HasIndex(x => x.DeviceId);
+            e.HasIndex(x => x.UpdatedAt); // 按时间清理
+            e.Property(x => x.Agent).HasColumnType("jsonb");
+            e.Property(x => x.Viewer).HasColumnType("jsonb");
+            e.HasOne<RemoteSession>().WithOne().HasForeignKey<RemoteSessionTelemetry>(x => x.SessionId).OnDelete(DeleteBehavior.Cascade);
         });
         b.Entity<Notification>(e =>
         {

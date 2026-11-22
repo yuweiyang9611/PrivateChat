@@ -9,6 +9,9 @@ namespace PrivateChat.Api.Features.Auth;
 /// <summary>
 /// Agent 等非浏览器客户端：Authorization: Bearer &lt;设备令牌&gt;。
 /// 设备令牌只能用于远程控制相关的接口：被控电脑上的令牌万一泄露，也拿不到主人的聊天、网盘。
+/// 设备令牌认出来的身份带着主人的用户 Id 和角色，所以这些前缀下面给人用的接口都要自己拦 <c>User.DeviceId() is not null</c>；
+/// 千万别加 /api/devices（改名、改名单和 PIN、吊销都没有拦设备），管理员看的接口也别放到这些前缀下面。
+/// /api/remote/agent 下面只放被控端自己用的接口（遥测上报）。
 /// </summary>
 public sealed class DeviceTokenAuthenticationHandler(
     IOptionsMonitor<AuthenticationSchemeOptions> options,
@@ -18,7 +21,7 @@ public sealed class DeviceTokenAuthenticationHandler(
     AppDbContext db)
     : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
 {
-    private static readonly PathString[] AllowedPaths = ["/hubs/agent", "/ws/remote", "/api/remote/sessions"];
+    private static readonly PathString[] AllowedPaths = ["/hubs/agent", "/ws/remote", "/api/remote/sessions", "/api/remote/agent"];
 
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
     {

@@ -171,11 +171,15 @@ export function pageVisible(): boolean {
 
 interface Sample { at: number; lost: number; received: number; bytes: number; delay: number; emitted: number }
 
+/** 每秒的接收回报；measured = false：这是第一份，还没有上一份可比，丢包、码率、缓冲都是 0（只为告诉被控端接上了） */
+export type MeasuredReport = ReceiverReport & { measured: boolean }
+
 /**
  * 快速线路的接收端：画面和声音经 Cloudflare Realtime（WebRTC）过来，不经我们的服务器中继。
  * 信令经我们的接口：问 ICE 服务器 → 拉流拿到 offer → 交回 answer。
  * 画面用一个不挂到页面上的 video 元素解码，每出一帧交给 paint 画到和中继共用的那块 canvas 上
  * （页面上的布局、坐标换算、全屏都不用管画面是从哪条线路来的）；声音用单独的 audio 元素放。
+ * paint 还带着这一帧在对方电脑上的时间（毫秒，RTP 时间戳换算；浏览器不给时是 null）：遥测靠它分辨"帧晚到了"和"对方屏幕没动"。
  */
 export class RemoteRealtime {
   private pc: RTCPeerConnection | null = null
@@ -190,6 +194,9 @@ export class RemoteRealtime {
   private readonly silence = new SilenceWatch()
   private stuckTimer: number | undefined
   private lastTime = -1
+  /** 上一帧的 RTP 时间戳（90 kHz）和换算出来、接着往上加的毫秒数 */
+  private lastRtp: number | null = null
+  private mediaMs = 0
   private framesSinceReport = 0
   private previous: Sample | null = null
   private firstTimer: number | undefined
@@ -199,10 +206,10 @@ export class RemoteRealtime {
   peak = 0
 
   private readonly sessionId: string
-  private readonly paint: (video: HTMLVideoElement) => void
+  private readonly paint: (video: HTMLVideoElement, mediaMs: number | null) => void
   private readonly on: RemoteRealtimeEvents
 
-  constructor(sessionId: string, paint: (video: HTMLVideoElement) => void, on: RemoteRealtimeEvents) {
+  constructor(sessionId: string, paint: (video: HTMLVideoElement, mediaMs: number | null) => void, on: RemoteRealtimeEvents) {
     this.sessionId = sessionId
     this.paint = paint
     this.on = on
@@ -280,14 +287,14 @@ export class RemoteRealtime {
       if (perFrame) video.requestVideoFrameCallback(onFrame)
       else requestAnimationFrame(onFrame)
     }
-    const onFrame = (): void => {
+    const onFrame = (_now?: number, metadata?: VideoFrameCallbackMetadata): void => {
       if (this.closed) return
       const fresh = perFrame || video.currentTime !== this.lastTime
       if (fresh && video.videoWidth > 0) {
         this.lastTime = video.currentTime
         this.stall.frame(performance.now())
         this.framesSinceReport++
-        this.paint(video)
+        this.paint(video, this.mediaTimeOf(metadata))
         if (!this.started) {
           this.started = true
           window.clearTimeout(this.firstTimer)
@@ -299,6 +306,19 @@ export class RemoteRealtime {
       next()
     }
     next()
+  }
+
+  /** 这一帧在对方电脑上的时间（毫秒）：RTP 时间戳一圈 2^32 绕回来也接得上，往回走的不算。没有 RTP 时间戳（老浏览器）是 null */
+  private mediaTimeOf(metadata: VideoFrameCallbackMetadata | undefined): number | null {
+    const rtp = metadata?.rtpTimestamp
+    if (typeof rtp !== 'number') return null
+    if (this.lastRtp === null) this.lastRtp = rtp
+    const ticks = (rtp - this.lastRtp) >>> 0
+    if (ticks < 0x80000000) {
+      this.mediaMs += ticks / 90
+      this.lastRtp = rtp
+    }
+    return this.mediaMs
   }
 
   private onConnectionState(pc: RTCPeerConnection): void {
@@ -354,7 +374,7 @@ export class RemoteRealtime {
    * 每秒调一次：这一秒收得怎么样（发给被控端，它据此调码率）。还没出画面时返回 null。
    * 出过画面之后太久没有新的一帧，这里会判定线路断了（页面在后台的时间不算，见 StallWatch）。
    */
-  async report(): Promise<ReceiverReport | null> {
+  async report(): Promise<MeasuredReport | null> {
     const pc = this.pc
     if (!pc || !this.active) return null
     const now = performance.now()
@@ -390,7 +410,7 @@ export class RemoteRealtime {
     const frames = this.framesSinceReport
     this.framesSinceReport = 0
     // 帧率至少报 1：画面在这条线路上（屏幕不动时一秒里可能一帧都没有），被控端靠它知道这边接上了
-    if (!before) return { lossPermille: 0, receivedKbps: 0, jitterBufferMs: 0, fps: Math.max(1, frames), rttMs }
+    if (!before) return { lossPermille: 0, receivedKbps: 0, jitterBufferMs: 0, fps: Math.max(1, frames), rttMs, measured: false }
     const seconds = Math.max(0.2, (now - before.at) / 1000)
     const lostNow = Math.max(0, lost - before.lost)
     const receivedNow = Math.max(0, received - before.received)
@@ -401,6 +421,7 @@ export class RemoteRealtime {
       jitterBufferMs: emittedNow > 0 ? (1000 * (delay - before.delay)) / emittedNow : 0,
       fps: Math.max(1, frames / seconds),
       rttMs,
+      measured: true,
     }
   }
 

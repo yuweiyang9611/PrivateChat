@@ -10,6 +10,7 @@ import { useSessionStore } from '@/stores/session'
 import { unwrap, useRemoteStore, type DeviceDto, type RemoteSessionDto, type RemoteSessionMode } from '@/stores/remote'
 import { online } from '@/net/online'
 import AddDeviceDialog from './AddDeviceDialog.vue'
+import DeviceDiagnosticsDialog from './DeviceDiagnosticsDialog.vue'
 import DeviceSettingsDialog from './DeviceSettingsDialog.vue'
 import { formatBytes, formatWhen, sessionMinutes } from './format'
 
@@ -22,6 +23,9 @@ const session = useSessionStore()
 const adding = ref(false)
 const editing = ref<DeviceDto | null>(null)
 const editOpen = ref(false)
+/** 管理员看一台电脑的诊断（遥测）：主人和别的成员都没有这一项（服务器也只给管理员） */
+const diagnosing = ref<DeviceDto | null>(null)
+const diagnosticsOpen = ref(false)
 const starting = ref<string | null>(null)
 const history = ref<RemoteSessionDto[]>([])
 const historyNext = ref<string | null>(null)
@@ -30,6 +34,7 @@ const loadError = ref('')
 
 const me = computed(() => session.user?.id)
 const isChild = computed(() => session.user?.role === 'Child')
+const isAdmin = computed(() => session.isAdmin)
 
 onMounted(async () => {
   void family.load()
@@ -136,6 +141,9 @@ function onCommand(d: DeviceDto, command: string): void {
   else if (command === 'settings') {
     editing.value = d
     editOpen.value = true
+  } else if (command === 'diagnostics') {
+    diagnosing.value = d
+    diagnosticsOpen.value = true
   } else if (command === 'revoke') void revoke(d)
 }
 
@@ -190,12 +198,14 @@ const reasonKeys = { declined: 1, timeout: 1, controller: 1, agent: 1, stopped: 
               </div>
               <div v-if="trustedText(d)" class="truncate text-xs" style="color: var(--pc-text-muted)" data-testid="device-trusted-list">{{ trustedText(d) }}</div>
             </div>
-            <el-dropdown v-if="d.canManage || (d.hasPin && d.canControl)" trigger="click" @command="(c: string) => onCommand(d, c)">
+            <el-dropdown v-if="d.canManage || (d.hasPin && d.canControl) || isAdmin" trigger="click" @command="(c: string) => onCommand(d, c)">
               <el-button :icon="MoreFilled" circle text data-testid="device-more" />
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item v-if="d.hasPin && d.canControl && d.online" command="pin" data-testid="device-use-pin">{{ t('remote.usePin') }}</el-dropdown-item>
                   <el-dropdown-item v-if="d.canManage" command="settings" data-testid="device-settings">{{ t('remote.settings') }}</el-dropdown-item>
+                  <!-- 硬件、编码器、最近几次远程卡不卡：只有管理员看得到 -->
+                  <el-dropdown-item v-if="isAdmin" command="diagnostics" data-testid="device-diagnostics">{{ t('remote.diagnostics.menu') }}</el-dropdown-item>
                   <el-dropdown-item v-if="d.canManage" command="revoke" divided data-testid="device-revoke">{{ t('remote.revoke') }}</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
@@ -234,5 +244,6 @@ const reasonKeys = { declined: 1, timeout: 1, controller: 1, agent: 1, stopped: 
 
     <AddDeviceDialog v-model="adding" @added="() => remote.load()" />
     <DeviceSettingsDialog v-model="editOpen" :device="editing" />
+    <DeviceDiagnosticsDialog v-if="isAdmin" v-model="diagnosticsOpen" :device="diagnosing" />
   </div>
 </template>

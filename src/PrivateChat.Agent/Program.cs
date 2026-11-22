@@ -17,10 +17,16 @@ namespace PrivateChat.Agent;
 ///     --consent accept|decline|ignore|wait   自动回复远程请求（accept 需要环境变量 PRIVATECHAT_AGENT_TEST=1；
 ///                          wait = 同意窗口一直挂着没人点，直到请求被取消或超时）
 /// PrivateChat.Agent.exe --selftest [out.h264] [--screen]   编码器自检
+/// PrivateChat.Agent.exe --probe-hardware OUT.json   探测显卡、编码器、截屏，结果写进 OUT.json 后退出（遥测用：Agent 连上服务器后
+///                          自己在子进程里跑，见 Telemetry/HardwareTelemetry；也可以手动跑来看）
 /// 环境变量：
 ///     PRIVATECHAT_AGENT_AUTOUPDATE=off        不自动升级（默认：服务器上的安装包比自己新就自动换，见 Updater）
 ///     PRIVATECHAT_AGENT_REALTIME=off          不用快速线路（画面和声音只走服务器中继；默认：服务器配了 Cloudflare Realtime 就可以用，由控制端决定）
 ///     PRIVATECHAT_AGENT_TLS=bundled|system   强制用程序自带的 TLS 1.3 / 系统的 TLS（默认：系统没有 TLS 1.3 时用自带的）
+///     PRIVATECHAT_AGENT_TELEMETRY=off         不报遥测：不探测硬件、不上报（默认：连上服务器后报这台电脑的硬件和能力——没探测过、或者
+///                                             版本 / 显卡驱动 / 显示器变了就先在子进程里探测一次，等启动后第一次查完更新、连上满 30 秒、
+///                                             没在被远程时才探——每次远程再报性能汇总；
+///                                             只有数字、型号和出错的说明，管理员在设备页的"诊断"里看，见 docs/DESIGN.md"远程协助遥测"）
 ///     PRIVATECHAT_AGENT_TEST_RTP_DROP=0.02   快速线路上故意丢掉这个比例的画面包（只在 PRIVATECHAT_AGENT_TEST=1 时生效，自动化测试用）
 ///     PRIVATECHAT_AGENT_TEST_CA=FILE.pem     自带的 TLS 只信任这个根证书（只在 PRIVATECHAT_AGENT_TEST=1 时生效，自动化测试用）
 ///     PRIVATECHAT_AGENT_TEST_ENCODE_DELAY_MS=45   每编一帧多等这么多毫秒 × 像素数 ÷ 1280×720，装成一台编码很慢的电脑（只在 PRIVATECHAT_AGENT_TEST=1 时生效，自动化测试用）
@@ -31,6 +37,12 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // 探测子进程：不要界面、不要单实例锁、不写日志，做完就退出
+        if (args is ["--probe-hardware", var probeOutput, ..])
+        {
+            SetProcessDpiAwarenessContext(-4); // 和远程时一样按物理像素看显示器
+            return Telemetry.HardwareProbe.Run(probeOutput);
+        }
         if (args.Contains("--selftest"))
         {
             SetProcessDpiAwarenessContext(-4);

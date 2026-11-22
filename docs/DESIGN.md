@@ -282,6 +282,8 @@ PrivateChat/
 | `call_participants` | id, call_id, user_id, cf_session_id（发布用的 Cloudflare 会话）, cf_pull_session_id（订阅用的）, mic_on, cam_on, joined_at, last_seen_at（心跳）, left_at |
 | `call_tracks` | id, participant_id, track_name, kind（Audio / Video / Screen）, mid（发布会话里的 mid，强制关闭用）, published_at, unpublished_at |
 | `remote_sessions` | id, controller_user_id, target_device_id, mode（View / Control）, consent（Prompt 点了同意 / Unattended 输了 PIN / Trusted 在免同意名单里）, state（Pending / Active / Ended）, started_at, expires_at（等同意的截止）, accepted_at, ended_at, end_reason（declined / timeout / controller / agent / stopped / revoked / disconnected / replaced）, bytes_relayed。一台设备只允许一条未结束的记录（部分唯一索引） |
+| `device_telemetry` | device_id（主键，外键 → devices，级联删）, reported_at（服务器收到的时间）, agent_version, data jsonb（被控端上报的硬件和能力，清理过）。每台电脑一行，每次上报覆盖；不放在 devices 上，那一行每个设备令牌请求都要整行读 |
+| `remote_session_telemetry` | session_id（主键，外键 → remote_sessions，级联删）, device_id, updated_at, agent jsonb（被控端这边的汇总）, viewer jsonb（控制端浏览器这边的汇总）。每次远程一行，两边各自覆盖自己那列（结束汇总不被秒数不比它多的中途汇总覆盖）；updated_at 超过 90 天的删掉。见 4.8"远程协助遥测" |
 
 **通知与任务**
 
@@ -435,7 +437,7 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 2. Agent 第一次运行要配置串，然后带上计算机名申请 8 位设备码（`POST /api/auth/device/code`，10 分钟有效，过期自动换新），每 2 秒轮询 `/poll`。匿名接口防刷：同一来源最多同时 5 个码，全局 200 个，满了挤掉最早的未确认码（被挤掉的 Agent 轮询拿到 404 自动换新码）。
 3. 网页输入设备码，先查到电脑名核对（`/lookup`），再确认（`/confirm`）；管理员可以替家人添加（设备归家人）。默认远程名单是除主人外的所有管理员。
 4. Agent 拿到长期设备令牌，与 Access 服务令牌密钥一起用 DPAPI（当前用户）加密保存在 `%LOCALAPPDATA%\PrivateChat\Agent`。
-5. 设备令牌只能用于远程相关的接口（`/hubs/agent`、`/ws/remote`、`/api/remote/sessions`）：被控电脑上的令牌万一泄露，也拿不到主人的聊天和网盘。请求同时带 Access 头和 Bearer 时优先认设备令牌（Access 服务令牌的 JWT 没有邮箱）。
+5. 设备令牌只能用于远程相关的接口（`/hubs/agent`、`/ws/remote`、`/api/remote/sessions`、`/api/remote/agent`）：被控电脑上的令牌万一泄露，也拿不到主人的聊天和网盘。请求同时带 Access 头和 Bearer 时优先认设备令牌（Access 服务令牌的 JWT 没有邮箱）。设备令牌认出来的身份带着**主人的用户 Id 和角色**，所以这些前缀下面给人用的接口都要自己拒绝设备（`User.DeviceId()` 不为空，如发起远程、审计列表、控制端的遥测）；`/api/devices`（改名、名单、PIN、吊销都没有拦设备）和管理员看的接口（如 `/api/telemetry`）不能放进这个名单。`/api/remote/agent` 下面只放被控端自己用的接口（遥测上报）。
 
 **会话建立**
 
@@ -495,7 +497,7 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 - 自动化测试使用 `--headless --source pattern --dry-input FILE --consent accept`（测试画面、440 Hz 测试音、键鼠写日志，accept 需要 `PRIVATECHAT_AGENT_TEST=1`）。`web/e2e/remote.cjs` 检查浏览器解出的音频及开关效果。弱网测试 `web/e2e/remote-weak.cjs` 使用带采集时间码的画面，在 300 kbps、1 Mbps 及单程延迟 150 ms 的 8 Mbps 线路上统计实际帧率、端到端延迟和最长停顿。
 - Agent 的 `--selftest` 编 60 帧并写出 Annex B 文件供 ffprobe 检查，另外打印编码器逐帧调整质量和本机播放设备环回采集的探测结果。
 - 当前限制包括 UAC 提示、锁屏、Ctrl+Alt+Del 和管理员权限窗口的输入。Windows N 版需要安装媒体功能包。
-- v2：桌面复制（DXGI Desktop Duplication）+ 硬件编码（异步 MFT），SYSTEM 服务 + 用户会话助手进程解决 UAC / 锁屏 / Ctrl+Alt+Del。
+- v2：桌面复制（DXGI Desktop Duplication）+ 硬件编码（异步 MFT），SYSTEM 服务 + 用户会话助手进程解决 UAC / 锁屏 / Ctrl+Alt+Del。先用遥测看清每台电脑上这两样能不能用、有多快（见下面"远程协助遥测"）。
 - **快速线路**（0.8.0 起，服务器配了 Cloudflare Realtime 才有）：画面和声音不经我们的中继，经 Cloudflare Realtime 的 SFU 从被控端到浏览器。
   - 为什么：中继这条路是 被控端 → Cloudflare → 隧道 → 小主机 → 隧道 → Cloudflare → 浏览器，全程 TCP，画面在家里的宽带上来回各跑一遍。快速线路是 被控端 → Cloudflare 最近的节点 → 浏览器，走 UDP（SRTP），丢一个包只重发那一个包，不会把后面的都堵住。
   - 只搬画面和声音。键鼠、剪贴板、显示器、统计、会话的开始结束仍走 `/ws/remote`：只看模式的输入过滤、缺席清理、审计都不用改，切到标准线路也只是把画面切回去。
@@ -517,12 +519,42 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
   - 没做：键鼠改走 Realtime 的数据通道（SIPSorcery 的数据通道只有可靠有序而且慢）；UDP 弱网的自动化测试（`slow-link.cjs` 只能限 TCP）。
 - v3（可选）：WebRTC P2P + Cloudflare TURN，两边在同一个局域网时画面不出家门。
 
+**远程协助遥测**（被控端 0.8.6 起）
+
+为什么：家里的电脑上"远程卡、画面停住、糊"以前只能让人发日志来查；下一步要做桌面复制 + 硬件编码，也得先知道每台电脑能做什么（要支持的：NVIDIA Pascal 起如 GTX 1050 Ti、AMD Polaris 如 RX 580、Ryzen 7840HS / Radeon 780M、Intel 核显，只要 Windows 10 起）。所以被控端和控制端的浏览器自动把必要的数字报到我们自己的服务器上，管理员在设备页的"诊断"里看。记录的格式在 `PrivateChat.Contracts/RemoteTelemetry.cs`，浏览器那份照着手写在 `web/src/features/remote/telemetry.ts`（JSON 是 camelCase、枚举按字符串）。
+
+- 收什么：
+  - 这台电脑的硬件和能力（`AgentTelemetrySnapshot`，被控端每次连上服务器后报一次，`PUT /api/remote/agent/telemetry`）：系统名称 / 版本 / 内部版本号 / 版本类型，CPU 型号、核数、线程数、主频，内存；显卡（名字、厂商和设备 Id、驱动版本、显存、是不是软件适配器、接着哪几块显示器）；显示器（分辨率、刷新率、缩放、是不是主显示器、接在哪张卡上）；是不是在远程桌面（RDP）会话里；H.264 编码器（Media Foundation 的软件编码器和各家显卡的硬件编码器：能不能激活、同步 / 异步、接受哪些码率控制方式、能不能按质量编 / 逐帧给 QP / 低延迟、收不收 1080p / 4K，以及在系统内存里的 NV12 上实际编 30 帧 1920×1080：首帧、平均、p90 每帧多少毫秒，编出多少字节）；截屏（每块显示器上 Desktop Duplication 能不能用、取第一帧多久，GDI 按原尺寸截主显示器 / 缩到 1280×720 各一帧多久）；探测时出的问题。
+  - 每次远程被控端这边的汇总（`AgentSessionTelemetry`，中途每 60 秒一次、结束时一次，`PUT /api/remote/sessions/{id}/telemetry`）：中继 / 快速线路上各多少秒；用的编码器、是不是按质量编、怎么截屏；每档画质设置、每种编码尺寸各用了多少秒；每秒一个样本的发出帧率、码率、目标码率、采集耗时、编码耗时、CPU、往返时间的统计（样本数、平均、最小、p10 / p50 / p90、最大）；电脑忙不过来、在安全桌面上的秒数；自动档因为网络 / 电脑降级和退回的次数、关键帧请求、停顿、中继发送队列丢掉的帧、`MaxFps` 的次数和最低值；快速线路接通 / 失败的次数和原因；快速线路上控制端每秒回报的丢包、收到的码率、缓冲深度、它解出来的帧率；出的错。
+  - 每次远程控制端浏览器这边的汇总（`ViewerSessionTelemetry`，每 60 秒一次，结束 / 关页面时用 `sendBeacon` 再发一次，`POST /api/remote/sessions/{id}/viewer-telemetry`）：浏览器的牌子和版本、系统、屏幕大小和像素比、CPU 线程数；中继 / 快速线路上各多少秒；解出来的帧率；卡住（该有画面、页面在前台，却超过 500 ms 没出新帧）的次数、最长一次、加起来多久；请求关键帧、`MaxFps` 的次数和最低值；快速线路重接的次数和问题；缓冲深度和丢包；出的错。用户觉得卡不卡，要看的是这一份。
+- 不收什么：屏幕内容、键盘输入、剪贴板、窗口标题、文件名、用户名一律不报；浏览器只报牌子和版本（从 `navigator.userAgentData` 或 UA 里取），不报整串 UA（服务器也只留前 64 个字）。数据只在我们自己的服务器上，不发给任何第三方。
+- 被控端（`src/PrivateChat.Agent/Telemetry/`，只在 Windows 上）：
+  - 探测在**子进程**里跑：`PrivateChat.Agent.exe --probe-hardware <输出文件>`（`Program.cs` 一开头就处理，不开界面、不占单实例互斥量，做完就退出），显卡驱动崩了、卡死了也带不走被控端。父进程用低优先级（BelowNormal）启动它，并把它放进一个作业对象（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）：被控端被结束任务、崩了，子进程跟着没，不会自己接着跑、和重启后的那次探测抢编码器。60 秒没完就杀掉（快照里记"探测超时"），退出码不是 0 也记一条。子进程每做完一步就把到这一步为止的结果写一次文件，超时、崩溃时前面探到的还在。
+  - 什么时候跑：启动后自动更新的第一次检查做完了（已是最新、推迟了、检查失败、没开自动更新都算），而且连上服务器满 30 秒，才开始——免得刚启动就要换新版本时，探测的子进程（和被控端是同一个程序）还在跑。换新版本（`SwapAndRelaunch`）之前、要重启、退出时，先杀掉正在跑的子进程、删掉它的输出文件；启动时也清掉以前的进程留下的 `telemetry-probe-*.json` / `.json.tmp`。只在没有远程的时候跑；跑着的时候有人连进来就杀掉，这次远程结束后再跑。
+  - 全是手写的互操作（和 `Video/MediaFoundation.cs` 一个写法），不加 NuGet 包、不用 WMI：系统和 CPU 读注册表（`CurrentVersion`、`CentralProcessor\0`），核数线程数 `GetLogicalProcessorInformationEx`，内存 `GlobalMemoryStatusEx`，远程桌面 `GetSystemMetrics(SM_REMOTESESSION)`；显卡和"显示器接在哪张卡上"走 DXGI（`EnumAdapters1`、`CheckInterfaceSupport` 拿驱动版本、`EnumOutputs`），刷新率 `EnumDisplaySettings`，缩放 `GetDpiForMonitor`；编码器 `MFTEnumEx`（硬件、同步、异步，NV12 → H.264）加上软件编码器，能力用 `ICodecAPI` 问。异步硬件编码器的测试编码按它自己的事件（`METransformNeedInput` / `METransformHaveOutput`）驱动，10 秒放弃——写成可以复用的类，下一步的硬件编码就从它长出来。截屏：在接着这块显示器的那张卡上建 D3D11 设备、`DuplicateOutput`、等 500 ms 取一帧，用完全部释放；GDI 用现成的 `GdiScreenSource` 各截 10 次取平均。
+  - 上次探测的结果存在 `<数据目录>/telemetry.json`，带着一个指纹：程序版本、注册表里装着的显卡驱动（名字和版本）、显示器的名字和哪块是主的、是不是远程桌面会话，算 SHA-256。故意不含分辨率：全屏游戏改个分辨率不该重新探测（分辨率、刷新率、缩放每次上报前都重新读）。每次要上报时先算一遍指纹（都是便宜的读取），没变就沿用上次的显卡 / 编码器 / 截屏结果，只刷新系统、内存、显示器这些，不再起子进程；探测失败（超时、崩溃）的结果也一样沿用，免得每次连上都去碰一个会卡死的驱动。
+  - 锁着屏时探到的结果不准（桌面复制被拒、GDI 截的是锁屏画面），只算临时的：照报，但不存盘（被控端重启后重来）。有临时结果时每分钟看一次，探测满 10 分钟而且已经解锁就重新探一次，不用等重连。每份临时结果只重探这一次：解了锁桌面复制还是被拒（`E_ACCESSDENIED`），就当作最终结果存下来（带着问题说明），不再每 10 分钟探一遍。
+  - 每次连上服务器（和重新探测之后）用 REST 报，**不走 `/hubs/agent`**：SignalR 一条消息默认最多 32 KB，而且 `Report` 会让所有网页重新拉设备列表。老服务器回 404 / 405 时，这次连接里就不再试，也不报错。
+  - 会话汇总（`Session/SessionTelemetry.cs`，纯计算，不碰 Windows 接口，测试项目直接把源文件编进来测）：`SessionRunner` 每秒喂一个样本（就是发 `Stats` 的那一处），关键帧请求、停顿、换线路、改 `MaxFps`、自动档降级 / 退回、编码 / 截屏出错这些在发生的地方记次数。样本最多留 2 小时，再多就抽稀。每 60 秒报一次，会话结束时报最后一次（`Final`）：尽力而为、失败重试一次，不让会话和退出因此多等 3 秒以上。编码器和截屏方式按现在实际用的填（"Microsoft H.264（软件）"、"GDI"），以后换成硬件编码、桌面复制只要填别的值。
+- 控制端（`web/src/features/remote/viewerTelemetry.ts`，纯模块，有单元测试）：每秒喂一次 `RemoteClient` / `RemoteView` 本来就知道的东西（解出来的帧率、每帧画出来的时间用来判断卡住、发出的关键帧请求、`FrameRateGovernor` 的 `MaxFps`、现在的线路、快速线路重接和问题、`RemoteRealtime` 从 getStats 拿的缓冲和丢包），每 60 秒发一次；结束和 `pagehide` 时用 `navigator.sendBeacon` 发一个 JSON Blob（发不出去就 `fetch(…, { keepalive: true })`）。同源请求，带的就是平常的 Cookie / Access 登录。
+  - 卡住怎么算：相邻两帧隔了 500 ms 以上，而且这段时间本来该有新帧，才算一次——要么按被控端那边记的帧时间，这一帧是晚到的（这边多等了 250 ms 以上：网络堵、解码跟不上），要么这期间这个控制端不得不请求关键帧（丢了帧、解码出错、卡在补不回来的包上）。对方屏幕不动时本来就没有新帧（中继上一帧不发，快速线路上 2 秒一个保活帧），这样的空档不算；页面在后台、断线、换线路时也不看。卡了多久从"可能开始卡"的时候算，不从上一帧算：晚到的不算上一帧之后对方停着的那段，请求过关键帧的最早从第一次请求之前 1 秒算起（`StuckWatch` 最少等 1 秒才去要）——不然屏幕静止一分钟后，动起来的第一帧稍晚一点就会算成卡了一分钟。
+  - `final`：会话真的结束了（`Ended`、离开远程页时结束会话、换到另一次远程）才发 `final: true`。刷新、关标签页（`pagehide`）时会话还没结束，发的是中途汇总（`final: false`，照样用 sendBeacon，内容和上次一样也发）；刷新回来的页面从 sessionStorage 里接着上次的累计数往下数。
+- 服务器（`RemoteTelemetryService`、`TelemetrySanitizer`、`RemoteTelemetryControllers.cs`）：
+  - 谁能写：硬件只能是被控端自己（设备令牌，人来报 403）。会话里被控端那列只能是这次被控的那台电脑，控制端那列只能是这次发起远程的人（浏览器登录；设备令牌 403）；别人一律当作没有这个会话（404，和中继、快速线路一样）。会话进行中、开始过而且结束不到 24 小时都收——被控端的结束汇总总在会话结束之后才到；等同意中、没开始就结束了（拒绝、超时）、结束超过 24 小时的回 409，被控端把 404 / 409 都当作"这次不收了"。都是按设备 / 按会话覆盖（`INSERT … ON CONFLICT DO UPDATE`），重发、重试不会多出行；最后到的那份算数，只有一个例外：这一列存着的已经是结束汇总（`final`），来的却是中途汇总，而且累计秒数（被控端 `videoSeconds`、控制端 `seconds`）不比存着的多——那是排在后面晚到的旧数据（被控端重试的、关页面前还在路上的），不要它，但照样回 204（被控端、网页遇到 409 / 410 就不再报了）。秒数更多的照收：刷新以后的页面接着数，发的是中途汇总。这个判断写在同一条 upsert 的 `ON CONFLICT … DO UPDATE … WHERE` 里，看的是锁住的那一行，没有先读后写的空子。
+  - 请求体自己读：要是 JSON（415，跨站的表单发不了 JSON，所以 sendBeacon 那份也不怕被别的网站伪造），最多 64 KB（413；分块传、没有 Content-Length 的也数着读，不靠全局的 64 MB 上限），JSON 不对 400。缺了的字段不报错、补空值：遥测出了毛病不该让被控端、网页出错。进库之前清理一遍（管理员看到的就是清理完的）：字符串去掉控制字符（jsonb 不收 `\u0000`）和落单的半个代理项、截短（说明 300 字、名字 200 字、版本 32 字、浏览器和系统 64 字），列表一般最多 32 项、问题 / 出错 / 线路问题 20 条，数字不是有限值的当 0、不小于 0，尺寸、帧率、像素比这些夹到范围内；统计的样本数为 0 时其余都是 0；不认识的画质档位当自动。
+  - 谁能看：只有管理员。`GET /api/telemetry/devices/{id}?limit=20`（1–100）给这台电脑最近一次的硬件快照和收到的时间，加上最近 limit 次有遥测的远程（新的在前，带开始 / 结束时间、结束原因、模式、谁控制的、两边的汇总，哪边没报过就是空）。`/api/telemetry` 不在设备令牌能用的路径里（认证这一步就 401）；设备令牌带着主人的角色，管理员自己那台电脑上的令牌也过得了管理员策略，所以接口里再拦一道设备。
+  - 留多久：每次远程那一行，最后一次更新 90 天后删掉（`RemoteTelemetryRetentionWorker`，每小时一次）；硬件那一行跟着设备行。`remote_sessions` 里的审计记录不受影响，照旧一直留着。
+- 诊断（`DevicesPage.vue`）：只有管理员、只在装了 Agent 的电脑上，卡片的"更多"菜单里有"诊断"，打开一个对话框分三块。这台电脑：系统、CPU、内存、显卡和驱动、显示器、是不是远程桌面会话、探测时间和问题。编码和截屏：每个编码器一行（软件 / 硬件、厂商、能不能按质量 / 逐帧 QP / 1080p / 4K、测试编码每帧多少毫秒或者出的错），每块显示器桌面复制能不能用、GDI 截一帧多久。最近的远程（新的在前）：时间、多久、谁控制的、线路、画质设置、编出来的尺寸、发出 / 看到的帧率 p50 / p10、卡住次数和最长一次、采集 / 编码毫秒 p50 / p90、电脑忙的秒数、往返、丢包、自动档降级、出的错，展开看全部字段。"复制原始数据"把 JSON 放到剪贴板，贴过来就能分析。360 px 宽的手机上也能用（只有表格自己横向滚动）。
+- 关掉：被控端设环境变量 `PRIVATECHAT_AGENT_TELEMETRY=off`，不探测、什么都不报（启动时日志里记一行）。控制端浏览器那份不受这个开关影响（网页不知道被控端设了什么）。
+- 测试：`RemoteTelemetryTests`（谁能报——包括 Bob 控制自己的电脑时，管理员和管理员电脑上的设备令牌都写不进去、24 小时的窗口、重发不多出行、结束汇总不被晚到的中途汇总盖掉而秒数更多的照收、413 / 415 / 400 和清理、只有管理员能看、管理员电脑上的设备令牌也不能看、90 天清理、吊销后 401；要 PostgreSQL）、`TelemetrySanitizerTests`（清理和请求体的读法，纯计算）、`SessionTelemetryTests`（百分位、线路秒数、设置 / 尺寸记账、计数、抽稀、Final）、`viewerTelemetry` 的单元测试；`web/e2e/remote.cjs` 在主控制会话结束后用管理员打开测试电脑的诊断：硬件里有 CPU 名字和至少一张显卡，编码器里有带测试结果的软件编码器，最近的远程里有这次会话、两边的数据都在（发出帧率、看到的帧率都大于 0），普通成员看不到"诊断"按钮。
+
 **安全**
 
 - 仅 Admin / Member 可控，Child 不可；设备主人（或管理员）维护白名单与 PIN；每次会话审计（谁、何时、多久、流量、结束原因），网页"设备"页可查。
 - 默认每次都要电脑前的人点同意；无人值守 PIN 要主人主动设置。
 - 免同意名单（"谁可以不经同意直接连接"）：主人或管理员在电脑设置里按人勾选，默认为空；只能勾主人自己或远程名单里的成年成员，被移出远程名单的同时也移出这里。名单里的人点"查看 / 控制"就直接开始，不弹窗、不输 PIN。代价是少了连接时的第二道验证：谁拿到那个人已登录的设备，谁就能直接控制这台电脑，所以只该勾少数信得过的人。不变的是：被控端的红条、托盘变红、随时可断开，主人网页上的提醒，以及每次会话的审计（记录里标明"免同意"或"PIN"）；设备卡片上对主人和管理员写明"免同意：谁谁"。
 - 设备令牌可在网页一键吊销，且只能用于远程接口；中继只接受已同意会话的控制人与目标设备。Agent 本地配置里的设备令牌和 Access 密钥只存 DPAPI 加密后的值（明文属性不序列化）。
+- 远程协助遥测（见上面）只有数字、硬件和驱动型号、出错的说明，不含屏幕内容、键盘、剪贴板、窗口标题、文件名；只有管理员能看（设备令牌不行，管理员自己电脑上的也不行）；每次远程的那份 90 天后删掉；被控端可以用 `PRIVATECHAT_AGENT_TELEMETRY=off` 关掉。
 
 **RustDesk 兜底**：`docker compose --profile rustdesk up -d` 启动 hbbs / hbbr；网页"设备"页可记录成员的 RustDesk ID，一键复制或深链 `rustdesk://`。
 
@@ -574,11 +606,13 @@ Hub 路径 `/hubs/chat`，浏览器走 Cookie 认证，Agent 走 Bearer。
 
 - `jobs` 表 + HostedService 轮询（`FOR UPDATE SKIP LOCKED`）。任务类型：缩略图、转码、语音转码、推送、GC、那年今天预计算。
 - 失败重试 3 次指数退避，重启不丢；并发度 2（ffmpeg 吃 CPU），大转码低优先级。
+- 定时维护不走 jobs 表，各自一个 `BackgroundService` + `PeriodicTimer`，例如：远程会话每 5 秒（等同意超时、一端断开超过 30 秒的结束）；存储每小时（回收站 30 天、垃圾回收）；远程协助遥测每小时（`RemoteTelemetryRetentionWorker`，最后一次更新在 90 天前的每次远程汇总删掉，硬件快照跟着设备不删）。每小时的那几个启动 2 分钟后才第一次跑，别和迁移抢。
 
 ### 4.13 可观测性
 
 - Serilog 输出 stdout（`docker logs`）；`/healthz` 检查数据库、磁盘剩余空间、Cloudflare Realtime API 可达。
 - 管理页展示存储用量、任务队列、在线设备；OpenTelemetry + Prometheus 可选。
+- 远程协助：被控端和控制端浏览器的遥测汇总到服务器（4.8"远程协助遥测"），管理员在设备页的"诊断"里看每台电脑的硬件、编码 / 截屏能力和最近几次远程两边的帧率、卡顿、耗时、出错，不用再让家人发日志。
 
 ---
 
@@ -980,6 +1014,8 @@ Remote    GET /api/devices ; PATCH /api/devices/{id}（名称 / 白名单 / PIN�
           POST /api/auth/device/code（匿名） ; GET /api/auth/device/poll（匿名） ; GET /api/auth/device/lookup ; POST /api/auth/device/confirm
           POST /api/remote/sessions ; GET /api/remote/sessions/{id} ; POST /api/remote/sessions/{id}/consent（Agent） · /end
           GET /api/remote/sessions（审计） ; WS /ws/remote/{sessionId}/{agent|controller} ; SignalR /hubs/agent（设备令牌）
+          PUT /api/remote/agent/telemetry（Agent：这台电脑的硬件和能力） ; PUT /api/remote/sessions/{id}/telemetry（Agent：这次远程的汇总）
+          POST /api/remote/sessions/{id}/viewer-telemetry（控制端：这次远程的汇总，可用 sendBeacon） ; GET /api/telemetry/devices/{id}?limit=（管理员：诊断）
 Notify    GET /api/notifications ; POST /api/notifications/read ; POST/DELETE /api/push/subscribe
 Search    GET /api/search?q=&type=All|Messages|Files|Moments&cursor=&limit=
 Admin     GET /api/admin/stats ; GET /api/admin/jobs ; GET /healthz ; GET /openapi/v1.json
@@ -1018,7 +1054,7 @@ Agent 的通道 `/hubs/agent`（只认设备令牌）：
 | S→A | SessionRequested | sessionId, controllerName, mode, consent, expiresAt, active（无人值守、免同意名单时为 true，直接连数据面；consent 对 Agent 只有 Prompt / Unattended 两种） |
 | S→A | SessionEnded | sessionId, reason |
 | S→A | Revoked | 无（删本地令牌、回到设备码登记） |
-| A→S | Report | version, os, screens[]（连上后、显示器变化时） |
+| A→S | Report | version, os, screens[]（连上后、显示器变化时；遥测不走这里，走 REST，见 4.8"远程协助遥测"） |
 
 ## 附录 C · 远程控制数据面帧格式
 

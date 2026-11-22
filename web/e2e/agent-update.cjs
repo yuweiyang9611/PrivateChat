@@ -106,12 +106,16 @@ function startEntry() {
   })))
 }
 
-/** 这个数据目录上现在跑着几个被控端进程（按命令行里的数据目录认） */
-function agentPids(dataDir) {
-  const ps = `[Console]::OutputEncoding = [Text.Encoding]::UTF8; (Get-CimInstance Win32_Process -Filter "Name = 'PrivateChat.Agent.exe'" | Where-Object { $_.CommandLine -like '*${dataDir.replace(/'/g, "''")}*' } | ForEach-Object { $_.ProcessId }) -join ','`
+/**
+ * 这个数据目录上现在跑着几个被控端进程（按命令行里的数据目录认）。
+ * 硬件探测子进程（--probe-hardware，结果文件写在数据目录里，命令行里也有数据目录）不算被控端；probes = true 时连它也算上（收尾时一起结束）。
+ */
+function agentPids(dataDir, { probes = false } = {}) {
+  const probeFilter = probes ? '' : " -and $_.CommandLine -notlike '*--probe-hardware*'"
+  const ps = `[Console]::OutputEncoding = [Text.Encoding]::UTF8; (Get-CimInstance Win32_Process -Filter "Name = 'PrivateChat.Agent.exe'" | Where-Object { $_.CommandLine -like '*${dataDir.replace(/'/g, "''")}*'${probeFilter} } | ForEach-Object { $_.ProcessId }) -join ','`
   return execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' }).trim().split(',').filter(Boolean).map(Number)
 }
-const killAgents = (dataDir) => { for (const pid of agentPids(dataDir)) try { process.kill(pid) } catch { /* 已退出 */ } }
+const killAgents = (dataDir) => { for (const pid of agentPids(dataDir, { probes: true })) try { process.kill(pid) } catch { /* 已退出 */ } }
 
 ;(async () => {
   const startedAt = new Date().toISOString()
@@ -142,7 +146,7 @@ const killAgents = (dataDir) => { for (const pid of agentPids(dataDir)) try { pr
   }
   const stopAll = async () => {
     killAgents(dataDir)
-    await until(() => agentPids(dataDir).length === 0, 10000)
+    await until(() => agentPids(dataDir, { probes: true }).length === 0, 10000)
   }
   const saysSince = (mark, text, timeout) => until(() => read().slice(mark).includes(text), timeout, 100)
   const device = async () => (await api('GET', '/api/devices')).find((d) => d.id === deviceId)

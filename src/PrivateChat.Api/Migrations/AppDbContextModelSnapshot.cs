@@ -597,6 +597,32 @@ namespace PrivateChat.Api.Migrations
                     b.ToTable("devices", (string)null);
                 });
 
+            modelBuilder.Entity("PrivateChat.Api.Domain.DeviceTelemetry", b =>
+                {
+                    b.Property<Guid>("DeviceId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("device_id");
+
+                    b.Property<string>("AgentVersion")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("agent_version");
+
+                    b.Property<string>("Data")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("data");
+
+                    b.Property<DateTimeOffset>("ReportedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("reported_at");
+
+                    b.HasKey("DeviceId")
+                        .HasName("pk_device_telemetry");
+
+                    b.ToTable("device_telemetry", (string)null);
+                });
+
             modelBuilder.Entity("PrivateChat.Api.Domain.DriveNode", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1244,6 +1270,40 @@ namespace PrivateChat.Api.Migrations
                     b.ToTable("remote_sessions", (string)null);
                 });
 
+            modelBuilder.Entity("PrivateChat.Api.Domain.RemoteSessionTelemetry", b =>
+                {
+                    b.Property<Guid>("SessionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("session_id");
+
+                    b.Property<string>("Agent")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("agent");
+
+                    b.Property<Guid>("DeviceId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("device_id");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<string>("Viewer")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("viewer");
+
+                    b.HasKey("SessionId")
+                        .HasName("pk_remote_session_telemetry");
+
+                    b.HasIndex("DeviceId")
+                        .HasDatabaseName("ix_remote_session_telemetry_device_id");
+
+                    b.HasIndex("UpdatedAt")
+                        .HasDatabaseName("ix_remote_session_telemetry_updated_at");
+
+                    b.ToTable("remote_session_telemetry", (string)null);
+                });
+
             modelBuilder.Entity("PrivateChat.Api.Domain.Space", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1385,6 +1445,16 @@ namespace PrivateChat.Api.Migrations
                         .HasConstraintName("fk_conversation_members_conversations_conversation_id");
                 });
 
+            modelBuilder.Entity("PrivateChat.Api.Domain.DeviceTelemetry", b =>
+                {
+                    b.HasOne("PrivateChat.Api.Domain.Device", null)
+                        .WithOne()
+                        .HasForeignKey("PrivateChat.Api.Domain.DeviceTelemetry", "DeviceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_device_telemetry_devices_device_id");
+                });
+
             modelBuilder.Entity("PrivateChat.Api.Domain.MessageAttachment", b =>
                 {
                     b.HasOne("PrivateChat.Api.Domain.Message", null)
@@ -1413,6 +1483,16 @@ namespace PrivateChat.Api.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired()
                         .HasConstraintName("fk_post_media_posts_post_id");
+                });
+
+            modelBuilder.Entity("PrivateChat.Api.Domain.RemoteSessionTelemetry", b =>
+                {
+                    b.HasOne("PrivateChat.Api.Domain.RemoteSession", null)
+                        .WithOne()
+                        .HasForeignKey("PrivateChat.Api.Domain.RemoteSessionTelemetry", "SessionId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_remote_session_telemetry_remote_sessions_session_id");
                 });
 
             modelBuilder.Entity("PrivateChat.Api.Domain.CallParticipant", b =>

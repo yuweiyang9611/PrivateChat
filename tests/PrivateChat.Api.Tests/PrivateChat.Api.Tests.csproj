@@ -35,6 +35,8 @@
     <Compile Include="..\..\src\PrivateChat.Agent\Session\VideoSettings.cs" Link="Agent\VideoSettings.cs" />
     <Compile Include="..\..\src\PrivateChat.Agent\Session\AutoResolution.cs" Link="Agent\AutoResolution.cs" />
     <Compile Include="..\..\src\PrivateChat.Agent\Video\FrameSource.cs" Link="Agent\FrameSource.cs" />
+    <!-- 遥测：一次远程里被控端这边的汇总（百分位、每样用了几秒、计数）：同样是纯计算 -->
+    <Compile Include="..\..\src\PrivateChat.Agent\Session\SessionTelemetry.cs" Link="Agent\SessionTelemetry.cs" />
     <!-- 快速线路（经 Cloudflare Realtime）里的纯计算：H.264 的 RTP 分片、码率控制 -->
     <Compile Include="..\..\src\PrivateChat.Agent\Realtime\H264Rtp.cs" Link="Agent\H264Rtp.cs" />
     <Compile Include="..\..\src\PrivateChat.Agent\Session\RealtimeRateControl.cs" Link="Agent\RealtimeRateControl.cs" />

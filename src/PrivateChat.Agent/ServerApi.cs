@@ -117,6 +117,29 @@ public sealed class ServerApi(ServerInfo server) : IDisposable
         return (await res.Content.ReadFromJsonAsync<RemoteRealtimePublishResponse>(Json, ct))!;
     }
 
+    /// <summary>
+    /// 遥测：上报这台电脑的硬件和能力。服务器是老版本（没有这个接口）时返回 false——这次连接里就别再试了；别的错误照常抛。
+    /// </summary>
+    public async Task<bool> PutTelemetryAsync(AgentTelemetrySnapshot snapshot, CancellationToken ct)
+    {
+        using var res = await _http.SendAsync(Request(HttpMethod.Put, "api/remote/agent/telemetry", snapshot), ct);
+        if (res.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed) return false;
+        await EnsureAsync(res);
+        return true;
+    }
+
+    /// <summary>
+    /// 遥测：这次远程里被控端这边的汇总（中途每 60 秒、结束时各一次，服务器按会话覆盖）。
+    /// 服务器是老版本、或者这次会话已经不收了（结束太久、会话不是这台电脑的）返回 false；别的错误照常抛。
+    /// </summary>
+    public async Task<bool> PutSessionTelemetryAsync(Guid sessionId, AgentSessionTelemetry telemetry, CancellationToken ct)
+    {
+        using var res = await _http.SendAsync(Request(HttpMethod.Put, $"api/remote/sessions/{sessionId}/telemetry", telemetry), ct);
+        if (res.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed or HttpStatusCode.Conflict) return false;
+        await EnsureAsync(res);
+        return true;
+    }
+
     private static async Task EnsureAsync(HttpResponseMessage res)
     {
         if (res.IsSuccessStatusCode) return;

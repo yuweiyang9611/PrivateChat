@@ -14,6 +14,8 @@ import {
   StatsFlags, StatusCode, utf8Length, VIDEO_MODE_KEYS, VIDEO_PRESETS, VideoMode, WheelAccumulator, type MonitorInfo, type QualityPreset, type VideoSettings,
 } from './protocol'
 import { formatKbps } from './format'
+import { ViewerTelemetry, viewerEnvironment } from './viewerTelemetry'
+import { telemetryApi } from './telemetryApi'
 
 const props = defineProps<{ id: string }>()
 const { t } = useI18n()
@@ -67,6 +69,66 @@ const textValue = ref('')
 const now = ref(Date.now())
 let client: RemoteClient | null = null
 let tick: number | undefined
+
+/**
+ * 这次远程里控制端这边的遥测（看到的帧率、卡住几次……，docs/DESIGN.md"远程协助遥测"）：跨重连、接手留着，
+ * 每 60 秒报一次，结束、离开页面时报最后那份（final），关页面、刷新时会话还在就再报一份中途的（服务器按会话覆盖）。
+ * 刷新页面接着同一次远程时，关页面前存到 sessionStorage 里、回来接着记。
+ * 被别的窗口 / 设备接手了就不再报（那边报它自己看到的）。服务器明确不收（老版本、过了时间）就这次远程不再报。
+ */
+const TELEMETRY_EVERY_MS = 60_000
+const TELEMETRY_SAVED_KEY = 'remote.telemetry.'
+let telemetry: { sessionId: string; data: ViewerTelemetry; off: boolean; sentRevision: number; sentFinal: boolean } | null = null
+let telemetryTimer: number | undefined
+
+function telemetryFor(id: string): ViewerTelemetry {
+  if (telemetry?.sessionId === id) return telemetry.data
+  reportTelemetry(true)
+  let data: ViewerTelemetry | null = null
+  try {
+    const saved = sessionStorage.getItem(TELEMETRY_SAVED_KEY + id)
+    sessionStorage.removeItem(TELEMETRY_SAVED_KEY + id)
+    if (saved) data = ViewerTelemetry.restore(JSON.parse(saved))
+  } catch {
+    // 无痕窗口等存不了、存的东西坏了：从头记
+  }
+  telemetry = { sessionId: id, data: data ?? new ViewerTelemetry(), off: false, sentRevision: -1, sentFinal: false }
+  return telemetry.data
+}
+
+/**
+ * 报一份汇总。final：这次远程在这边结束了（结束、离开、换成下一次远程）的最后那份，已经报过、之后也没变就不再报。
+ * beacon：用 sendBeacon（最后那份、关页面 / 刷新时那份），页面没了也送得出去；关页面时那份没有新东西也报（时长还在涨）。
+ * 别的中途那份没有新东西就不报
+ */
+function reportTelemetry(final: boolean, beacon = final): void {
+  const tel = telemetry
+  if (!tel || tel.off || !tel.data.started) return
+  if (tel.data.revision === tel.sentRevision && (final ? tel.sentFinal : !beacon)) return
+  tel.sentRevision = tel.data.revision
+  tel.sentFinal = final
+  const body = tel.data.snapshot(performance.now(), viewerEnvironment(), final)
+  void telemetryApi.viewer(tel.sessionId, body, beacon).then((ok) => {
+    if (!ok) tel.off = true
+  })
+}
+
+/**
+ * 关页面（或刷新）：会话还没结束的话只报一份中途的（刷新回来接着记，最后那份等结束时再报），再存下来；已经结束了才报最后那份。
+ * 会话还在时不报 final：服务器收到 final 以后不再收秒数没它多的中途那份（刷新回来没读到存的数、从头记的话就全丢了）
+ */
+function onPageHide(): void {
+  if (replaced.value) return
+  const ended = !session.value || !!session.value.endedAt
+  reportTelemetry(ended, true)
+  const tel = telemetry
+  if (!tel || ended) return
+  try {
+    sessionStorage.setItem(TELEMETRY_SAVED_KEY + tel.sessionId, JSON.stringify(tel.data))
+  } catch {
+    // 存不了：刷新回来从头记
+  }
+}
 
 const session = computed(() => remote.sessions[props.id])
 const control = computed(() => session.value?.mode === 'Control')
@@ -194,6 +256,10 @@ onMounted(async () => {
   document.addEventListener('paste', onPaste)
   document.addEventListener('visibilitychange', releaseAll)
   window.addEventListener('blur', releaseAll)
+  window.addEventListener('pagehide', onPageHide)
+  telemetryTimer = window.setInterval(() => {
+    if (!replaced.value) reportTelemetry(false)
+  }, TELEMETRY_EVERY_MS)
   try {
     await remote.get(props.id)
   } catch {
@@ -203,11 +269,14 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.clearInterval(tick)
+  window.clearInterval(telemetryTimer)
   document.removeEventListener('fullscreenchange', onFullscreenChange)
   document.removeEventListener('paste', onPaste)
   document.removeEventListener('visibilitychange', releaseAll)
   window.removeEventListener('blur', releaseAll)
+  window.removeEventListener('pagehide', onPageHide)
   stopClient()
+  if (!replaced.value) reportTelemetry(true)
   if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined)
 })
 
@@ -221,6 +290,8 @@ onBeforeRouteLeave(() => {
 watch(() => props.id, (id, old) => {
   if (id === old) return
   stopClient()
+  if (!replaced.value) reportTelemetry(true)
+  telemetry = null
   notFound.value = false
   replaced.value = false
   link.value = 'connecting'
@@ -245,6 +316,7 @@ watch([state, canvas], async ([s]) => {
     startClient()
   } else if (s === 'Ended') {
     stopClient()
+    if (!replaced.value) reportTelemetry(true)
   }
 }, { immediate: true })
 
@@ -278,7 +350,11 @@ function startClient(): void {
       if (client !== c) return
       client = null
       sentButtons.clear()
-      if (why === 'replaced') replaced.value = true
+      if (why === 'replaced') {
+        // 在别的窗口 / 设备上接着用了：把这边看到的先报上去，之后由那边报
+        reportTelemetry(false)
+        replaced.value = true
+      }
       void remote.get(props.id).catch(() => undefined)
     },
     unsupported: () => (unsupported.value = true),
@@ -288,7 +364,7 @@ function startClient(): void {
       // 快速线路接不上、中途断了：不自动换线路，把原因摆在画面上，由用户决定要不要切到标准线路
       lineProblem.value = problem ?? null
     },
-  })
+  }, telemetryFor(props.id))
   client = c
   // 画质按这台设备上记着的来：先交给它记着，对方连上来就发（老版本的程序按最接近的那一档）
   quality.value = legacyQualityOf(videoSettings.value)

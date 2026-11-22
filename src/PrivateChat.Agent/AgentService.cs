@@ -6,6 +6,7 @@ using Microsoft.Win32;
 using PrivateChat.Agent.Audio;
 using PrivateChat.Agent.Input;
 using PrivateChat.Agent.Session;
+using PrivateChat.Agent.Telemetry;
 using PrivateChat.Agent.Ui;
 using PrivateChat.Agent.Video;
 using PrivateChat.Contracts.Remote;
@@ -51,6 +52,13 @@ public sealed class AgentService
     private string? _lastProblem;
     private int _sameProblem;
     private string? _transportLogged;
+    /// <summary>遥测里"这台电脑的硬件和能力"：连上服务器就报（要探测先在子进程里探测）。关了遥测是 null。</summary>
+    private readonly HardwareTelemetry? _telemetry;
+    /// <summary>
+    /// 启动后第一次查更新做完了（已是最新、暂缓、出错，或者没启用自动升级）：硬件探测等它再起子进程——
+    /// 刚连上就发现新版本的话，探测到一半会被换版本打断，新版本还得重来。换成了新版本就一直不完成（这个进程马上退出）。
+    /// </summary>
+    private readonly TaskCompletionSource _firstUpdateCheck = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public AgentService(AgentOptions options, IAgentUi ui)
     {
@@ -59,6 +67,8 @@ public sealed class AgentService
         _input = new InputController(options.DryInputPath is { } path ? new DryRunInputSink(path) : new SendInputSink());
         _config = AgentConfig.Load(options.DataDir);
         _updater = new Updater(options.DataDir);
+        if (SessionTelemetry.Disabled) AgentLog.Info($"遥测已用环境变量 {SessionTelemetry.SwitchVariable} 关闭：不探测硬件，也不上报");
+        else _telemetry = new HardwareTelemetry(options.DataDir, () => _runner is not null, _firstUpdateCheck.Task);
         ui.DisconnectRequested += () => _ = DisconnectLocallyAsync();
         ui.SetupRequested += () => _reset?.Cancel();
     }
@@ -71,6 +81,7 @@ public sealed class AgentService
     public async Task RunAsync(CancellationToken ct)
     {
         _ = UpdateLoopAsync(ct);
+        _telemetry?.Start(ct);
         string? setupError = null;
         while (!ct.IsCancellationRequested)
         {
@@ -143,6 +154,7 @@ public sealed class AgentService
         if (Updater.DisabledReason() is { } reason)
         {
             AgentLog.Info($"自动升级没有启用：{reason}");
+            _firstUpdateCheck.TrySetResult();
             return;
         }
         // 单实例已交接，但 Windows 可能仍占着旧 exe。只在第一次检查前串行重试清理。
@@ -165,6 +177,7 @@ public sealed class AgentService
             wait = Updater.CheckInterval;
             if (!_config.HasServer) wait = TimeSpan.FromMinutes(1);
             else
+            {
                 try
                 {
                     var outcome = await TryUpdateAsync(ct);
@@ -181,6 +194,8 @@ public sealed class AgentService
                     AgentLog.Warn($"自动升级没有成功，稍后再试：{ex.Message}");
                     wait = TimeSpan.FromMinutes(30);
                 }
+                _firstUpdateCheck.TrySetResult(); // 硬件探测在等这第一次（见 HardwareTelemetry）
+            }
         }
     }
 
@@ -206,7 +221,17 @@ public sealed class AgentService
         try
         {
             if (_runner is not null) return UpdateOutcome.Deferred; // 下载的工夫开始了远程：文件留着，结束后直接换
-            _updater.SwapAndRelaunch(downloaded, Version, Environment.GetCommandLineArgs()[1..]);
+            // 新版本马上要起来：正在跑的硬件探测先杀掉、删掉它的结果文件（新版本连上以后自己探测）；换不成就接着可以探测
+            _telemetry?.Suspend();
+            try
+            {
+                _updater.SwapAndRelaunch(downloaded, Version, Environment.GetCommandLineArgs()[1..]);
+            }
+            catch
+            {
+                _telemetry?.Resume();
+                throw;
+            }
             _updating = true;
             _consent?.Cancel();
             AgentLog.Info($"已换成新版本 {manifest.Version} 并启动，这个进程退出");
@@ -397,6 +422,7 @@ public sealed class AgentService
         {
             await SetConnectionStateAsync(AgentState.Online, "在线");
             await ReportAsync(hub);
+            _telemetry?.Connected(server);
         };
         hub.Closed += _ =>
         {
@@ -425,6 +451,7 @@ public sealed class AgentService
         try { _updateSignal.Release(); } catch (SemaphoreFullException) { } // 顺便查一下有没有新版本
         await SetConnectionStateAsync(AgentState.Online, "在线");
         await ReportAsync(hub);
+        _telemetry?.Connected(server); // 硬件和能力走 REST，不走 hub（后台做，这里立刻返回）
         EventHandler displayChanged = (_, _) => _ = ReportAsync(hub);
         if (!_options.Headless) SystemEvents.DisplaySettingsChanged += displayChanged;
         try
@@ -439,6 +466,7 @@ public sealed class AgentService
         finally
         {
             if (!_options.Headless) SystemEvents.DisplaySettingsChanged -= displayChanged;
+            _telemetry?.Disconnected();
         }
     }
 
@@ -526,6 +554,7 @@ public sealed class AgentService
     {
         var runner = new SessionRunner(request, _server!, CreateSource, CreateAudioSource, _input, _ui);
         _runner = runner;
+        _telemetry?.SessionStarted(); // 正在探测就停下（试编码器、桌面复制会和远程抢显卡），远程结束后再来
         runner.Start();
         _ui.ShowBanner(request);
         _ui.SetState(AgentState.InSession, $"正在被 {request.ControllerName} 远程");
@@ -664,6 +693,7 @@ public sealed class AgentService
         _ui.ShowBanner(null);
         _ui.SetState(_connectionState.State, _connectionState.Detail);
         await runner.DisposeAsync();
+        _telemetry?.SessionEnded();
     }
 }
 

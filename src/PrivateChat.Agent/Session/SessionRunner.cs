@@ -26,6 +26,8 @@ namespace PrivateChat.Agent.Session;
 /// - 断线（网络切换）30 秒内自动重连；服务端以 4001 关闭表示会话结束。
 /// - 快速线路：控制端要求时（SetTransport）把画面和声音改经 Cloudflare Realtime 发（<see cref="RealtimePublisher"/>），
 ///   不再绕回家里的服务器；键鼠、剪贴板这些仍走上面那条连接。接不通、中途断了、控制端收不到，都自动回到中继。
+/// - 遥测：这次远程的汇总（<see cref="SessionTelemetry"/>：帧率、码率、采集 / 编码用时、线路、出的问题）中途每 60 秒、结束时各报一次给服务器，
+///   管理员在设备页的"诊断"里看。环境变量 PRIVATECHAT_AGENT_TELEMETRY=off 时不收集也不报。
 /// </summary>
 public sealed class SessionRunner : IAsyncDisposable
 {
@@ -79,6 +81,14 @@ public sealed class SessionRunner : IAsyncDisposable
     private const int LineKeepAliveMs = 2_000;
     /// <summary>只有一个 TOC 字节的 Opus 包（CELT 全频带、20 ms、双声道、没有数据）：解出来是静音，用来保活声音轨道。</summary>
     private static readonly byte[] OpusSilence = [0xFC];
+    /// <summary>遥测：中途每隔这么久报一次到现在为止的汇总（服务器按会话覆盖）。</summary>
+    private const int TelemetryCheckpointMs = 60_000;
+    /// <summary>遥测：中途那几份每份最多等这么久。</summary>
+    private const int TelemetryCheckpointTimeoutMs = 15_000;
+    /// <summary>遥测：结束时那一份（含一次重试）最多等这么久，到点就算了——不拖住会话的收尾。</summary>
+    private const int TelemetryFinalBudgetMs = 3000;
+    /// <summary>遥测里记的编码器（现在只有 Media Foundation 自带的软件编码器）。</summary>
+    private const string SoftwareEncoderName = "Microsoft H.264（软件）";
 
     private readonly AgentSessionRequest _request;
     private readonly ServerInfo _server;
@@ -117,6 +127,9 @@ public sealed class SessionRunner : IAsyncDisposable
     /// <summary>采集线程写：自动档因为什么降了分辨率（<see cref="RemoteStatsFlags"/> 的低两位）、现在按每秒几帧发。</summary>
     private volatile int _autoFlags;
     private volatile int _fpsInUse;
+    /// <summary>采集线程写，统计线程读（遥测）：现在编的画面多大（高 32 位是宽、低 32 位是高；没有编码器时是 0）、在不在锁屏 / 安全提示界面。</summary>
+    private long _encodedSize;
+    private volatile bool _secureDesktop;
     private volatile int _lineRttMs;
     private uint _pingSequence;
     private uint _clipboardSeq;
@@ -142,6 +155,17 @@ public sealed class SessionRunner : IAsyncDisposable
     private int _lineGeneration;
     private long _lastLineKeyAt = -10_000;
     private string _lastLinePath = "";
+
+    /// <summary>这次远程的遥测汇总；环境变量 PRIVATECHAT_AGENT_TELEMETRY=off 时是 null（不收集、不上报）。</summary>
+    private readonly SessionTelemetry? _telemetry = SessionTelemetry.Disabled ? null : new SessionTelemetry(AgentService.Version);
+    /// <summary>每 60 秒报一次的那个循环（会话收尾时随 _cts 取消；最后一份要等它收掉再报）。</summary>
+    private Task _telemetryLoop = Task.CompletedTask;
+    /// <summary>服务器不收（老版本服务器、这次会话已经不收了）：这次远程里不再报。</summary>
+    private volatile bool _telemetryStopped;
+    /// <summary>上次报出去的那份是汇总的第几笔（<see cref="SessionTelemetry.Revision"/>）：没变就不报。</summary>
+    private int _telemetrySent = -1;
+    private int _telemetryFailureLogged;
+    private int _telemetryFinalStarted;
 
     private sealed class Line(RealtimePublisher publisher, RealtimeRateController rate, long readyAt)
     {
@@ -187,6 +211,7 @@ public sealed class SessionRunner : IAsyncDisposable
         _video.Start();
         _audio = new Thread(AudioLoop) { IsBackground = true, Name = "remote-audio" };
         _audio.Start();
+        if (_telemetry is not null) _telemetryLoop = Task.Run(TelemetryLoopAsync);
     }
 
     private void Finish(string reason) => _finished.TrySetResult(reason);
@@ -224,10 +249,12 @@ public sealed class SessionRunner : IAsyncDisposable
                     }
                     if (DateTime.UtcNow - lastUp > ReconnectWindow)
                     {
+                        _telemetry?.OnError("数据通道 30 秒都没连上，会话结束");
                         Finish("连不上服务器");
                         return;
                     }
                     AgentLog.Warn($"远程数据通道连接失败，{delay} ms 后重试：{ex.Message}");
+                    _telemetry?.OnError($"数据通道连接失败：{ex.Message}");
                     await Task.Delay(delay, ct);
                     delay = Math.Min(delay * 2, 5000);
                     continue;
@@ -248,6 +275,7 @@ public sealed class SessionRunner : IAsyncDisposable
                 catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or IOException)
                 {
                     AgentLog.Warn($"远程数据通道断开：{ex.Message}");
+                    if (!ct.IsCancellationRequested) _telemetry?.OnError($"数据通道断开：{ex.Message}");
                 }
                 _connection = null;
                 SetPeer(false);
@@ -268,6 +296,7 @@ public sealed class SessionRunner : IAsyncDisposable
         catch (Exception ex)
         {
             AgentLog.Error("远程会话出错", ex);
+            _telemetry?.OnError($"远程会话出错：{ex.Message}");
         }
         finally
         {
@@ -385,6 +414,7 @@ public sealed class SessionRunner : IAsyncDisposable
                 // 控制端丢掉了解码器里的帧，不会再确认它们：在途的清空，马上发关键帧
                 _net.ForgetInFlight();
                 _keyRequested = true;
+                _telemetry?.OnKeyFrameRequested();
                 if (VerboseLine) AgentLog.Info("快速线路：控制端经控制通道要关键帧");
                 return;
             case ControlFrame.SetVideo v:
@@ -416,6 +446,7 @@ public sealed class SessionRunner : IAsyncDisposable
                         _ => $"控制端解码跟不上，请这边每秒最多发 {m.Fps} 帧",
                     });
                 _clientMaxFps = m.Fps;
+                _telemetry?.OnMaxFps(before, m.Fps);
                 // 要得比之前少：之前那些"确认来得晚"是它在排队解码，不是网络堵——因此降的码率补回来
                 if (m.Fps > 0 && (before <= 0 || m.Fps < before)) _net.ReceiverWasBehind(_clock.ElapsedMilliseconds);
                 return;
@@ -446,6 +477,8 @@ public sealed class SessionRunner : IAsyncDisposable
                         reported.Confirmed = true;
                         AgentLog.Info("控制端已经在快速线路上收到画面，画面和声音不再经中继");
                     }
+                    // 遥测只记确认之后的汇报：之前它还没在这条线路上收到画面，帧率是 0，记进去像是卡住了
+                    if (reported.Confirmed) _telemetry?.OnReceiverReport(r.LossPermille, r.ReceivedKbps, r.JitterBufferMs, r.Fps);
                     if (slowed is not null) AgentLog.Info($"快速线路降码率：{slowed}");
                     if (VerboseLine) AgentLog.Info($"快速线路汇报：丢包 {r.LossPermille / 10.0:0.#}%，收 {r.ReceivedKbps} kbps，缓冲 {r.JitterBufferMs} ms，{r.Fps} fps，往返 {r.RttMs} ms；发 {reported.Rate.SentKbps} kbps，目标 {reported.Rate.TargetKbps} kbps，重发 {reported.Publisher.Resent} 包");
                 }
@@ -548,6 +581,7 @@ public sealed class SessionRunner : IAsyncDisposable
             if (!_realtimeOffered)
             {
                 Send(RemoteFrames.Transport(RemoteTransportState.RealtimeFailed, _lineGeneration, "服务器没有开快速线路"));
+                _telemetry?.OnLineFailed("服务器没有开快速线路");
                 return;
             }
             _lineStarting = true;
@@ -622,6 +656,7 @@ public sealed class SessionRunner : IAsyncDisposable
             publisher = null; // 归 _line 管了
             Send(RemoteFrames.Transport(RemoteTransportState.Realtime, generation));
             AgentLog.Info("快速线路已接通（经 Cloudflare Realtime），等控制端接上");
+            _telemetry?.OnLineConnected();
             // 登记事件之前连接可能已经断了
             if (line.Publisher.State is RealtimeLinkState.Failed or RealtimeLinkState.Closed) FailRealtime(line, "连接断开");
         }
@@ -637,6 +672,7 @@ public sealed class SessionRunner : IAsyncDisposable
             var reason = ex is OperationCanceledException ? "超时" : ex.Message;
             if (reason.Length > 120) reason = reason[..120];
             AgentLog.Warn($"快速线路没接通，画面继续走中继：{reason}");
+            _telemetry?.OnLineFailed($"没接通：{reason}");
             Send(RemoteFrames.Transport(RemoteTransportState.RealtimeFailed, _lineGeneration, reason));
         }
         finally
@@ -666,14 +702,15 @@ public sealed class SessionRunner : IAsyncDisposable
     /// <summary>
     /// 不走快速线路了，画面和声音回到中继（采集线程发现线路变了会从关键帧开始）。
     /// only 不为空时只在当前线路就是它时才停；state 不为空时告诉控制端。
+    /// 返回这次是不是真摘下了一条线路（在 _lineGate 里定的：几个地方同时来停同一条线路，只有一个拿到 true）。
     /// </summary>
-    private void StopRealtime(RemoteTransportState? state, string reason = "", Line? only = null)
+    private bool StopRealtime(RemoteTransportState? state, string reason = "", Line? only = null)
     {
         Line? line;
         int generation;
         lock (_lineGate)
         {
-            if (only is not null && !ReferenceEquals(_line, only)) return;
+            if (only is not null && !ReferenceEquals(_line, only)) return false;
             _lineAttempt++; // 正在接的那次作废
             _lineStarting = false;
             line = _line;
@@ -683,13 +720,16 @@ public sealed class SessionRunner : IAsyncDisposable
         // 关连接要一点时间，而且可能就是在它自己的回调里走到这儿的：换个线程关
         if (line is not null) _ = Task.Run(line.Publisher.Dispose);
         if (state is { } s) Send(RemoteFrames.Transport(s, generation, reason));
+        return line is not null;
     }
 
     private void FailRealtime(Line line, string reason)
     {
-        if (!ReferenceEquals(_line, line)) return;
+        // 同一次断开可能几处同时发现（连接状态回调、断开 5 秒的计时、统计线程的检查、刚接通时的那次检查）：
+        // 只有真把这条线路摘下来的那一处记日志、算一次失败
+        if (!StopRealtime(RemoteTransportState.RealtimeFailed, reason, line)) return;
         AgentLog.Warn($"快速线路不能用了，画面改回中继：{reason}");
-        StopRealtime(RemoteTransportState.RealtimeFailed, reason, line);
+        _telemetry?.OnLineFailed(reason);
     }
 
     private void OnLineState(Line line, RealtimeLinkState state)
@@ -716,6 +756,7 @@ public sealed class SessionRunner : IAsyncDisposable
         if (now - Interlocked.Read(ref _lastLineKeyAt) < 500) return;
         Interlocked.Exchange(ref _lastLineKeyAt, now);
         _keyRequested = true;
+        _telemetry?.OnKeyFrameRequested();
     }
 
     /// <summary>每半秒看一次快速线路还好不好：控制端一直没接上、或者很久没回报了，就回中继。</summary>
@@ -792,8 +833,18 @@ public sealed class SessionRunner : IAsyncDisposable
                     // 没发过 SetVideo 的是旧网页：它按"目标码率低于上限的四成"提示网络较慢，上限 8000 时 3200 kbps 以下都算慢，
                     // 而画面不动时目标码率不往上涨，快网上也常年显示网络较慢。报给它的上限最多 5000：门槛是 2000 kbps，和新网页一样
                     var max = _videoSettingsSeen ? net.MaxKbps : Math.Min(net.MaxKbps, LegacyReportedMaxKbps);
-                    Send(RemoteFrames.Stats(new StatsFrame((int)Math.Round((frames - framesBefore) / seconds), (int)((bytes - bytesBefore) * 8 / 1000 / seconds), cpuPercent, rtt, target, max,
-                        captureMs10, encodeMs10, flags)));
+                    var sentFps = (int)Math.Round((frames - framesBefore) / seconds);
+                    var sentKbps = (int)((bytes - bytesBefore) * 8 / 1000 / seconds);
+                    Send(RemoteFrames.Stats(new StatsFrame(sentFps, sentKbps, cpuPercent, rtt, target, max, captureMs10, encodeMs10, flags)));
+                    if (_telemetry is { } telemetry)
+                    {
+                        // 这一秒一帧没编：采集、编码用时没有量到（不是 0 ms）
+                        var costed = measured > measuredBefore;
+                        var size = Interlocked.Read(ref _encodedSize);
+                        telemetry.Sample(new SessionSecond(sentFps, sentKbps, target, costed ? captureMs10 / 10.0 : null, costed ? encodeMs10 / 10.0 : null,
+                            cpuPercent, rtt, (flags & RemoteStatsFlags.CpuBound) != 0, line is not null, _settings,
+                            (int)(size >> 32), (int)(size & 0xFFFF_FFFF), _secureDesktop));
+                    }
                     // 码率明显变了记一笔：事后看日志能知道当时网络怎么样
                     if (lastTarget == 0 || Math.Abs(target - lastTarget) > lastTarget / 3)
                     {
@@ -887,15 +938,19 @@ public sealed class SessionRunner : IAsyncDisposable
         {
             source = _sourceFactory();
             var realScreen = source is GdiScreenSource;
+            // 遥测里记的截屏方式（测试画面不是真的截屏）
+            var captureName = realScreen ? "GDI" : "测试画面";
             while (!_cts.IsCancellationRequested)
             {
                 if (!_peer || _connection is null)
                 {
                     encoder?.Dispose();
                     encoder = null;
+                    Interlocked.Exchange(ref _encodedSize, 0);
                     hasPrevious = false;
                     // 控制端重新连上来时重新检查一遍锁屏状态并告诉它（不然它只看到"正在连接"）
                     secure = false;
+                    _secureDesktop = false;
                     lastDesktopCheck = -10_000;
                     Thread.Sleep(50);
                     continue;
@@ -941,6 +996,7 @@ public sealed class SessionRunner : IAsyncDisposable
                     if (s != secure)
                     {
                         secure = s;
+                        _secureDesktop = s;
                         Send(RemoteFrames.Status(s ? RemoteStatusCode.SecureDesktop : RemoteStatusCode.Ok, s ? "对方电脑在锁屏或系统安全提示界面" : ""));
                         if (!s) _keyRequested = true;
                     }
@@ -989,7 +1045,10 @@ public sealed class SessionRunner : IAsyncDisposable
                     // 码率改由另一条线路的那一套来定：之前那条线路"一直很慢"的结论不作数了，自动档因为网络慢降的分辨率退回去重新判断
                     lastNet = net;
                     if (settings.AutoResolution && settings == autoFor && auto.OnNetworkChanged(frameInterval, now) is { } back)
+                    {
                         AgentLog.Info(back);
+                        _telemetry?.OnAutoStep(SessionTelemetry.AutoStep.Network);
+                    }
                 }
 
                 net.Tick(now);
@@ -998,6 +1057,7 @@ public sealed class SessionRunner : IAsyncDisposable
                     // 最早那帧十秒都没确认：控制端多半丢了它，从关键帧重新开始
                     net.ForgetInFlight();
                     _keyRequested = true;
+                    _telemetry?.OnStall();
                 }
                 // 码率预算用完了、或者前面的帧还堵在路上：先不采，等一等（延迟不累积）
                 if (!net.CanSend(now, frameMs)) continue;
@@ -1014,7 +1074,11 @@ public sealed class SessionRunner : IAsyncDisposable
                     }
                     // 画面在不在动：上一次采集时变了，或者最近 300 ms 里变过（和下面的 sustained 一样）
                     var moving = changedLastTime || now - lastChangeAt < 300;
-                    if (auto.OnNetwork(net.TargetKbps, moving, frameInterval, now) is { } step) AgentLog.Info(step);
+                    if (auto.OnNetwork(net.TargetKbps, moving, frameInterval, now) is { } step)
+                    {
+                        AgentLog.Info(step);
+                        _telemetry?.OnAutoStep(SessionTelemetry.AutoStep.Network);
+                    }
                 }
                 _autoFlags = settings.AutoResolution ? (int)auto.Flags : 0;
                 var (width, height) = settings.AutoResolution ? auto.Size : settings.Box(screen.Bounds.Width, screen.Bounds.Height);
@@ -1025,6 +1089,8 @@ public sealed class SessionRunner : IAsyncDisposable
                     built = settings;
                     encoder?.Dispose();
                     encoder = new H264Encoder(width, height, settings.Fps, settings.MaxKbps, quality: 30);
+                    Interlocked.Exchange(ref _encodedSize, ((long)width << 32) | (uint)height);
+                    _telemetry?.SetPipeline(SoftwareEncoderName, encoder.QualityMode, captureName);
                     planner = new QualityPlanner(width, height, settings.Ceiling);
                     changed = new bool[FrameTiles.Count(width, height)];
                     _net.SetMax(settings.MaxKbps);
@@ -1135,11 +1201,14 @@ public sealed class SessionRunner : IAsyncDisposable
                 Interlocked.Increment(ref _measuredFrames);
                 // 自动档只看画面持续在动时的帧：偶尔一帧（打字、鼠标）慢一点不要紧。
                 // 电脑忙降了一级、或者降了发现没快多少又退回去：下一轮按新的大小重建编码器
+                var rungBefore = auto.Rung;
                 if (settings.AutoResolution && changedTiles > 0 && sustained
                     && auto.OnFrameCost((captureTicks + encodeTicks) * 1000.0 / Stopwatch.Frequency, frameInterval, now) is { } cpuStep)
                 {
                     AgentLog.Info(cpuStep);
                     _autoFlags = (int)auto.Flags;
+                    // 降到了更小的一级是"电脑忙降的"，回到了更大的一级是"降了没用退回去"
+                    _telemetry?.OnAutoStep(auto.Rung > rungBefore ? SessionTelemetry.AutoStep.Cpu : SessionTelemetry.AutoStep.CpuUndo);
                 }
                 if (output is not { } encoded) continue;
                 lastTimestamp = ts;
@@ -1156,6 +1225,7 @@ public sealed class SessionRunner : IAsyncDisposable
                 {
                     // 发送队列满了（网络发不动）：这一帧丢了，后面的 P 帧解不出来，下一帧从关键帧开始
                     _keyRequested = true;
+                    _telemetry?.OnRelaySendDrop();
                     continue;
                 }
                 net.OnSent(ts, bytes, now);
@@ -1167,6 +1237,7 @@ public sealed class SessionRunner : IAsyncDisposable
         catch (Exception ex)
         {
             AgentLog.Error("采集 / 编码出错", ex);
+            _telemetry?.OnError($"采集 / 编码出错：{ex.Message}");
             Send(RemoteFrames.Status(RemoteStatusCode.CaptureFailed, ex.Message));
             Thread.Sleep(300); // 让这条状态先发出去
             Finish("采集失败");
@@ -1236,7 +1307,11 @@ public sealed class SessionRunner : IAsyncDisposable
                     source?.Dispose();
                     source = null;
                     filled = 0;
-                    if (++failures == 1) AgentLog.Warn($"声音采集出错，稍后重试：{ex.Message}");
+                    if (++failures == 1)
+                    {
+                        AgentLog.Warn($"声音采集出错，稍后重试：{ex.Message}");
+                        _telemetry?.OnError($"声音采集出错：{ex.Message}");
+                    }
                     if (failures == 3 && !complained)
                     {
                         complained = true;
@@ -1292,6 +1367,7 @@ public sealed class SessionRunner : IAsyncDisposable
         {
             // 声音出问题不影响画面和键鼠
             AgentLog.Error("声音线程出错", ex);
+            _telemetry?.OnError($"声音线程出错：{ex.Message}");
         }
         finally
         {
@@ -1299,9 +1375,103 @@ public sealed class SessionRunner : IAsyncDisposable
         }
     }
 
+    // ---- 遥测：这次远程的汇总报给服务器（docs/DESIGN.md"远程协助遥测"）----
+
+    /// <summary>每 60 秒把到现在为止的汇总报一次（会话收尾时随 _cts 取消，最后那份由 <see cref="DisposeAsync"/> 报）。</summary>
+    private async Task TelemetryLoopAsync()
+    {
+        var ct = _cts.Token;
+        try
+        {
+            while (!_telemetryStopped && !ct.IsCancellationRequested)
+            {
+                await Task.Delay(TelemetryCheckpointMs, ct);
+                await ReportCheckpointAsync(ct);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            TelemetryFailed(ex);
+        }
+    }
+
+    /// <summary>中途的一份：上次报过之后什么都没变（控制端一直没连着）就不报；失败了等下一分钟。</summary>
+    private async Task ReportCheckpointAsync(CancellationToken ct)
+    {
+        if (_telemetry is not { } telemetry || _telemetryStopped) return;
+        var revision = telemetry.Revision;
+        if (revision == _telemetrySent) return;
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TelemetryCheckpointTimeoutMs);
+            await SendTelemetryAsync(telemetry.Build(final: false), timeout.Token);
+            _telemetrySent = revision;
+        }
+        catch (Exception ex)
+        {
+            // 会话在收尾（取消了）不算失败
+            if (!ct.IsCancellationRequested) TelemetryFailed(ex);
+        }
+    }
+
+    /// <summary>
+    /// 会话收尾时的最后一份（Final）：先等中途那份收掉（它随 _cts 取消了；不等的话它要是晚到服务器，会把最后这份盖掉），
+    /// 再报；网络出错（不是服务器明确拒绝）隔一下重试一次。一共最多 <see cref="TelemetryFinalBudgetMs"/>，到点就算了。不抛异常。
+    /// </summary>
+    private async Task ReportFinalAsync()
+    {
+        if (_telemetry is not { } telemetry) return;
+        try
+        {
+            using var budget = new CancellationTokenSource(TelemetryFinalBudgetMs);
+            await _telemetryLoop.WaitAsync(budget.Token);
+            if (_telemetryStopped) return;
+            var report = telemetry.Build(final: true);
+            for (var attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    await SendTelemetryAsync(report, budget.Token);
+                    return;
+                }
+                catch (Exception ex) when (attempt == 1 && !budget.IsCancellationRequested && ex is not ServerException { Status: < HttpStatusCode.InternalServerError })
+                {
+                    await Task.Delay(200, budget.Token);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            TelemetryFailed(ex);
+        }
+    }
+
+    /// <summary>报一份。服务器不收（老版本服务器、这次会话已经不收了）时这次远程里不再报；网络、服务器出错照常抛。</summary>
+    private async Task SendTelemetryAsync(AgentSessionTelemetry report, CancellationToken ct)
+    {
+        using var api = new ServerApi(_server);
+        if (await api.PutSessionTelemetryAsync(Id, report, ct)) return;
+        _telemetryStopped = true;
+        AgentLog.Info("服务器不收这次远程的遥测（服务器是老版本，或者这次会话已经不收了），这次远程里不再报");
+    }
+
+    /// <summary>报遥测失败：每次远程只记一条日志（服务器连不上时每分钟一条没有意思），不影响会话。</summary>
+    private void TelemetryFailed(Exception ex)
+    {
+        if (Interlocked.Exchange(ref _telemetryFailureLogged, 1) != 0) return;
+        AgentLog.Warn($"上报这次远程的遥测失败（这次远程里再失败不再记）：{(ex is OperationCanceledException ? "超时" : ex.Message)}");
+    }
+
     public async ValueTask DisposeAsync()
     {
         await _cts.CancelAsync();
+        // 遥测的最后一份：换个线程报（这里可能是界面线程），和下面关连接、等线程同时进行，自己最多 3 秒
+        var telemetry = _telemetry is not null && Interlocked.Exchange(ref _telemetryFinalStarted, 1) == 0
+            ? Task.Run(ReportFinalAsync) : Task.CompletedTask;
         _input.ReleaseAll();
         StopRealtime(null);
         if (_connection?.Socket is { State: WebSocketState.Open } socket)
@@ -1316,6 +1486,8 @@ public sealed class SessionRunner : IAsyncDisposable
         if (_main is not null) await Task.WhenAny(_main, Task.Delay(3000));
         _video?.Join(TimeSpan.FromSeconds(3));
         _audio?.Join(TimeSpan.FromSeconds(3));
+        // 它自己有 3 秒的期限、不抛异常；多半在上面等线程的时候就报完了
+        await telemetry;
         Finish("stopped");
     }
 

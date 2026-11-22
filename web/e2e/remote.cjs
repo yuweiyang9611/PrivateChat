@@ -3,7 +3,8 @@
 // 不碰这台电脑的真实屏幕和鼠标键盘。E2E_REAL_SCREEN=1 时最后再用真实屏幕跑一遍（只检查尺寸和非黑屏，不截图）。
 // 覆盖：下载安装包、设备码添加（管理员替爸爸添加）、主人实时看到在线 / 被远程提醒、远程控制（自动同意）、
 // 画面像素、声音（测试音）、键鼠 / 滚轮 / 文字 / 特殊键 / 剪贴板、画质菜单（自动 / 清晰 / 原画 / 自定义，记在这台设备上）与切换显示器、
-// 结束与记录、只看模式不注入（画质照样能换）、对方电脑忙不过来时自动画质降分辨率并提示（编码故意放慢：降了管用，留着；
+// 结束与记录、诊断（管理员看这台电脑的硬件和编码器、刚才这次远程两边报上来的汇总；主人看不到）、
+// 只看模式不注入（画质照样能换）、对方电脑忙不过来时自动画质降分辨率并提示（编码故意放慢：降了管用，留着；
 // 截屏故意放慢：降了也没快多少，退回去，不再降）、拒绝、
 // 免同意名单（勾上后不经同意直接连、移出后立即结束）、同意窗口没人点时取消 / 改用 PIN（窗口马上收起、PIN 立刻连上）、移除电脑。
 // 加 --agent-tls13：被控端不直连 compose 栈，而是经本机一个只收 TLS 1.3 的入口（e2e/tls13-proxy.cjs），
@@ -702,6 +703,95 @@ async function moveOnCanvas(page, fx, fy) {
   check('Agent 收起红条', !!(await until(() => agent.out.includes('红条收起'), 5000)))
   const audit = sql(`select end_reason || ',' || bytes_relayed from remote_sessions where id = '${sessionId}'`)
   check('记录里有结束原因和转发流量', audit.startsWith('controller,') && Number(audit.split(',')[1]) > 10_000, audit)
+
+  // ---- 诊断（只有管理员有）：这台电脑的硬件和能力、刚才这次远程两边报上来的汇总 ----
+  // 被控端连上服务器后在子进程里探测硬件（最多 60 秒）；远程结束时两边各报最后一份（被控端 PUT，网页 sendBeacon）
+  await admin.goto(BASE + '/devices')
+  await card.locator('[data-testid=device-online]', { hasText: '在线' }).waitFor({ timeout: 10000 })
+  await card.locator('[data-testid=device-more]').click()
+  await admin.locator('[data-testid=device-diagnostics]:visible').click()
+  const diag = admin.locator('[data-testid=diagnostics-dialog]')
+  const diagLoaded = await diag.locator('[data-loaded=true]').waitFor({ timeout: 15000 }).then(() => true, () => false)
+  check('管理员在电脑的菜单里点"诊断"：打开诊断窗口，拉到了数据', diagLoaded,
+    diagLoaded ? undefined : { alert: await diag.locator('.el-alert').textContent({ timeout: 500 }).catch(() => null) })
+  /** 点"刷新"，等它拉完 */
+  const refreshDiag = async () => {
+    await diag.locator('[data-testid=diagnostics-refresh]').click().catch(() => undefined)
+    await diag.locator('[data-testid=diagnostics-refresh].is-loading').waitFor({ state: 'detached', timeout: 10000 }).catch(() => undefined)
+  }
+  const cpuName = diagLoaded ? await until(async () => {
+    const name = await diag.locator('[data-testid=diagnostics-cpu]').getAttribute('data-name', { timeout: 500 }).catch(() => null)
+    if (name) return name
+    await refreshDiag()
+    return null
+  }, 60000, 2000) : null
+  const hardwareSeen = {
+    cpu: await diag.locator('[data-testid=diagnostics-cpu]').textContent({ timeout: 500 }).catch(() => null),
+    gpus: await diag.locator('[data-testid=diagnostics-gpu]').allTextContents().catch(() => []),
+    displays: await diag.locator('[data-testid=diagnostics-display]').allTextContents().catch(() => []),
+    problems: await diag.locator('[data-testid=diagnostics-problem]').allTextContents().catch(() => []),
+    none: await diag.locator('[data-testid=diagnostics-no-snapshot]').count().catch(() => 0),
+  }
+  check('诊断：这台电脑的硬件（处理器型号、至少一张显卡）', !!cpuName && hardwareSeen.gpus.length >= 1 && hardwareSeen.gpus.every((g) => g.trim().length > 0), hardwareSeen)
+  const encoders = await diag.locator('[data-testid=diagnostics-encoder]').evaluateAll((els) => els.map((e) => ({
+    name: e.dataset.name, hardware: e.dataset.hardware, avgMs: e.dataset.testAvgMs, framesOut: e.dataset.testFramesOut,
+  }))).catch(() => [])
+  const softwareEncoder = encoders.find((e) => e.hardware === 'false' && Number(e.avgMs) > 0 && Number(e.framesOut) > 0)
+  check('诊断：编码器里有微软的软件 H.264 编码器，带着试编的结果（每帧多少 ms、出了几帧）', !!softwareEncoder,
+    { software: softwareEncoder ?? null, encoders, gdi: await diag.locator('[data-testid=diagnostics-gdi]').textContent({ timeout: 500 }).catch(() => null) })
+  // 刚结束的这次远程：被控端、控制端都报了（被控端最后一份在结束后几秒内到）
+  const sessionRow = diag.locator(`[data-testid=diagnostics-session][data-session-id="${sessionId}"]`)
+  const sessionSeen = () => sessionRow.evaluate((e) => ({ ...e.dataset }), undefined, { timeout: 500 }).catch(() => null)
+  const bothSides = diagLoaded ? await until(async () => {
+    const row = await sessionSeen()
+    if (row?.agent === 'true' && row.viewer === 'true') return row
+    await refreshDiag()
+    return null
+  }, 20000, 1000) : null
+  const rowNow = bothSides ?? (await sessionSeen())
+  check('诊断：最近的远程里有刚才这一次，被控端和控制端都报了（发出帧率、看到的帧率都大于 0）',
+    !!bothSides && Number(bothSides.sentFps) > 0 && Number(bothSides.viewerFps) > 0,
+    { row: rowNow, rows: await diag.locator('[data-testid=diagnostics-session]').count().catch(() => 0) })
+  // 这里跑的是 Edge，应当报成"Edge 1xx"；要紧的是只有品牌和大版本，不是整串 User-Agent
+  check('诊断：控制端报的浏览器只有品牌和大版本（不是整串 User-Agent）',
+    /^[A-Za-z][\w ]* \d+$/.test(rowNow?.browser ?? '') && !/Mozilla|Windows NT|AppleWebKit/.test(rowNow?.browser ?? ''), rowNow?.browser ?? null)
+  if (bothSides) {
+    await sessionRow.locator('xpath=ancestor::tr[1]').locator('.el-table__expand-icon').click()
+    const detail = await diag.locator('[data-testid=diagnostics-session-detail]').first().textContent({ timeout: 5000 }).catch(() => '')
+    check('诊断：展开这一次能看到两边报的所有字段', ['sentFps', 'encodeMs', 'decodedFps', 'freezes'].every((k) => detail.includes(k)), detail.slice(0, 300))
+  }
+  await admin.keyboard.press('Escape')
+  await diag.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => undefined)
+  // 手机上（360 px 宽）：整屏显示，表格在自己里面横着滚，页面不横着滚。
+  // 宽度跨过 1024 px 时应用换一套布局（桌面三栏 ↔ 手机底部 Tab，各有各的 router-view），设备页重新挂上、开着的窗口也跟着没了：
+  // 先换成手机的宽度、等换完布局，再从"更多"里重新打开"诊断"
+  await admin.setViewportSize({ width: 360, height: 740 })
+  const mobileLayout = await admin.locator('[data-testid=desktop-nav]').waitFor({ state: 'detached', timeout: 5000 }).then(() => true, () => false)
+  await card.locator('[data-testid=device-more]').click()
+  await admin.locator('[data-testid=device-diagnostics]:visible').click()
+  const narrowDiag = admin.locator('[data-testid=diagnostics-dialog]:visible')
+  const narrowLoaded = await narrowDiag.locator('[data-loaded=true]').waitFor({ timeout: 15000 }).then(() => true, () => false)
+  // 等打开的动画走完
+  await sleep(600)
+  const narrow = await admin.evaluate(() => {
+    const d = [...document.querySelectorAll('[data-testid=diagnostics-dialog]')].map((e) => e.getBoundingClientRect()).find((r) => r.width > 0 && r.height > 0)
+    return { page: document.documentElement.scrollWidth, viewport: window.innerWidth, left: d ? Math.round(d.left) : null, right: d ? Math.round(d.right) : null }
+  })
+  check('诊断在 360 px 宽的手机上不出屏幕、页面不横着滚', narrowLoaded && narrow.page <= 360 && narrow.left !== null && narrow.left >= 0 && narrow.right <= 360,
+    { ...narrow, mobileLayout, loaded: narrowLoaded })
+  await admin.keyboard.press('Escape')
+  await narrowDiag.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => undefined)
+  await admin.setViewportSize(opts.viewport)
+  await admin.locator('[data-testid=desktop-nav]').waitFor({ timeout: 5000 }).catch(() => undefined)
+  // 爸爸是电脑的主人，但不是管理员：菜单里有"设置"，没有"诊断"
+  await bob.goto(BASE + '/devices')
+  await bobCard.locator('[data-testid=device-more]').click()
+  const bobMenu = await bob.locator('[data-testid=device-settings]:visible').waitFor({ timeout: 5000 }).then(() => true, () => false)
+  const bobDiagnostics = await bob.locator('[data-testid=device-diagnostics]').count()
+  check('诊断只给管理员：爸爸（主人、不是管理员）的菜单里没有"诊断"', bobMenu && bobDiagnostics === 0, { menuOpened: bobMenu, diagnostics: bobDiagnostics })
+  // 把菜单收起来（后面还要再点开它）
+  await bob.locator('h1').first().click()
+  await bob.locator('[data-testid=device-settings]').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => undefined)
 
   // ---- 只看模式：点击不会注入；画质照样能换 ----
   await admin.goto(BASE + '/devices')
