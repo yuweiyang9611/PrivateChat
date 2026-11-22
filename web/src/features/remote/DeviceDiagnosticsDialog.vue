@@ -318,6 +318,10 @@ function sides(s: SessionTelemetryDto): { key: string; label: string; empty: str
               <el-table-column :label="t('remote.diagnostics.firstFrameMs')" min-width="80">
                 <template #default="{ row }">{{ num(row.firstFrameMs) }}</template>
               </el-table-column>
+              <!-- 画面在动时每幅新画面多久（0.8.7 起的被控端才报） -->
+              <el-table-column :label="t('remote.diagnostics.frameMs')" min-width="150">
+                <template #default="{ row }">{{ row.frameMs != null ? t('remote.diagnostics.frameValue', { avg: num(row.frameMs), p90: num(row.frameP90Ms), size: row.frameSize ?? '' }) : '—' }}</template>
+              </el-table-column>
               <el-table-column :label="t('remote.diagnostics.error')" min-width="200">
                 <template #default="{ row }"><span style="color: #e5484d">{{ row.error || '' }}</span></template>
               </el-table-column>

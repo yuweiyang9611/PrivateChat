@@ -596,6 +596,26 @@ public class TelemetrySanitizerTests
     }
 
     [Fact]
+    public void Desktop_duplication_frame_cost_is_kept_and_cleaned()
+    {
+        // 0.8.7 起被控端多报"每幅新画面多久"：照存，数不对的清成 null / 0，尺寸那一项截短；老版本不报就是 null
+        var snapshot = TelemetrySamples.Snapshot() with
+        {
+            Capture = new TelemetryCapture(
+            [
+                new TelemetryDuplication(@"\\.\DISPLAY1", "Intel(R) UHD Graphics", true, 85.4, null, 6.2, 7.23, "1920x1200"),
+                new TelemetryDuplication(@"\\.\DISPLAY2", "x", true, 1, null, double.NaN, -3, new string('9', 100)),
+                new TelemetryDuplication(@"\\.\DISPLAY3", "y", false, null, "E_ACCESSDENIED"),
+            ], 31.2, 33.8, null),
+        };
+        var clean = TelemetrySanitizer.Snapshot(snapshot).Capture.Duplication;
+        Assert.Equal((6.2, 7.23, "1920x1200"), (clean[0].FrameMs, clean[0].FrameP90Ms, clean[0].FrameSize));
+        Assert.Equal((0.0, 0.0), (clean[1].FrameMs, clean[1].FrameP90Ms));
+        Assert.Equal(TelemetrySanitizer.MaxVersion, clean[1].FrameSize!.Length);
+        Assert.Equal((null, null, null), (clean[2].FrameMs, clean[2].FrameP90Ms, clean[2].FrameSize));
+    }
+
+    [Fact]
     public void A_snapshot_with_everything_missing_comes_out_complete()
     {
         var s = TelemetrySanitizer.Snapshot(new AgentTelemetrySnapshot(null!, default, null!, null!, null!, -1, null!, null!, null!, null!, true, null!));

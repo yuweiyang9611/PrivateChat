@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using PrivateChat.Agent.Session;
 using PrivateChat.Agent.Video;
 using PrivateChat.Contracts.Remote;
 
@@ -70,11 +71,46 @@ internal static class CaptureProbe
             // 有限范围的亮度在 16–235；缩放时边缘会冲出去一点点。大片超出说明显卡按全范围输出了，和编码器声明的对不上（颜色会发灰 / 过曝）
             if (outOfRange > MaxOutOfRange) return Fail($"显卡转出来的 NV12 亮度不在有限范围里（{outOfRange:P1} 的像素超出 12–240）");
             if (Orientations(source) is { } turned) return Fail(turned);
-            return new TelemetryDuplication(name, adapterName, true, Math.Round(firstMs ?? 0, 2), null);
+            var (frameMs, frameP90, frameSize) = FrameCost(source);
+            return new TelemetryDuplication(name, adapterName, true, Math.Round(firstMs ?? 0, 2), null, frameMs, frameP90, frameSize);
         }
         catch (Exception ex)
         {
             return Fail(HResults.Explain(ex));
+        }
+    }
+
+    private const int FrameCostRounds = 20;
+
+    /// <summary>
+    /// 画面在动时每来一幅新画面要多久：把留着的桌面画面按现在的方向、自动档最大的尺寸（1920×1200 以内）连转 20 次 NV12、读回内存（第一次要建视频处理器，不算），
+    /// 取平均和 p90。屏幕静止时截屏几乎不花时间，所以不靠"真等新画面"——这样不管探测时桌面动不动，量出来的都是一样的东西。
+    /// 不包括取画面（AcquireNextFrame，零点几毫秒）和画指针。量不出来时三项都是 null（不影响"能用"）。
+    /// </summary>
+    private static (double? Avg, double? P90, string? Size) FrameCost(DxgiScreenSource source)
+    {
+        try
+        {
+            var (textureWidth, textureHeight) = source.DesktopSize;
+            if (textureWidth <= 0 || textureHeight <= 0) return (null, null, null);
+            var rotation = source.Rotation is >= 2 and <= 4 ? source.Rotation : 1;
+            var (viewWidth, viewHeight) = CaptureTiles.Rotated(rotation, textureWidth, textureHeight);
+            var (width, height) = FrameGeometry.Fit(viewWidth, viewHeight, VideoSettings.Auto.MaxWidth, VideoSettings.Auto.MaxHeight);
+            var nv12 = new byte[width * height * 3 / 2];
+            if (!source.ConvertRetained(rotation, width, height, nv12)) return (null, null, null);
+            var times = new double[FrameCostRounds];
+            for (var i = 0; i < times.Length; i++)
+            {
+                var clock = Stopwatch.StartNew();
+                source.ConvertRetained(rotation, width, height, nv12);
+                times[i] = clock.Elapsed.TotalMilliseconds;
+            }
+            Array.Sort(times);
+            return (Math.Round(times.Average(), 2), Math.Round(times[(int)Math.Ceiling(times.Length * 0.9) - 1], 2), $"{width}x{height}");
+        }
+        catch (Exception)
+        {
+            return (null, null, null);
         }
     }
 

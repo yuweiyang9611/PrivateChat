@@ -57,7 +57,10 @@ public sealed record TelemetryCapture(
     string? Error);
 
 /// <summary>Desktop Duplication 在这块显示器上能不能用（在接着它的那张卡上建 D3D11 设备、DuplicateOutput、取一帧）。</summary>
-public sealed record TelemetryDuplication(string Output, string? Adapter, bool Ok, double? FirstFrameMs, string? Error);
+/// <param name="FrameMs">能用时：画面在动时每来一幅新画面要多久（显卡上缩放转 NV12 + 读回内存），按自动档最大的尺寸（FrameSize）连做 20 次的平均；
+/// 和 <see cref="TelemetryCapture.GdiNativeMs"/> 比就知道快了多少。0.8.7 起，老版本没有这几项。</param>
+public sealed record TelemetryDuplication(string Output, string? Adapter, bool Ok, double? FirstFrameMs, string? Error,
+    double? FrameMs = null, double? FrameP90Ms = null, string? FrameSize = null);
 
 /// <summary>
 /// 一次远程里被控端这边的汇总：每 60 秒一次（Final=false），结束时一次（Final=true）。PUT /api/remote/sessions/{id}/telemetry

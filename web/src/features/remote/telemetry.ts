@@ -62,7 +62,11 @@ export interface TelemetryEncodeTest { width: number; height: number; frames: nu
 /** gdiNativeMs / gdiScaledMs：GDI 按原尺寸截主显示器一帧平均多久、缩到 1280×720 一帧多久 */
 export interface TelemetryCapture { duplication: TelemetryDuplication[]; gdiNativeMs: number | null; gdiScaledMs: number | null; error: string | null }
 /** Desktop Duplication 在这块显示器上能不能用 */
-export interface TelemetryDuplication { output: string; adapter: string | null; ok: boolean; firstFrameMs: number | null; error: string | null }
+export interface TelemetryDuplication {
+  output: string; adapter: string | null; ok: boolean; firstFrameMs: number | null; error: string | null
+  /** 0.8.7 起：画面在动时每幅新画面多久（显卡缩放转 NV12 + 读回），按自动档最大的尺寸量；老版本没有 */
+  frameMs?: number | null; frameP90Ms?: number | null; frameSize?: string | null
+}
 
 /** 一次远程里被控端这边的汇总：每 60 秒一次（final = false），结束时一次 */
 export interface AgentSessionTelemetry {

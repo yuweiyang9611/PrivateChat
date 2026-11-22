@@ -625,6 +625,8 @@ export default {
       usable: '能用',
       unusable: '不能用',
       firstFrameMs: '首帧 ms',
+      frameMs: '每幅新画面',
+      frameValue: '{avg} ms（p90 {p90}，{size}）',
       sessions: '最近的远程',
       noSessions: '还没有带遥测的远程记录',
       when: '时间',

@@ -100,7 +100,8 @@ public static class TelemetrySanitizer
         : new TelemetryCapture(Items(c.Duplication, Duplication), NumberOrNull(c.GdiNativeMs), NumberOrNull(c.GdiScaledMs), TextOrNull(c.Error, MaxText));
 
     private static TelemetryDuplication Duplication(TelemetryDuplication d) => new(
-        Text(d.Output, MaxName), TextOrNull(d.Adapter, MaxName), d.Ok, NumberOrNull(d.FirstFrameMs), TextOrNull(d.Error, MaxText));
+        Text(d.Output, MaxName), TextOrNull(d.Adapter, MaxName), d.Ok, NumberOrNull(d.FirstFrameMs), TextOrNull(d.Error, MaxText),
+        NumberOrNull(d.FrameMs), NumberOrNull(d.FrameP90Ms), TextOrNull(d.FrameSize, MaxVersion));
 
     private static TelemetrySettingsUse Setting(TelemetrySettingsUse s) => new(
         Enum.IsDefined(s.Mode) ? s.Mode : RemoteVideoMode.Auto,

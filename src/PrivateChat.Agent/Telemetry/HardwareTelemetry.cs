@@ -55,8 +55,9 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
     /// <summary>
     /// 探测做法的版本，算进指纹：探测怎么做变了，同一个程序版本号下存着的老结果也作废、重探一次。
     /// 2：桌面复制、硬件编码器经远程用的那几个类（DxgiScreenSource、HardwareH264Encoder）试过才算验证过——老做法的结果不能拿来放行。
+    /// 3：桌面复制多量一项"画面在动时每幅新画面多久"（TelemetryDuplication.FrameMs），存着的老结果里没有，重探一次补上。
     /// </summary>
-    private const string ProbeMethod = "probe 2";
+    private const string ProbeMethod = "probe 3";
 
     private readonly SemaphoreSlim _wake = new(0, 1);
     private readonly Lock _gate = new();
