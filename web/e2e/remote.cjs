@@ -264,6 +264,15 @@ async function moveOnCanvas(page, fx, fy) {
   await card.locator('[data-testid=device-control]').click()
   await admin.waitForURL(/\/remote\//, { timeout: 10000 })
   const sessionId = admin.url().split('/remote/')[1]
+  // 管理员诊断接口每次给出每个会话的最新快照；只取这次测试的设备和会话。
+  const persistedSession = async () => {
+    const response = await adminCtx.request.get(`${BASE}/api/telemetry/devices/${deviceId}?limit=5`)
+    try {
+      if (!response.ok()) throw new Error(`读取本次远程诊断失败（HTTP ${response.status()}）`)
+      return (await response.json()).sessions.find((s) => s.sessionId === sessionId)
+    } finally { await response.dispose() }
+  }
+  let originalViewer, freshViewer, connectedPublisher
   const streaming = await until(async () => (await admin.locator('[data-testid=remote-stats]').textContent().catch(() => '')).includes('1280×720'), 20000)
   check('对方同意后画面开始传输（1280×720，默认的自动画质）', !!streaming, await admin.locator('[data-testid=remote-stats]').textContent().catch(() => ''))
   await sleep(800)
@@ -482,6 +491,11 @@ async function moveOnCanvas(page, fx, fy) {
     })
     await fresh.goto(admin.url())
     await admin.locator('[data-testid=remote-replaced]').waitFor({ timeout: 15000 })
+    // 被替换的窗口会立即上报。先取从设备页点击、先后播放了两种线路的这份，避免被新窗口覆盖。
+    originalViewer = await until(async () => {
+      const v = (await persistedSession())?.viewer
+      return v?.startup?.firstFrameLine === 'relay' && v.playback?.fastFramesDecoded > 0 ? v : null
+    }, 12000, 500)
     const freshLine = () => fresh.locator('[data-testid=remote-stats]').getAttribute('data-line', { timeout: 500 }).catch(() => null)
     const freshFast = await until(async () => (await freshLine()) === 'realtime', 30000)
     await sleep(1500)
@@ -493,6 +507,10 @@ async function moveOnCanvas(page, fx, fy) {
     // 回到原来的窗口（它选的也是快速线路）：按它的选择重新接上
     await admin.locator('[data-testid=remote-take-over]').click()
     await fresh.locator('[data-testid=remote-replaced]').waitFor({ timeout: 15000 })
+    freshViewer = await until(async () => {
+      const v = (await persistedSession())?.viewer
+      return v?.startup?.firstFrameLine === 'realtime' ? v : null
+    }, 12000, 500)
     await freshCtx.close()
     const backOnFast = await until(async () => (await lineNow()) === 'realtime', 30000)
     check('原来的窗口接手回来，按它选的快速线路重新接上', !!backOnFast && (await until(async () => (await fpsNow()) >= 5, 10000)) !== null, { line: await lineNow() })
@@ -560,6 +578,9 @@ async function moveOnCanvas(page, fx, fy) {
 
     // 快速线路根本接不上了（把假 SFU 停掉，相当于服务器连不上 Cloudflare）：重新接几次都不行就停下来，
     // 画面上给出"重试"和"切到标准线路"。这期间中继上有画面帧过来，但不画——线路不自动换
+    // Agent 每分钟上报一次；下面故意产生的一连串失败可能把成功记录挤出最近八次的窗口。
+    connectedPublisher = await until(async () =>
+      (await persistedSession())?.agent?.publisherAttempts?.find((a) => a.outcome === 'connected'), 65000, 1000)
     await sfu.close()
     sfu = null
     sfuStoppedAt = new Date().toISOString()
@@ -778,9 +799,55 @@ async function moveOnCanvas(page, fx, fy) {
   // 这里跑的是 Edge，应当报成"Edge 1xx"；要紧的是只有品牌和大版本，不是整串 User-Agent
   check('诊断：控制端报的浏览器只有品牌和大版本（不是整串 User-Agent）',
     /^[A-Za-z][\w ]* \d+$/.test(rowNow?.browser ?? '') && !/Mozilla|Windows NT|AppleWebKit/.test(rowNow?.browser ?? ''), rowNow?.browser ?? null)
+  if (REALTIME) {
+    const nonnegative = (n) => Number.isSafeInteger(n) && n >= 0
+    const a = connectedPublisher
+    const stages = a && [a.iceConfigMs, a.gatherMs, a.publishMs, a.handshakeMs]
+    const candidate = (v) => ['host', 'srflx', 'prflx', 'relay'].includes(v)
+    check('诊断：真实被控端完成四个发布阶段，记录实际提名的两端候选类型',
+      a?.strategy === 'all' && a.attempt >= 1 && stages.every(nonnegative) && nonnegative(a.totalMs) && a.totalMs > 0
+        && stages.reduce((sum, n) => sum + n, 0) <= a.totalMs && candidate(a.localCandidateType) && candidate(a.remoteCandidateType), a ?? null)
+    const hasFastFirstFrame = (s) => s?.attempts.some((t) => t.outcome === 'firstFrame' && nonnegative(t.publisherWaitMs)
+      && nonnegative(t.pullToFirstFrameMs) && nonnegative(t.totalMs) && Math.abs(t.totalMs - t.publisherWaitMs - t.pullToFirstFrameMs) <= 1)
+    const startup = originalViewer?.startup
+    check('诊断：从设备页进入的浏览器记录请求到首帧、连接到首帧，以及切到快速线路后的出图耗时',
+      startup?.firstFrameLine === 'relay' && nonnegative(startup.connectToFirstFrameMs) && nonnegative(startup.requestToFirstFrameMs)
+        && startup.requestToFirstFrameMs >= startup.connectToFirstFrameMs && hasFastFirstFrame(startup), startup ?? null)
+    const direct = freshViewer?.startup
+    check('诊断：直接打开会话的接手窗口以快速线路出首帧，没有虚构点击发起请求的时刻',
+      direct?.firstFrameLine === 'realtime' && direct.requestToFirstFrameMs === null && nonnegative(direct.connectToFirstFrameMs)
+        && hasFastFirstFrame(direct), direct ?? null)
+    const p = originalViewer?.playback
+    check('诊断：Edge 实际解出了快速线路的帧，标准线路也采到了 WebCodecs 解码队列',
+      p?.fastFramesDecoded > 0 && p.fastDecodeMs?.samples > 0 && p.fastDecodeMs.p90 >= p.fastDecodeMs.p50
+        && p.relayDecodeQueue?.samples > 0 && p.relayDecodeQueue.p90 >= p.relayDecodeQueue.p50 && nonnegative(p.relaySkippedUntilKey), p ?? null)
+    const final = await until(async () => {
+      const s = await persistedSession()
+      return s?.agent?.final && s.viewer?.final ? s : null
+    }, 20000, 500)
+    const attempts = final?.agent?.publisherAttempts ?? []
+    check('诊断：最终汇总仍有两种线路的播放数据，并记录关闭假 SFU 后的发布失败',
+      final?.viewer?.playback?.fastFramesDecoded > 0 && final.viewer.playback.relayDecodeQueue?.samples > 0
+        && attempts.length <= 8 && attempts.some((t) => t.outcome === 'failed' && nonnegative(t.publishMs) && t.handshakeMs === null),
+      { outcomes: attempts.map((t) => t.outcome), finalViewer: final?.viewer?.final ?? false })
+    if (final) await refreshDiag()
+  }
   if (bothSides) {
     await sessionRow.locator('xpath=ancestor::tr[1]').locator('.el-table__expand-icon').click()
-    const detail = await diag.locator('[data-testid=diagnostics-session-detail]').first().textContent({ timeout: 5000 }).catch(() => '')
+    const expanded = sessionRow.locator('xpath=ancestor::tr[1]/following-sibling::tr[1]').locator('[data-testid=diagnostics-session-detail]')
+    await expanded.waitFor({ timeout: 5000 })
+    if (REALTIME) {
+      const startup = expanded.locator('[data-testid=diagnostics-startup] dl')
+      const attempts = expanded.locator('[data-testid=diagnostics-attempts] li')
+      const playback = expanded.locator('[data-testid=diagnostics-playback]')
+      check('诊断：展开本次会话能看到首帧计时、连接尝试和两种线路的播放指标',
+        await startup.isVisible() && await attempts.first().isVisible()
+          && await playback.getByRole('heading', { name: '快速线路', exact: true }).isVisible()
+          && await playback.getByRole('heading', { name: '标准线路', exact: true }).isVisible())
+    }
+    const raw = expanded.locator('[data-testid=diagnostics-session-raw-fields]')
+    if (await raw.count() && !(await raw.evaluate((e) => e.open))) await raw.locator('summary').click()
+    const detail = await expanded.innerText({ timeout: 5000 }).catch(() => '')
     check('诊断：展开这一次能看到两边报的所有字段', ['sentFps', 'encodeMs', 'decodedFps', 'freezes'].every((k) => detail.includes(k)), detail.slice(0, 300))
   }
   await admin.keyboard.press('Escape')

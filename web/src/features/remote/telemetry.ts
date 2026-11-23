@@ -68,6 +68,46 @@ export interface TelemetryDuplication {
   frameMs?: number | null; frameP90Ms?: number | null; frameSize?: string | null
 }
 
+export type IceCandidateType = 'host' | 'srflx' | 'prflx' | 'relay'
+
+export interface PublisherAttemptTelemetry {
+  attempt: number
+  outcome: 'connected' | 'failed' | 'cancelled' | 'pending'
+  strategy: 'all' | 'relay' | 'unknown'
+  totalMs: number
+  iceConfigMs: number | null
+  gatherMs: number | null
+  publishMs: number | null
+  handshakeMs: number | null
+  localCandidateType: IceCandidateType | null
+  remoteCandidateType: IceCandidateType | null
+}
+
+export interface ViewerFastAttemptTelemetry {
+  attempt: number
+  outcome: 'firstFrame' | 'failed' | 'cancelled' | 'pending'
+  totalMs: number
+  publisherWaitMs: number | null
+  pullToFirstFrameMs: number | null
+}
+
+export interface ViewerStartupTelemetry {
+  requestToFirstFrameMs: number | null
+  connectToFirstFrameMs: number | null
+  firstFrameLine: 'relay' | 'realtime' | null
+  attempts: ViewerFastAttemptTelemetry[]
+}
+
+export interface ViewerPlaybackTelemetry {
+  fastFramesDecoded: number | null
+  fastFramesDropped: number | null
+  fastNackRequests: number | null
+  fastRetransmittedPackets: number | null
+  fastDecodeMs: TelemetryStat | null
+  relayDecodeQueue: TelemetryStat | null
+  relaySkippedUntilKey: number | null
+}
+
 /** 一次远程里被控端这边的汇总：每 60 秒一次（final = false），结束时一次 */
 export interface AgentSessionTelemetry {
   agentVersion: string
@@ -101,6 +141,7 @@ export interface AgentSessionTelemetry {
   lineConnects: number
   lineFailures: number
   lineProblems: string[]
+  publisherAttempts?: PublisherAttemptTelemetry[] | null
   /** 快速线路上控制端每秒的回报；没走快速线路时是 null */
   lossPermille: TelemetryStat | null
   receivedKbps: TelemetryStat | null
@@ -134,6 +175,8 @@ export interface ViewerSessionTelemetry {
   minMaxFps: number
   realtimeReconnects: number
   lineProblems: string[]
+  startup?: ViewerStartupTelemetry | null
+  playback?: ViewerPlaybackTelemetry | null
   jitterBufferMs: TelemetryStat | null
   lossPermille: TelemetryStat | null
   errors: string[]

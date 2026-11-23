@@ -15,6 +15,7 @@ import {
 } from './protocol'
 import { formatKbps } from './format'
 import { ViewerTelemetry, viewerEnvironment } from './viewerTelemetry'
+import { requestedSessionRoute, requestTimeInDocument } from './viewerStartup'
 import { telemetryApi } from './telemetryApi'
 
 const props = defineProps<{ id: string }>()
@@ -93,6 +94,7 @@ function telemetryFor(id: string): ViewerTelemetry {
     // 无痕窗口等存不了、存的东西坏了：从头记
   }
   telemetry = { sessionId: id, data: data ?? new ViewerTelemetry(), off: false, sentRevision: -1, sentFinal: false }
+  telemetry.data.startup.requested(requestTimeInDocument(window.history.state, id, performance.timeOrigin))
   return telemetry.data
 }
 
@@ -124,7 +126,7 @@ function onPageHide(): void {
   const tel = telemetry
   if (!tel || ended) return
   try {
-    sessionStorage.setItem(TELEMETRY_SAVED_KEY + tel.sessionId, JSON.stringify(tel.data))
+    sessionStorage.setItem(TELEMETRY_SAVED_KEY + tel.sessionId, JSON.stringify(tel.data.save(performance.now())))
   } catch {
     // 存不了：刷新回来从头记
   }
@@ -397,6 +399,7 @@ async function end(): Promise<void> {
 }
 
 async function again(): Promise<void> {
+  const requestedAt = performance.now()
   const s = session.value
   if (!s) return
   let pin: string | undefined
@@ -417,7 +420,7 @@ async function again(): Promise<void> {
   }
   try {
     const next = await remote.start(s.targetDeviceId, s.mode, pin)
-    await router.replace(`/remote/${next.id}`)
+    await router.replace(requestedSessionRoute(next.id, requestedAt))
   } catch (e) {
     toast('error', (e as Error).message)
   }

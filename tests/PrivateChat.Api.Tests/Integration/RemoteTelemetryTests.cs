@@ -225,8 +225,15 @@ public class RemoteTelemetryTests
         await using var hub = await OnlineAsync(x, agent);
         var session = await ActiveSessionAsync(agent, x.Admin); // 管理员控制 Bob 的电脑
 
-        Assert.Equal(HttpStatusCode.NoContent, (await PutAgentAsync(agent.Http, session.Id, TelemetrySamples.Agent())).StatusCode);
-        Assert.Equal(HttpStatusCode.NoContent, (await PostViewerAsync(x.Admin, session.Id, TelemetrySamples.Viewer())).StatusCode);
+        var publisherAttempt = new PublisherAttemptTelemetry(2, "connected", "relay", 820, 20, 100, 200, 500, "relay", "host");
+        var viewerAttempt = new ViewerFastAttemptTelemetry(1, "firstFrame", 1830, 1000, 830);
+        var agentReport = TelemetrySamples.Agent() with { PublisherAttempts = [publisherAttempt] };
+        var viewerReport = TelemetrySamples.Viewer() with {
+            Startup = new(3000, 2100, "realtime", [viewerAttempt]),
+            Playback = new(120, 3, 2, 5, TelemetrySamples.Stat(4), null, null)
+        };
+        Assert.Equal(HttpStatusCode.NoContent, (await PutAgentAsync(agent.Http, session.Id, agentReport)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await PostViewerAsync(x.Admin, session.Id, viewerReport)).StatusCode);
 
         // 被控端那列：别的电脑当作没有这个会话；没有的会话 404；人（哪怕是控制的人）403
         Assert.Equal(HttpStatusCode.NotFound, (await PutAgentAsync(other.Http, session.Id, TelemetrySamples.Agent(seconds: 1))).StatusCode);
@@ -245,6 +252,10 @@ public class RemoteTelemetryTests
         var row = await x.App.WithDbAsync(db => db.RemoteSessionTelemetry.SingleAsync());
         Assert.Equal((session.Id, agent.DeviceId), (row.SessionId, row.DeviceId));
         var seen = Assert.Single((await DiagnosticsAsync(x.Admin, agent.DeviceId)).Sessions);
+        Assert.Equal(publisherAttempt, Assert.Single(seen.Agent!.PublisherAttempts!));
+        Assert.Equal(viewerAttempt, Assert.Single(seen.Viewer!.Startup!.Attempts));
+        Assert.Equal(3000, seen.Viewer.Startup.RequestToFirstFrameMs);
+        Assert.Equal(3, seen.Viewer.Playback!.FastFramesDropped);
         Assert.Equal((60, "Edge 131"), (seen.Agent!.VideoSeconds, seen.Viewer!.Browser));
         Assert.Empty((await DiagnosticsAsync(x.Admin, other.DeviceId)).Sessions);
 
@@ -566,6 +577,41 @@ public class RemoteTelemetryTests
 /// <summary>遥测进库前的清理、请求体的读法：纯函数，不要数据库。</summary>
 public class TelemetrySanitizerTests
 {
+    [Fact]
+    public void Connection_history_is_bounded_and_only_includes_known_categories()
+    {
+        var attempts = Enumerable.Range(1, 10).Select(i =>
+            new PublisherAttemptTelemetry(i, "failed", "untrusted text", int.MaxValue, 0, -3, 12, null, "relay", "arbitrary text")).ToList();
+        attempts.Add(attempts[0] with { Outcome = "unexpected text" });
+        var stored = TelemetrySanitizer.AgentSession(TelemetrySamples.Agent() with { PublisherAttempts = attempts }).PublisherAttempts!;
+        Assert.Equal(Enumerable.Range(3, 8), stored.Select(a => a.Attempt));
+        Assert.All(stored, a => {
+            Assert.Equal("unknown", a.Strategy);
+            Assert.Equal("relay", a.LocalCandidateType);
+            Assert.Null(a.RemoteCandidateType);
+            Assert.Equal(86_400_000, a.TotalMs);
+            Assert.Equal(0, a.IceConfigMs);
+            Assert.Null(a.GatherMs);
+        });
+        Assert.Null(TelemetrySanitizer.AgentSession(TelemetrySamples.Agent()).PublisherAttempts);
+
+        var viewer = TelemetrySamples.Viewer() with {
+            Startup = new(-2, 0, "unexpected text", [new(1, "pending", 120, 120, null), new(2, "unexpected text", 1, 0, 0)]),
+            Playback = new(120, 0, null, -1, TelemetrySamples.Stat(5), new(0, 3, 0, 0, 0, 0, 5), 2)
+        };
+        var clean = TelemetrySanitizer.Viewer(viewer);
+        Assert.Null(clean.Startup!.FirstFrameLine);
+        Assert.Null(clean.Startup.RequestToFirstFrameMs);
+        Assert.Equal(0, clean.Startup.ConnectToFirstFrameMs);
+        Assert.Single(clean.Startup.Attempts);
+        Assert.Equal(0, clean.Playback!.FastFramesDropped);
+        Assert.Null(clean.Playback.FastRetransmittedPackets);
+        Assert.Null(clean.Playback.RelayDecodeQueue);
+        Assert.Equal(5, clean.Playback.FastDecodeMs!.P50);
+        Assert.Null(TelemetrySanitizer.Viewer(TelemetrySamples.Viewer()).Startup);
+        Assert.Null(TelemetrySanitizer.Viewer(TelemetrySamples.Viewer()).Playback);
+    }
+
     [Fact]
     public void Text_drops_control_characters_and_lone_surrogates_and_never_splits_a_pair()
     {

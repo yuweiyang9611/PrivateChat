@@ -143,6 +143,7 @@ export class RemoteClient {
 
   connect(): void {
     if (this.closed || this.ws) return
+    this.telemetry?.startup.connecting(performance.now())
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     const ws = new WebSocket(`${proto}://${location.host}/ws/remote/${this.sessionId}/controller`)
     ws.binaryType = 'arraybuffer'
@@ -157,6 +158,7 @@ export class RemoteClient {
     }
     ws.onclose = (e: CloseEvent) => {
       if (this.ws !== ws) return
+      this.telemetry?.startup.finish(performance.now(), 'cancelled')
       this.ws = null
       this.peer = false
       if (e.code === 4001 || e.code === 4000) {
@@ -176,6 +178,9 @@ export class RemoteClient {
     this.statsTimer = window.setInterval(() => {
       this.decodedLastSecond = this.decodedThisSecond
       this.decodedThisSecond = 0
+      if (this.peer && !this.onFastLine && pageVisible() && this.decoder?.state === 'configured') {
+        this.telemetry?.relayQueue(this.decoder.decodeQueueSize)
+      }
       this.telemetry?.tick(performance.now(), this.viewerState)
     }, 1000)
     window.clearInterval(this.governorTimer)
@@ -367,6 +372,7 @@ export class RemoteClient {
     // 页面在后台时不接：浏览器这时不回调"出了一帧"，接上了也等不到第一帧，白白算一次失败。回到前台再接（onVisibility）
     if (!pageVisible()) return
     this.realtimeAsked = true
+    this.telemetry?.startup.fastRequested(performance.now())
     if (this.realtimeFailures > 0) this.on.line?.('connecting')
     this.send(encode.setTransport(Transport.Realtime))
     this.realtimeTimer = window.setTimeout(() => this.failRealtime('对方电脑没有回应'), REALTIME_REQUEST_TIMEOUT_MS)
@@ -379,9 +385,12 @@ export class RemoteClient {
       return
     }
     if (this.realtime && this.realtimeGeneration === generation) return
-    this.dropRealtime()
+    this.dropRealtime(null)
+    this.telemetry?.startup.pulling(performance.now())
     this.realtimeGeneration = generation
-    const realtime = new RemoteRealtime(this.sessionId, (video, mediaMs) => this.paint(video, mediaMs), {
+    const realtime = new RemoteRealtime(this.sessionId, (video, mediaMs) => {
+      if (this.realtime === realtime) this.paint(video, mediaMs)
+    }, {
       first: () => {
         if (this.realtime !== realtime) return
         window.clearTimeout(this.realtimeTimer)
@@ -410,6 +419,7 @@ export class RemoteClient {
     void realtime.report().then((report) => {
       if (!report || this.realtime !== realtime) return
       this.send(encode.receiverReport(report))
+      for (const delta of report.playback) this.telemetry?.fastPlayback(delta)
       // 第一份还没有可比的，丢包、缓冲都是 0：不算进遥测
       if (report.measured) this.telemetry?.realtimeReport(report)
     })
@@ -422,7 +432,7 @@ export class RemoteClient {
   private failRealtime(reason: string, tellAgent = true): void {
     // 用户已经切走了；或者这次失败已经算过了（两边各报一次）
     if (!this.onFastLine || (!this.realtime && !this.realtimeAsked)) return
-    this.dropRealtime()
+    this.dropRealtime('failed')
     if (tellAgent) this.send(encode.setTransport(Transport.Relay))
     this.realtimeFailures++
     const delay = REALTIME_RETRY_DELAYS_MS[this.realtimeFailures - 1]
@@ -437,7 +447,8 @@ export class RemoteClient {
   }
 
   /** 收掉快速线路这边正在接 / 已经接上的连接 */
-  private dropRealtime(): void {
+  private dropRealtime(outcome: 'failed' | 'cancelled' | null = 'cancelled'): void {
+    if (outcome) this.telemetry?.startup.finish(performance.now(), outcome)
     window.clearTimeout(this.realtimeTimer)
     this.realtimeTimer = undefined
     window.clearInterval(this.reportTimer)
@@ -463,6 +474,7 @@ export class RemoteClient {
       this.canvas.height = video.videoHeight
     }
     this.ctx?.drawImage(video, 0, 0, this.canvas.width, this.canvas.height)
+    if (this.ctx) this.telemetry?.startup.painted(performance.now(), 'realtime')
     this.decodedThisSecond++
     this.telemetry?.frame(performance.now(), mediaMs)
   }
@@ -567,6 +579,7 @@ export class RemoteClient {
       return
     }
     if (this.needKey && !key) {
+      this.telemetry?.relaySkippedFrame()
       // 等关键帧期间丢掉的帧也确认掉：Agent 的在途窗口才会腾出来，不会卡 3 秒
       this.send(encode.frameAck(timestamp))
       this.requestKey()
@@ -652,6 +665,7 @@ export class RemoteClient {
         this.canvas.height = frame.displayHeight
       }
       this.ctx?.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height)
+      if (this.ctx && !this.closed) this.telemetry?.startup.painted(performance.now(), 'relay')
       this.decodedThisSecond++
       // 帧的时间戳就是它在对方电脑上的时间（毫秒）
       this.telemetry?.frame(performance.now(), timestamp)

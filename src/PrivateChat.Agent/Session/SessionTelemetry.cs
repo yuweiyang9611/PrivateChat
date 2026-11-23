@@ -36,7 +36,7 @@ public readonly record struct SessionSecond(
 /// 纯计算、不碰 Windows（测试项目把这个文件编进去测）。哪个线程都能调：都在一把锁里，锁里只做几次加法、拷几个数组；
 /// <see cref="Build"/> 排序在锁外，采集线程最多等一次拷贝。
 /// </summary>
-public sealed class SessionTelemetry(string agentVersion)
+public sealed class SessionTelemetry(string agentVersion, Func<long>? monotonicMilliseconds = null)
 {
     /// <summary>设成 off 就什么遥测都不报：不探测硬件、不上报，每次远程的汇总也不做。</summary>
     public const string SwitchVariable = "PRIVATECHAT_AGENT_TELEMETRY";
@@ -61,6 +61,9 @@ public sealed class SessionTelemetry(string agentVersion)
     private static readonly TelemetryStat Empty = new(0, 0, 0, 0, 0, 0, 0);
 
     private readonly Lock _gate = new();
+    private readonly Queue<PublisherAttempt> _publisherAttempts = new();
+    private int _publisherAttemptNumber;
+    private long NowMs => monotonicMilliseconds?.Invoke() ?? Environment.TickCount64;
     private readonly Series _sentFps = new(), _sentKbps = new(), _targetKbps = new(), _captureMs = new(), _encodeMs = new(), _cpuPercent = new(), _rttMs = new();
     private readonly Series _lossPermille = new(), _receivedKbps = new(), _jitterBufferMs = new(), _viewerFps = new();
     private readonly Uses<(RemoteVideoMode Mode, int MaxWidth, int MaxHeight, int Fps, int MaxKbps)> _settings = new();
@@ -173,6 +176,74 @@ public sealed class SessionTelemetry(string agentVersion)
     /// <summary>快速线路接通了（连上了 Cloudflare，还不知道控制端那边接没接上）。</summary>
     public void OnLineConnected() => Count(ref _lineConnects);
 
+    internal enum PublisherStage { IceConfig, Gather, Publish, Handshake }
+    internal enum PublisherOutcome { Connected, Failed, Cancelled }
+
+    internal PublisherAttempt BeginPublisherAttempt()
+    {
+        lock (_gate)
+        {
+            var attempt = new PublisherAttempt(this, ++_publisherAttemptNumber, NowMs);
+            if (_publisherAttempts.Count == 8) _publisherAttempts.Dequeue();
+            _publisherAttempts.Enqueue(attempt);
+            _revision++;
+            return attempt;
+        }
+    }
+
+    // 每次发布持有自己的记录。旧任务晚到的回调不能改写下一次尝试，也不能改写已结束的结果。
+    internal sealed class PublisherAttempt(SessionTelemetry owner, int number, long start)
+    {
+        private readonly long?[] _entered = new long?[4];
+        private int _stage = -1;
+        private long? _ended;
+        private string _outcome = "pending", _strategy = "unknown";
+        private string? _local, _remote;
+
+        public void Enter(PublisherStage stage, bool? relayOnly = null)
+        {
+            lock (owner._gate)
+            {
+                if (_ended.HasValue || (int)stage != _stage + 1) return;
+                _entered[++_stage] = owner.NowMs;
+                if (relayOnly.HasValue) _strategy = relayOnly.Value ? "relay" : "all";
+                owner._revision++;
+            }
+        }
+
+        public void Finish(PublisherOutcome outcome, (string? Local, string? Remote) pair = default)
+        {
+            lock (owner._gate)
+            {
+                if (_ended.HasValue) return;
+                _ended = owner.NowMs;
+                _outcome = outcome switch
+                {
+                    PublisherOutcome.Connected => "connected",
+                    PublisherOutcome.Failed => "failed",
+                    PublisherOutcome.Cancelled => "cancelled",
+                    _ => throw new ArgumentOutOfRangeException(nameof(outcome)),
+                };
+                _local = Candidate(pair.Local);
+                _remote = Candidate(pair.Remote);
+                owner._revision++;
+            }
+        }
+
+        private static string? Candidate(string? value) => value is "host" or "srflx" or "prflx" or "relay" ? value : null;
+
+        // Build 持有同一把锁，一份快照里的各个阶段使用同一个结束时刻。
+        internal PublisherAttemptTelemetry Snapshot(long now)
+        {
+            var end = _ended ?? now;
+            int? StageMs(int index) => _entered[index] is { } from
+                ? Duration(from, index < _stage ? _entered[index + 1]!.Value : end) : null;
+            return new(number, _outcome, _strategy, Duration(start, end), StageMs(0), StageMs(1), StageMs(2), StageMs(3), _local, _remote);
+        }
+
+        private static int Duration(long from, long to) => (int)Math.Clamp(to - from, 0, int.MaxValue);
+    }
+
     /// <summary>快速线路没接通、或者用着用着不能用了（回到中继），带上原因。</summary>
     public void OnLineFailed(string reason)
     {
@@ -201,6 +272,7 @@ public sealed class SessionTelemetry(string agentVersion)
         Series.Snapshot[] series;
         lock (_gate)
         {
+            var now = NowMs;
             series =
             [
                 _sentFps.Copy(), _sentKbps.Copy(), _targetKbps.Copy(), _captureMs.Copy(), _encodeMs.Copy(), _cpuPercent.Copy(), _rttMs.Copy(),
@@ -220,7 +292,7 @@ public sealed class SessionTelemetry(string agentVersion)
                 _maxFpsCaps, _minMaxFps,
                 _lineConnects, _lineFailures, _lineProblems.ToList(),
                 null, null, null, null,
-                _errors.ToList());
+                _errors.ToList(), [.. _publisherAttempts.Select(attempt => attempt.Snapshot(now))]);
         }
         // 排序在锁外：采集线程、统计线程不用等
         var stats = series.Select(s => s.ToStat()).ToArray();

@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus'
 import { useMediaQuery } from '@vueuse/core'
 import type { DeviceDto } from '@/stores/remote'
 import { telemetryApi } from './telemetryApi'
+import SessionMediaDiagnostics from './SessionMediaDiagnostics.vue'
 import { formatBytes, formatKbps, formatWhen } from './format'
 import { VIDEO_MODE_KEYS } from './protocol'
 import type {
@@ -207,7 +208,9 @@ function valueText(v: unknown): string {
 }
 
 function sides(s: SessionTelemetryDto): { key: string; label: string; empty: string; fields: { key: string; value: string }[] }[] {
-  const fields = (o: object | null) => (o ? Object.entries(o).map(([key, v]) => ({ key, value: valueText(v) })) : [])
+  const fields = (o: object | null) => Object.entries(o ?? {})
+    .filter(([key]) => key !== 'startup' && key !== 'publisherAttempts' && key !== 'playback')
+    .map(([key, v]) => ({ key, value: valueText(v) }))
   return [
     { key: 'agent', label: t('remote.diagnostics.agentSide'), empty: t('remote.diagnostics.noAgentData'), fields: fields(s.agent) },
     { key: 'viewer', label: t('remote.diagnostics.viewerSide'), empty: t('remote.diagnostics.noViewerData'), fields: fields(s.viewer) },
@@ -330,23 +333,27 @@ function sides(s: SessionTelemetryDto): { key: string; label: string; empty: str
         </section>
 
         <!-- 最近的远程（新的在前） -->
-        <section data-testid="diagnostics-sessions">
+        <section class="session-list" data-testid="diagnostics-sessions">
           <h3 class="mb-2 text-sm font-medium" style="color: var(--pc-text-muted)">{{ t('remote.diagnostics.sessions') }}</h3>
           <div v-if="!sessions.length" class="text-sm" style="color: var(--pc-text-muted)">{{ t('remote.diagnostics.noSessions') }}</div>
           <el-table v-else :data="sessions" size="small" border row-key="sessionId" class="w-full">
             <el-table-column type="expand">
               <template #default="{ row }">
-                <div class="flex flex-col gap-3 px-3 py-2" data-testid="diagnostics-session-detail">
-                  <div v-for="side in sides(asSession(row))" :key="side.key">
-                    <div class="mb-1 text-xs font-medium">{{ side.label }}</div>
-                    <div v-if="!side.fields.length" class="text-xs" style="color: var(--pc-text-muted)">{{ side.empty }}</div>
-                    <dl v-else class="grid gap-x-3 gap-y-0.5 text-xs" style="grid-template-columns: minmax(8rem, max-content) minmax(0, 1fr)">
-                      <template v-for="f in side.fields" :key="f.key">
-                        <dt style="color: var(--pc-text-muted)">{{ f.key }}</dt>
-                        <dd class="min-w-0 break-words">{{ f.value }}</dd>
-                      </template>
-                    </dl>
-                  </div>
+                <div class="session-detail flex flex-col gap-3 px-3 py-2" data-testid="diagnostics-session-detail">
+                  <SessionMediaDiagnostics :session="asSession(row)" />
+                  <details data-testid="diagnostics-session-raw-fields">
+                    <summary class="cursor-pointer text-xs font-medium">{{ t('remote.diagnostics.media.otherFields') }}</summary>
+                    <div v-for="side in sides(asSession(row))" :key="side.key" class="mt-2">
+                      <div class="mb-1 text-xs font-medium">{{ side.label }}</div>
+                      <div v-if="!side.fields.length" class="text-xs" style="color: var(--pc-text-muted)">{{ side.empty }}</div>
+                      <dl v-else class="grid gap-x-3 gap-y-0.5 text-xs" style="grid-template-columns: minmax(8rem, max-content) minmax(0, 1fr)">
+                        <template v-for="f in side.fields" :key="f.key">
+                          <dt style="color: var(--pc-text-muted)">{{ f.key }}</dt>
+                          <dd class="min-w-0 break-words">{{ f.value }}</dd>
+                        </template>
+                      </dl>
+                    </div>
+                  </details>
                   <div><el-button size="small" @click="copy(row)">{{ t('remote.diagnostics.copySession') }}</el-button></div>
                 </div>
               </template>
@@ -417,3 +424,8 @@ function sides(s: SessionTelemetryDto): { key: string; label: string; empty: str
     </template>
   </el-dialog>
 </template>
+
+<style scoped>
+.session-list { container-type: inline-size; min-width: 0; }
+.session-detail { position: sticky; left: 0; width: min(100%, 100cqi); box-sizing: border-box; }
+</style>

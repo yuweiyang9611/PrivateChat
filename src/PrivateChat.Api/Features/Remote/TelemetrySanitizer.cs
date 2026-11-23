@@ -53,7 +53,12 @@ public static class TelemetrySanitizer
         Count(t.MaxFpsCaps), Range(t.MinMaxFps, MaxFps),
         Count(t.LineConnects), Count(t.LineFailures), Texts(t.LineProblems, MaxMessages, MaxText),
         StatOrNull(t.LossPermille), StatOrNull(t.ReceivedKbps), StatOrNull(t.JitterBufferMs), StatOrNull(t.ViewerFps),
-        Texts(t.Errors, MaxMessages, MaxText));
+        Texts(t.Errors, MaxMessages, MaxText),
+        t.PublisherAttempts?.Where(a => a is { Attempt: > 0, Outcome: "connected" or "failed" or "cancelled" or "pending" })
+            .TakeLast(8).Select(a => new PublisherAttemptTelemetry(
+                a.Attempt, a.Outcome, a.Strategy is "all" or "relay" ? a.Strategy : "unknown", Duration(a.TotalMs),
+                DurationOrNull(a.IceConfigMs), DurationOrNull(a.GatherMs), DurationOrNull(a.PublishMs), DurationOrNull(a.HandshakeMs),
+                Candidate(a.LocalCandidateType), Candidate(a.RemoteCandidateType))).ToArray());
 
     public static ViewerSessionTelemetry Viewer(ViewerSessionTelemetry v) => new(
         v.Final, Text(v.Browser, MaxBrowser), Text(v.Platform, MaxBrowser),
@@ -64,7 +69,22 @@ public static class TelemetrySanitizer
         Count(v.KeyFrameRequests), Count(v.MaxFpsCaps), Range(v.MinMaxFps, MaxFps),
         Count(v.RealtimeReconnects), Texts(v.LineProblems, MaxMessages, MaxText),
         StatOrNull(v.JitterBufferMs), StatOrNull(v.LossPermille),
-        Texts(v.Errors, MaxMessages, MaxText));
+        Texts(v.Errors, MaxMessages, MaxText),
+        v.Startup is { } start ? new ViewerStartupTelemetry(
+            DurationOrNull(start.RequestToFirstFrameMs), DurationOrNull(start.ConnectToFirstFrameMs),
+            start.FirstFrameLine is "relay" or "realtime" ? start.FirstFrameLine : null,
+            (start.Attempts ?? []).Where(a => a is { Attempt: > 0, Outcome: "firstFrame" or "failed" or "cancelled" or "pending" })
+                .TakeLast(8).Select(a => new ViewerFastAttemptTelemetry(a.Attempt, a.Outcome, Duration(a.TotalMs),
+                    DurationOrNull(a.PublisherWaitMs), DurationOrNull(a.PullToFirstFrameMs))).ToArray()) : null,
+        v.Playback is { } p ? new ViewerPlaybackTelemetry(
+            NonnegativeOrNull(p.FastFramesDecoded), NonnegativeOrNull(p.FastFramesDropped), NonnegativeOrNull(p.FastNackRequests),
+            NonnegativeOrNull(p.FastRetransmittedPackets), p.FastDecodeMs is { Samples: > 0 } ? Stat(p.FastDecodeMs) : null,
+            p.RelayDecodeQueue is { Samples: > 0 } ? Stat(p.RelayDecodeQueue) : null, NonnegativeOrNull(p.RelaySkippedUntilKey)) : null);
+
+    private static string? Candidate(string? kind) => kind is "host" or "srflx" or "prflx" or "relay" ? kind : null;
+    private static int Duration(int milliseconds) => Math.Clamp(milliseconds, 0, 86_400_000);
+    private static int? DurationOrNull(int? milliseconds) => milliseconds is >= 0 ? Duration(milliseconds.Value) : null;
+    private static int? NonnegativeOrNull(int? count) => count is >= 0 ? count : null;
 
     // ---- 各个部分 ----
 

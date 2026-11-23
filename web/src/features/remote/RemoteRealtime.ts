@@ -2,6 +2,7 @@ import { api } from '@/api/client'
 import { unwrap } from '@/stores/remote'
 import { gathered } from '@/features/calls/rtc/RealtimeSession'
 import type { ReceiverReport } from './protocol'
+import { FastPlaybackCounters, type FastPlaybackDelta } from './playbackCounters'
 
 /** 浏览器有没有 WebRTC（快速线路要用） */
 export function realtimeSupported(): boolean {
@@ -172,7 +173,7 @@ export function pageVisible(): boolean {
 interface Sample { at: number; lost: number; received: number; bytes: number; delay: number; emitted: number }
 
 /** 每秒的接收回报；measured = false：这是第一份，还没有上一份可比，丢包、码率、缓冲都是 0（只为告诉被控端接上了） */
-export type MeasuredReport = ReceiverReport & { measured: boolean }
+export type MeasuredReport = ReceiverReport & { measured: boolean; playback: FastPlaybackDelta[] }
 
 /**
  * 快速线路的接收端：画面和声音经 Cloudflare Realtime（WebRTC）过来，不经我们的服务器中继。
@@ -199,6 +200,7 @@ export class RemoteRealtime {
   private mediaMs = 0
   private framesSinceReport = 0
   private previous: Sample | null = null
+  private readonly playbackCounters = new FastPlaybackCounters()
   private firstTimer: number | undefined
   private disconnectTimer: number | undefined
   private meter: { context: AudioContext; analyser: AnalyserNode; data: Float32Array<ArrayBuffer> } | null = null
@@ -388,10 +390,13 @@ export class RemoteRealtime {
     let delay = 0
     let emitted = 0
     let rttMs = 0
+    const playback: FastPlaybackDelta[] = []
     try {
       const stats = await pc.getStats()
       stats.forEach((s: Record<string, unknown>) => {
         if (s.type === 'inbound-rtp' && s.kind === 'video') {
+          const delta = this.playbackCounters.observe(s)
+          if (delta) playback.push(delta)
           lost = Number(s.packetsLost ?? 0)
           received = Number(s.packetsReceived ?? 0)
           bytes = Number(s.bytesReceived ?? 0)
@@ -410,7 +415,7 @@ export class RemoteRealtime {
     const frames = this.framesSinceReport
     this.framesSinceReport = 0
     // 帧率至少报 1：画面在这条线路上（屏幕不动时一秒里可能一帧都没有），被控端靠它知道这边接上了
-    if (!before) return { lossPermille: 0, receivedKbps: 0, jitterBufferMs: 0, fps: Math.max(1, frames), rttMs, measured: false }
+    if (!before) return { lossPermille: 0, receivedKbps: 0, jitterBufferMs: 0, fps: Math.max(1, frames), rttMs, measured: false, playback }
     const seconds = Math.max(0.2, (now - before.at) / 1000)
     const lostNow = Math.max(0, lost - before.lost)
     const receivedNow = Math.max(0, received - before.received)
@@ -422,6 +427,7 @@ export class RemoteRealtime {
       fps: Math.max(1, frames / seconds),
       rttMs,
       measured: true,
+      playback,
     }
   }
 

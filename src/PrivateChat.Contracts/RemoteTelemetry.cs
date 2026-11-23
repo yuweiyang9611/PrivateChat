@@ -82,7 +82,11 @@ public sealed record AgentSessionTelemetry(
     int MaxFpsCaps, int MinMaxFps,
     int LineConnects, int LineFailures, IReadOnlyList<string> LineProblems,
     TelemetryStat? LossPermille, TelemetryStat? ReceivedKbps, TelemetryStat? JitterBufferMs, TelemetryStat? ViewerFps,
-    IReadOnlyList<string> Errors);
+    IReadOnlyList<string> Errors, IReadOnlyList<PublisherAttemptTelemetry>? PublisherAttempts = null);
+
+public sealed record PublisherAttemptTelemetry(
+    int Attempt, string Outcome, string Strategy, int TotalMs, int? IceConfigMs, int? GatherMs,
+    int? PublishMs, int? HandshakeMs, string? LocalCandidateType, string? RemoteCandidateType);
 
 /// <summary>每秒一个样本的统计（Samples=0 时其余都是 0）。</summary>
 public sealed record TelemetryStat(int Samples, double Mean, double Min, double P10, double P50, double P90, double Max);
@@ -105,4 +109,13 @@ public sealed record ViewerSessionTelemetry(
     int KeyFrameRequests, int MaxFpsCaps, int MinMaxFps,
     int RealtimeReconnects, IReadOnlyList<string> LineProblems,
     TelemetryStat? JitterBufferMs, TelemetryStat? LossPermille,
-    IReadOnlyList<string> Errors);
+    IReadOnlyList<string> Errors, ViewerStartupTelemetry? Startup = null, ViewerPlaybackTelemetry? Playback = null);
+
+public sealed record ViewerStartupTelemetry(int? RequestToFirstFrameMs, int? ConnectToFirstFrameMs,
+    string? FirstFrameLine, IReadOnlyList<ViewerFastAttemptTelemetry> Attempts);
+
+public sealed record ViewerFastAttemptTelemetry(int Attempt, string Outcome, int TotalMs,
+    int? PublisherWaitMs, int? PullToFirstFrameMs);
+
+public sealed record ViewerPlaybackTelemetry(int? FastFramesDecoded, int? FastFramesDropped, int? FastNackRequests,
+    int? FastRetransmittedPackets, TelemetryStat? FastDecodeMs, TelemetryStat? RelayDecodeQueue, int? RelaySkippedUntilKey);

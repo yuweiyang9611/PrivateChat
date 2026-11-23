@@ -1,4 +1,7 @@
-import type { TelemetryStat, ViewerSessionTelemetry } from './telemetry'
+import type { TelemetryStat, ViewerPlaybackTelemetry, ViewerSessionTelemetry } from './telemetry'
+import type { FastPlaybackDelta } from './playbackCounters'
+import type { ViewerStartupTelemetry } from './telemetry'
+import { ViewerStartup } from './viewerStartup'
 
 // 控制端这边的遥测（docs/DESIGN.md"远程协助遥测"）：这次远程里这个浏览器看到的画面怎么样——每秒解出几帧、卡住过几次、
 // 要过几次关键帧、请对方少发过几次、快速线路断过几次……RemoteClient 在事情发生的地方各记一笔，每秒给一次状态；
@@ -165,6 +168,8 @@ export interface ViewerEnvironment {
 
 /** 存到 sessionStorage 里的（刷新页面接着同一次远程时接着记） */
 interface SavedTelemetry {
+  startup?: ViewerStartupTelemetry | null
+  playback?: SavedPlayback
   v: 1
   decodedFps: SavedSeries
   jitterBufferMs: SavedSeries
@@ -183,6 +188,19 @@ interface SavedTelemetry {
   realtimeReconnects: number
 }
 
+type SavedPlayback = Omit<ViewerPlaybackTelemetry, 'fastDecodeMs' | 'relayDecodeQueue'> & {
+  fastDecodeMs: SavedSeries; relayDecodeQueue: SavedSeries
+}
+
+function savedCount(n: unknown): number | null {
+  return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? Math.min(2_147_483_647, Math.floor(n)) : null
+}
+
+function addCount(total: number | null, sample: number | null): number | null {
+  const n = savedCount(sample)
+  return n === null ? total : Math.min(2_147_483_647, (total ?? 0) + n)
+}
+
 /**
  * 一次远程里控制端这边的汇总。
  * 卡住：页面在前台、连着对方、画面在一条线路上出着的时候，相邻两帧隔了 FREEZE_MS 以上，而且是这边的问题——
@@ -193,6 +211,14 @@ interface SavedTelemetry {
  * 晚到的按"上一帧之后对方停了多久"往后推（对方停着的那段不算），要过关键帧的最早从第一次要之前 KEY_LOOKBACK_MS 算起。
  */
 export class ViewerTelemetry {
+  readonly startup = new ViewerStartup(() => this.revision++)
+  private fastFramesDecoded: number | null = null
+  private fastFramesDropped: number | null = null
+  private fastNackRequests: number | null = null
+  private fastRetransmittedPackets: number | null = null
+  private fastDecodeMs = new Series()
+  private relayDecodeQueue = new Series()
+  private relaySkippedUntilKey: number | null = null
   private decodedFps = new Series()
   private jitterBufferMs = new Series()
   private lossPermille = new Series()
@@ -232,7 +258,7 @@ export class ViewerTelemetry {
 
   /** 记过东西（RemoteClient 跑起来过）：没有的话不用报 */
   get started(): boolean {
-    return this.accountedAt !== null || this.totalMs > 0
+    return this.accountedAt !== null || this.totalMs > 0 || this.startup.started
   }
 
   /** 状态变了（页面切到前台 / 后台、连上 / 断开、换了线路）：马上调，不用等下一秒 */
@@ -322,6 +348,34 @@ export class ViewerTelemetry {
     this.revision++
   }
 
+  fastPlayback(delta: FastPlaybackDelta): void {
+    this.fastFramesDecoded = addCount(this.fastFramesDecoded, delta.decoded)
+    this.fastFramesDropped = addCount(this.fastFramesDropped, delta.dropped)
+    this.fastNackRequests = addCount(this.fastNackRequests, delta.nack)
+    this.fastRetransmittedPackets = addCount(this.fastRetransmittedPackets, delta.retransmitted)
+    if (delta.decodeMs !== null) this.fastDecodeMs.add(delta.decodeMs)
+    this.revision++
+  }
+
+  relayQueue(size: number): void {
+    this.relayDecodeQueue.add(size)
+    this.relaySkippedUntilKey ??= 0
+    this.revision++
+  }
+
+  relaySkippedFrame(): void {
+    this.relaySkippedUntilKey = addCount(this.relaySkippedUntilKey, 1)
+    this.revision++
+  }
+
+  private playbackCounts() {
+    return {
+      fastFramesDecoded: this.fastFramesDecoded, fastFramesDropped: this.fastFramesDropped,
+      fastNackRequests: this.fastNackRequests, fastRetransmittedPackets: this.fastRetransmittedPackets,
+      relaySkippedUntilKey: this.relaySkippedUntilKey,
+    }
+  }
+
   /** 快速线路接不上 / 断了；retrying：过一会儿会重新接 */
   realtimeFailed(reason: string, retrying: boolean): void {
     this.lineProblems.add(`快速线路：${reason}`)
@@ -365,6 +419,7 @@ export class ViewerTelemetry {
     const optional = (s: Series): TelemetryStat | null => (s.samples ? s.stat() : null)
     return {
       final,
+      startup: this.startup.snapshot(now),
       browser: env.browser,
       platform: env.platform,
       screenWidth: Math.round(num(env.screenWidth)),
@@ -385,13 +440,20 @@ export class ViewerTelemetry {
       lineProblems: this.lineProblems.list(),
       jitterBufferMs: optional(this.jitterBufferMs),
       lossPermille: optional(this.lossPermille),
+      playback: { ...this.playbackCounts(), fastDecodeMs: optional(this.fastDecodeMs), relayDecodeQueue: optional(this.relayDecodeQueue) },
       errors: this.errors.list(),
     }
   }
 
   toJSON(): SavedTelemetry {
+    return this.save(performance.now())
+  }
+
+  save(now: number): SavedTelemetry {
     return {
       v: 1,
+      startup: this.startup.snapshot(now),
+      playback: { ...this.playbackCounts(), fastDecodeMs: this.fastDecodeMs.toJSON(), relayDecodeQueue: this.relayDecodeQueue.toJSON() },
       decodedFps: this.decodedFps.toJSON(),
       jitterBufferMs: this.jitterBufferMs.toJSON(),
       lossPermille: this.lossPermille.toJSON(),
@@ -415,6 +477,15 @@ export class ViewerTelemetry {
     if (!saved || typeof saved !== 'object' || (saved as { v?: unknown }).v !== 1) return null
     const o = saved as Partial<SavedTelemetry>
     const t = new ViewerTelemetry()
+    t.startup.restore(o.startup)
+    const p = o.playback
+    t.fastFramesDecoded = savedCount(p?.fastFramesDecoded)
+    t.fastFramesDropped = savedCount(p?.fastFramesDropped)
+    t.fastNackRequests = savedCount(p?.fastNackRequests)
+    t.fastRetransmittedPackets = savedCount(p?.fastRetransmittedPackets)
+    t.relaySkippedUntilKey = savedCount(p?.relaySkippedUntilKey)
+    t.fastDecodeMs = Series.from(p?.fastDecodeMs)
+    t.relayDecodeQueue = Series.from(p?.relayDecodeQueue)
     t.decodedFps = Series.from(o.decodedFps)
     t.jitterBufferMs = Series.from(o.jitterBufferMs)
     t.lossPermille = Series.from(o.lossPermille)

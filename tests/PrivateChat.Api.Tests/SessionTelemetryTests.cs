@@ -16,6 +16,69 @@ public class SessionTelemetryTests
 
     private static readonly TelemetryStat Empty = new(0, 0, 0, 0, 0, 0, 0);
 
+    [Fact]
+    public void Publisher_checkpoints_and_failure_include_elapsed_time_in_the_unfinished_stage()
+    {
+        long now = 100;
+        var telemetry = new SessionTelemetry("test", () => now);
+        var attempt = telemetry.BeginPublisherAttempt();
+        now = 103;
+        attempt.Enter(SessionTelemetry.PublisherStage.IceConfig);
+        now = 109;
+        attempt.Enter(SessionTelemetry.PublisherStage.Gather, false);
+        now = 120;
+        var pending = Assert.Single(telemetry.Build(false).PublisherAttempts!);
+        Assert.Equal(new PublisherAttemptTelemetry(1, "pending", "all", 20, 6, 11, null, null, null, null), pending);
+        now = 130;
+        attempt.Finish(SessionTelemetry.PublisherOutcome.Failed);
+        now = 200;
+        var failed = Assert.Single(telemetry.Build(true).PublisherAttempts!);
+        Assert.Equal(new PublisherAttemptTelemetry(1, "failed", "all", 30, 6, 21, null, null, null, null), failed);
+        Assert.Equal(11, pending.GatherMs);
+    }
+
+    [Fact]
+    public void Old_callbacks_do_not_change_cancelled_attempts_or_the_next_attempt()
+    {
+        long now = 0;
+        var telemetry = new SessionTelemetry("test", () => now);
+        var old = telemetry.BeginPublisherAttempt();
+        now = 2;
+        old.Finish(SessionTelemetry.PublisherOutcome.Cancelled);
+        var current = telemetry.BeginPublisherAttempt();
+        current.Enter(SessionTelemetry.PublisherStage.IceConfig);
+        now = 3;
+        current.Enter(SessionTelemetry.PublisherStage.Gather, true);
+        now = 5;
+        current.Enter(SessionTelemetry.PublisherStage.Publish);
+        old.Enter(SessionTelemetry.PublisherStage.IceConfig);
+        old.Finish(SessionTelemetry.PublisherOutcome.Failed, ("host", "relay"));
+        now = 8;
+        current.Enter(SessionTelemetry.PublisherStage.Handshake);
+        now = 12;
+        current.Finish(SessionTelemetry.PublisherOutcome.Connected, ("relay", "host"));
+        Assert.Equal(new PublisherAttemptTelemetry[]
+        {
+            new(1, "cancelled", "unknown", 2, null, null, null, null, null, null),
+            new(2, "connected", "relay", 10, 1, 2, 3, 4, "relay", "host"),
+        }, telemetry.Build(true).PublisherAttempts);
+    }
+
+    [Fact]
+    public void Reports_keep_the_last_eight_attempts_and_only_recognized_candidate_types()
+    {
+        var telemetry = new SessionTelemetry("test", () => 0);
+        for (var i = 0; i < 10; i++)
+            telemetry.BeginPublisherAttempt().Finish(SessionTelemetry.PublisherOutcome.Failed, ("srflx", "not-a-type"));
+        var attempts = telemetry.Build(false).PublisherAttempts!;
+        Assert.Equal(Enumerable.Range(3, 8), attempts.Select(a => a.Attempt));
+        Assert.All(attempts, attempt =>
+        {
+            Assert.Equal("srflx", attempt.LocalCandidateType);
+            Assert.Null(attempt.RemoteCandidateType);
+        });
+    }
+
     private static SessionSecond Second(int fps = 30, int kbps = 2000, int target = 3000, double? captureMs = 5, double? encodeMs = 8, int cpu = 10,
         int rtt = 40, bool cpuBound = false, bool realtime = false, VideoSettings? settings = null, int width = 1920, int height = 1080, bool secure = false)
         => new(fps, kbps, target, captureMs, encodeMs, cpu, rtt, cpuBound, realtime, settings ?? VideoSettings.Auto, width, height, secure);
@@ -306,6 +369,15 @@ public class SessionTelemetryTests
                 t.OnLineFailed($"{i}{new string('断', 400)}");
             }
         t.OnReceiverReport(5, 2500, 40, 30);
+        for (var i = 0; i < 8; i++)
+        {
+            var attempt = t.BeginPublisherAttempt();
+            attempt.Enter(SessionTelemetry.PublisherStage.IceConfig);
+            attempt.Enter(SessionTelemetry.PublisherStage.Gather, relayOnly: true);
+            attempt.Enter(SessionTelemetry.PublisherStage.Publish);
+            attempt.Enter(SessionTelemetry.PublisherStage.Handshake);
+            attempt.Finish(SessionTelemetry.PublisherOutcome.Connected, ("relay", "srflx"));
+        }
         var json = JsonSerializer.SerializeToUtf8Bytes(t.Build(final: true), Json);
         // 服务器收 64 KB 以内；汉字在 JSON 里写成 \uXXXX
         Assert.True(json.Length < 56 * 1024, $"{json.Length} 字节");

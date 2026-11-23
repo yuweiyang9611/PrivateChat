@@ -13,6 +13,7 @@ import AddDeviceDialog from './AddDeviceDialog.vue'
 import DeviceDiagnosticsDialog from './DeviceDiagnosticsDialog.vue'
 import DeviceSettingsDialog from './DeviceSettingsDialog.vue'
 import { formatBytes, formatWhen, sessionMinutes } from './format'
+import { requestedSessionRoute } from './viewerStartup'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -86,12 +87,12 @@ function canEnd(d: DeviceDto): boolean {
   return !!d.session && (d.canManage || d.session.controllerUserId === me.value)
 }
 
-async function start(d: DeviceDto, mode: RemoteSessionMode, pin?: string): Promise<void> {
+async function start(d: DeviceDto, mode: RemoteSessionMode, pin?: string, requestedAt = performance.now()): Promise<void> {
   if (!online.value) return
   starting.value = d.id
   try {
     const s = await remote.start(d.id, mode, pin)
-    await router.push(`/remote/${s.id}`)
+    await router.push(requestedSessionRoute(s.id, requestedAt))
   } catch (e) {
     ElMessage.error((e as Error).message)
   } finally {
@@ -100,6 +101,7 @@ async function start(d: DeviceDto, mode: RemoteSessionMode, pin?: string): Promi
 }
 
 async function startWithPin(d: DeviceDto): Promise<void> {
+  const requestedAt = performance.now()
   try {
     const { value } = await ElMessageBox.prompt(t('remote.pinPrompt'), t('remote.pinTitle'), {
       inputType: 'password',
@@ -108,7 +110,7 @@ async function startWithPin(d: DeviceDto): Promise<void> {
       confirmButtonText: t('remote.control'),
       cancelButtonText: t('common.cancel'),
     })
-    await start(d, 'Control', value)
+    await start(d, 'Control', value, requestedAt)
   } catch {
     // 取消
   }

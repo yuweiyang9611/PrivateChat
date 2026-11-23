@@ -160,7 +160,7 @@ public sealed class SessionRunner : IAsyncDisposable
     /// <summary>已经接通的快速线路；null 表示画面和声音只走中继。</summary>
     private volatile Line? _line;
     private readonly Lock _lineGate = new();
-    private CancellationTokenSource? _openingLine;
+    private PublisherOpening? _openingLine;
     private readonly PublisherIceRetry _iceRetry = new();
     // 服务端每个远程会话只保留一份发布登记。换 peer 时让已提交的请求结束后再提交新的。
     private readonly SemaphoreSlim _publishGate = new(1, 1);
@@ -179,6 +179,16 @@ public sealed class SessionRunner : IAsyncDisposable
     private int _telemetrySent = -1;
     private int _telemetryFailureLogged;
     private int _telemetryFinalStarted;
+
+    private sealed class PublisherOpening(SessionTelemetry.PublisherAttempt? telemetry)
+    {
+        public CancellationTokenSource Cancellation { get; } = new();
+        public SessionTelemetry.PublisherAttempt? Telemetry { get; } = telemetry;
+        public volatile RealtimePublisher? Publisher;
+
+        public void Finish(SessionTelemetry.PublisherOutcome outcome)
+            => Telemetry?.Finish(outcome, Publisher?.NominatedCandidateTypes ?? default);
+    }
 
     private sealed class Line(RealtimePublisher publisher, RealtimeRateController rate, long readyAt)
     {
@@ -583,7 +593,7 @@ public sealed class SessionRunner : IAsyncDisposable
 
     private void StartRealtime()
     {
-        CancellationTokenSource attempt;
+        PublisherOpening attempt;
         lock (_lineGate)
         {
             if (!_peer || _cts.IsCancellationRequested) return;
@@ -600,24 +610,25 @@ public sealed class SessionRunner : IAsyncDisposable
                 _telemetry?.OnLineFailed("服务器没有开快速线路");
                 return;
             }
-            _openingLine = attempt = new CancellationTokenSource();
+            _openingLine = attempt = new PublisherOpening(_telemetry?.BeginPublisherAttempt());
         }
         AgentLog.Info("控制端要走快速线路，开始接通");
         _ = Task.Run(() => OpenRealtimeAsync(attempt));
     }
 
-    private async Task OpenRealtimeAsync(CancellationTokenSource attempt)
+    private async Task OpenRealtimeAsync(PublisherOpening attempt)
     {
         RealtimePublisher? publisher = null;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
         deadline.CancelAfter(TimeSpan.FromSeconds(20));
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(attempt.Token, deadline.Token);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(attempt.Cancellation.Token, deadline.Token);
         IReadOnlyList<RemoteIceServer> servers = [];
         var stage = "ICE 配置";
         const string connecting = "ICE/DTLS 接通";
         try
         {
             timeout.Token.ThrowIfCancellationRequested();
+            attempt.Telemetry?.Enter(SessionTelemetry.PublisherStage.IceConfig);
             using var api = new ServerApi(_server);
             var info = await api.GetRealtimeAsync(Id, timeout.Token);
             if (info is not { Available: true }) throw new PublisherStartupException("服务器没有开快速线路");
@@ -627,10 +638,12 @@ public sealed class SessionRunner : IAsyncDisposable
             {
                 if (_openingLine != attempt) return;
                 relayOnly = _iceRetry.TakeRelayOnly(servers);
+                attempt.Telemetry?.Enter(SessionTelemetry.PublisherStage.Gather, relayOnly);
             }
             stage = "收集本地候选";
             if (VerboseLine) LibraryLog.EnableIfAsked();
             publisher = new RealtimePublisher(servers, relayOnly);
+            if (attempt.Telemetry is not null) attempt.Publisher = publisher;
             if (TestDropRate() is > 0 and var drop) publisher.DropForTest = _ => Random.Shared.NextDouble() < drop;
             if (TestLoseEveryMs() is > 0 and var every)
             {
@@ -652,6 +665,7 @@ public sealed class SessionRunner : IAsyncDisposable
             }
             var offer = await publisher.CreateOfferAsync(timeout.Token);
             stage = "SFU 发布";
+            attempt.Telemetry?.Enter(SessionTelemetry.PublisherStage.Publish);
             await _publishGate.WaitAsync(timeout.Token);
             RemoteRealtimePublishResponse answer;
             try
@@ -669,6 +683,7 @@ public sealed class SessionRunner : IAsyncDisposable
             finally { _publishGate.Release(); }
             timeout.Token.ThrowIfCancellationRequested();
             stage = "应用 SFU 应答";
+            attempt.Telemetry?.Enter(SessionTelemetry.PublisherStage.Handshake);
             publisher.SetAnswer(answer.Answer);
             stage = connecting;
             await publisher.WaitConnectedAsync(LineConnectTimeout, timeout.Token);
@@ -684,6 +699,7 @@ public sealed class SessionRunner : IAsyncDisposable
                     if (r.Video) line.Rate.OnUpstreamLoss(r.FractionLost, _clock.ElapsedMilliseconds);
                 };
                 publisher.StateChanged += state => OnLineState(line, state);
+                attempt.Finish(SessionTelemetry.PublisherOutcome.Connected);
                 _openingLine = null;
                 _iceRetry.Reset();
                 _lineGeneration = (_lineGeneration + 1) & 0xFF;
@@ -702,6 +718,7 @@ public sealed class SessionRunner : IAsyncDisposable
             lock (_lineGate)
             {
                 if (_openingLine != attempt || _cts.IsCancellationRequested) return;
+                attempt.Finish(SessionTelemetry.PublisherOutcome.Failed);
                 _openingLine = null;
                 var timedOut = ex is TimeoutException || ex is OperationCanceledException && deadline.IsCancellationRequested;
                 if (stage == connecting && timedOut && publisher?.IceChecksPending == true) _iceRetry.IceTimedOut(servers);
@@ -724,8 +741,12 @@ public sealed class SessionRunner : IAsyncDisposable
         {
             lock (_lineGate)
             {
-                if (_openingLine == attempt) _openingLine = null;
-                attempt.Dispose();
+                if (_openingLine == attempt)
+                {
+                    attempt.Finish(SessionTelemetry.PublisherOutcome.Cancelled);
+                    _openingLine = null;
+                }
+                attempt.Cancellation.Dispose();
             }
             publisher?.Dispose();
         }
@@ -761,7 +782,8 @@ public sealed class SessionRunner : IAsyncDisposable
         lock (_lineGate)
         {
             if (only is not null && !ReferenceEquals(_line, only)) return false;
-            _openingLine?.Cancel();
+            _openingLine?.Finish(SessionTelemetry.PublisherOutcome.Cancelled);
+            _openingLine?.Cancellation.Cancel();
             _openingLine = null;
             _iceRetry.Reset();
             line = _line;
@@ -1721,11 +1743,11 @@ public sealed class SessionRunner : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await _cts.CancelAsync();
+        StopRealtime(null); // 最后一份遥测要包含刚才取消的接通尝试。
         // 遥测的最后一份：换个线程报（这里可能是界面线程），和下面关连接、等线程同时进行，自己最多 3 秒
         var telemetry = _telemetry is not null && Interlocked.Exchange(ref _telemetryFinalStarted, 1) == 0
             ? Task.Run(ReportFinalAsync) : Task.CompletedTask;
         _input.ReleaseAll();
-        StopRealtime(null);
         if (_connection?.Socket is { State: WebSocketState.Open } socket)
         {
             try

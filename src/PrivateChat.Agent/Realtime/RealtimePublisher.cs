@@ -125,6 +125,16 @@ public sealed class RealtimePublisher : IDisposable
 
     public bool IceChecksPending => _pc.iceConnectionState is RTCIceConnectionState.@new or RTCIceConnectionState.checking;
 
+    /// <summary>只取这次 ICE 真正提名的两端类型。没有提名时两边都是 null。</summary>
+    internal (string? Local, string? Remote) NominatedCandidateTypes
+    {
+        get
+        {
+            var pair = _pc.GetRtpChannel()?.NominatedEntry;
+            return pair is null ? default : (pair.LocalCandidate.type.ToString(), pair.RemoteCandidate.type.ToString());
+        }
+    }
+
     /// <summary>只统计候选类型；不含地址或服务凭据。</summary>
     public string CandidateSummary
     {
