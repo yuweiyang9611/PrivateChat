@@ -160,9 +160,10 @@ public sealed class SessionRunner : IAsyncDisposable
     /// <summary>已经接通的快速线路；null 表示画面和声音只走中继。</summary>
     private volatile Line? _line;
     private readonly Lock _lineGate = new();
-    private bool _lineStarting;
-    /// <summary>每次要接、要停都加一：进行到一半的那次据此知道自己作废了。</summary>
-    private int _lineAttempt;
+    private CancellationTokenSource? _openingLine;
+    private readonly PublisherIceRetry _iceRetry = new();
+    // 服务端每个远程会话只保留一份发布登记。换 peer 时让已提交的请求结束后再提交新的。
+    private readonly SemaphoreSlim _publishGate = new(1, 1);
     /// <summary>第几次接通（发给控制端，它据此知道要重新拉流）。</summary>
     private int _lineGeneration;
     private long _lastLineKeyAt = -10_000;
@@ -582,42 +583,54 @@ public sealed class SessionRunner : IAsyncDisposable
 
     private void StartRealtime()
     {
-        int attempt;
+        CancellationTokenSource attempt;
         lock (_lineGate)
         {
+            if (!_peer || _cts.IsCancellationRequested) return;
             if (_line is not null)
             {
                 // 已经接通了（控制端可能没收到上一条通知）：再说一遍
                 Send(RemoteFrames.Transport(RemoteTransportState.Realtime, _lineGeneration));
                 return;
             }
-            if (_lineStarting) return;
+            if (_openingLine is not null) return;
             if (!_realtimeOffered)
             {
                 Send(RemoteFrames.Transport(RemoteTransportState.RealtimeFailed, _lineGeneration, "服务器没有开快速线路"));
                 _telemetry?.OnLineFailed("服务器没有开快速线路");
                 return;
             }
-            _lineStarting = true;
-            attempt = ++_lineAttempt;
+            _openingLine = attempt = new CancellationTokenSource();
         }
         AgentLog.Info("控制端要走快速线路，开始接通");
         _ = Task.Run(() => OpenRealtimeAsync(attempt));
     }
 
-    private async Task OpenRealtimeAsync(int attempt)
+    private async Task OpenRealtimeAsync(CancellationTokenSource attempt)
     {
         RealtimePublisher? publisher = null;
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(20));
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(attempt.Token, deadline.Token);
+        IReadOnlyList<RemoteIceServer> servers = [];
+        var stage = "ICE 配置";
+        const string connecting = "ICE/DTLS 接通";
         try
         {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
-            timeout.CancelAfter(TimeSpan.FromSeconds(20));
+            timeout.Token.ThrowIfCancellationRequested();
             using var api = new ServerApi(_server);
             var info = await api.GetRealtimeAsync(Id, timeout.Token);
-            if (info is not { Available: true }) throw new InvalidOperationException("服务器没有开快速线路");
-
+            if (info is not { Available: true }) throw new PublisherStartupException("服务器没有开快速线路");
+            servers = info.IceServers;
+            bool relayOnly;
+            lock (_lineGate)
+            {
+                if (_openingLine != attempt) return;
+                relayOnly = _iceRetry.TakeRelayOnly(servers);
+            }
+            stage = "收集本地候选";
             if (VerboseLine) LibraryLog.EnableIfAsked();
-            publisher = new RealtimePublisher(info.IceServers);
+            publisher = new RealtimePublisher(servers, relayOnly);
             if (TestDropRate() is > 0 and var drop) publisher.DropForTest = _ => Random.Shared.NextDouble() < drop;
             if (TestLoseEveryMs() is > 0 and var every)
             {
@@ -637,38 +650,47 @@ public sealed class SessionRunner : IAsyncDisposable
                 publisher.Trace = message => AgentLog.Info($"快速线路：{message}");
                 publisher.TraceFrames = Environment.GetEnvironmentVariable("PRIVATECHAT_AGENT_REALTIME_FRAMES") == "1";
             }
-            var offer = await publisher.CreateOfferAsync();
-            // 收集候选要一会儿。这期间这次接通作废了的话（控制端改了主意、换了连接，可能已经在接下一次）就不要再去登记：
-            // 服务器上一次会话只留一份登记，晚到的这份会把后来那次已经接通的线路顶掉
-            lock (_lineGate)
-                if (attempt != _lineAttempt) return;
-            var answer = await api.PublishRealtimeAsync(Id, new RemoteRealtimePublishRequest(offer, publisher.Tracks), timeout.Token);
+            var offer = await publisher.CreateOfferAsync(timeout.Token);
+            stage = "SFU 发布";
+            await _publishGate.WaitAsync(timeout.Token);
+            RemoteRealtimePublishResponse answer;
+            try
+            {
+                Task<RemoteRealtimePublishResponse> publish;
+                lock (_lineGate)
+                {
+                    if (_openingLine != attempt) return;
+                    timeout.Token.ThrowIfCancellationRequested();
+                    // 请求已经交给服务器以后，即便换了 peer 也等这次登记返回；本次总时限和会话关闭仍会终止等待。
+                    publish = api.PublishRealtimeAsync(Id, new RemoteRealtimePublishRequest(offer, publisher.Tracks), deadline.Token);
+                }
+                answer = await publish;
+            }
+            finally { _publishGate.Release(); }
+            timeout.Token.ThrowIfCancellationRequested();
+            stage = "应用 SFU 应答";
             publisher.SetAnswer(answer.Answer);
+            stage = connecting;
             await publisher.WaitConnectedAsync(LineConnectTimeout, timeout.Token);
 
             // 码率从中继那边估到的起步（至少是起步码率），之后按这条线路自己的情况调
             var line = new Line(publisher, new RealtimeRateController(MinKbps, _net.MaxKbps, Math.Max(StartKbps, _net.TargetKbps)), _clock.ElapsedMilliseconds);
-            int generation;
             lock (_lineGate)
             {
-                if (attempt != _lineAttempt || !_peer)
-                {
-                    // 等的这会儿控制端走了、或者改主意了：这条连接不要了（finally 里收掉）
-                    if (attempt == _lineAttempt) _lineStarting = false;
-                    return;
-                }
+                if (_openingLine != attempt || !_peer || _cts.IsCancellationRequested) return;
                 publisher.KeyFrameRequested += OnLineKeyRequest;
                 publisher.ReceptionReported += r =>
                 {
                     if (r.Video) line.Rate.OnUpstreamLoss(r.FractionLost, _clock.ElapsedMilliseconds);
                 };
                 publisher.StateChanged += state => OnLineState(line, state);
-                _lineStarting = false;
-                generation = _lineGeneration = (_lineGeneration + 1) & 0xFF;
+                _openingLine = null;
+                _iceRetry.Reset();
+                _lineGeneration = (_lineGeneration + 1) & 0xFF;
                 _line = line;
+                Send(RemoteFrames.Transport(RemoteTransportState.Realtime, _lineGeneration));
             }
             publisher = null; // 归 _line 管了
-            Send(RemoteFrames.Transport(RemoteTransportState.Realtime, generation));
             AgentLog.Info("快速线路已接通（经 Cloudflare Realtime），等控制端接上");
             _telemetry?.OnLineConnected();
             // 登记事件之前连接可能已经断了
@@ -676,21 +698,35 @@ public sealed class SessionRunner : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            bool mine;
+            string reason;
             lock (_lineGate)
             {
-                mine = attempt == _lineAttempt;
-                if (mine) _lineStarting = false;
+                if (_openingLine != attempt || _cts.IsCancellationRequested) return;
+                _openingLine = null;
+                var timedOut = ex is TimeoutException || ex is OperationCanceledException && deadline.IsCancellationRequested;
+                if (stage == connecting && timedOut && publisher?.IceChecksPending == true) _iceRetry.IceTimedOut(servers);
+                var detail = ex switch
+                {
+                    PublisherStartupException => ex.Message,
+                    TimeoutException when stage == connecting => ex.Message, // WaitConnectedAsync 自己生成的状态枚举
+                    _ when timedOut => "超时",
+                    ServerException se => $"HTTP {(int)se.Status}",
+                    _ => ex.GetType().Name,
+                };
+                reason = $"{stage}：{detail}";
+                if (publisher is not null) reason += $"；{publisher.CandidateSummary}";
+                Send(RemoteFrames.Transport(RemoteTransportState.RealtimeFailed, _lineGeneration, reason));
             }
-            if (!mine || _cts.IsCancellationRequested) return;
-            var reason = ex is OperationCanceledException ? "超时" : ex.Message;
-            if (reason.Length > 120) reason = reason[..120];
             AgentLog.Warn($"快速线路没接通，画面继续走中继：{reason}");
             _telemetry?.OnLineFailed($"没接通：{reason}");
-            Send(RemoteFrames.Transport(RemoteTransportState.RealtimeFailed, _lineGeneration, reason));
         }
         finally
         {
+            lock (_lineGate)
+            {
+                if (_openingLine == attempt) _openingLine = null;
+                attempt.Dispose();
+            }
             publisher?.Dispose();
         }
     }
@@ -725,8 +761,9 @@ public sealed class SessionRunner : IAsyncDisposable
         lock (_lineGate)
         {
             if (only is not null && !ReferenceEquals(_line, only)) return false;
-            _lineAttempt++; // 正在接的那次作废
-            _lineStarting = false;
+            _openingLine?.Cancel();
+            _openingLine = null;
+            _iceRetry.Reset();
             line = _line;
             _line = null;
             generation = _lineGeneration;

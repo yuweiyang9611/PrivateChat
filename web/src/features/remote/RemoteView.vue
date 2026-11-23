@@ -501,7 +501,7 @@ function setFast(value: boolean): void {
   stage.value?.focus()
 }
 
-/** 快速线路试了几次没接上、停下来之后，再试一轮 */
+/** 跳过自动重试的等待，或在尝试用尽后再试一轮 */
 function retryFast(): void {
   client?.retryRealtime()
   stage.value?.focus()
@@ -878,14 +878,12 @@ watch(textOpen, (open) => {
         <!-- 选的是快速线路，但它还没接上 / 出了问题：这期间没有画面（不拿标准线路的顶上），在这里说明并给出手动切换的入口 -->
         <div v-else-if="line === 'connecting'" class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center text-sm"
           style="background: rgba(0, 0, 0, 0.55)" data-testid="remote-line-wait">
-          <template v-if="lineProblem">
-            <div data-testid="remote-line-problem">{{ t(lineProblem.retrying ? 'remote.viewer.lineProblemRetrying' : 'remote.viewer.lineProblem', { reason: lineProblem.reason }) }}</div>
-            <div class="pointer-events-auto flex gap-2">
-              <el-button v-if="!lineProblem.retrying" round size="small" data-testid="remote-line-retry" @click="retryFast">{{ t('remote.viewer.lineRetry') }}</el-button>
-              <el-button round size="small" type="primary" data-testid="remote-line-use-standard" @click="setFast(false)">{{ t('remote.viewer.lineUseStandard') }}</el-button>
-            </div>
-          </template>
+          <div v-if="lineProblem" :data-retrying="lineProblem.retrying" data-testid="remote-line-problem">{{ t(lineProblem.retrying ? 'remote.viewer.lineProblemRetrying' : 'remote.viewer.lineProblem', { reason: lineProblem.reason }) }}</div>
           <div v-else class="text-gray-300">{{ t('remote.viewer.lineConnecting') }}</div>
+          <div class="pointer-events-auto flex gap-2">
+            <el-button v-if="lineProblem" round size="small" data-testid="remote-line-retry" @click="retryFast">{{ t('remote.viewer.lineRetry') }}</el-button>
+            <el-button round size="small" type="primary" data-testid="remote-line-use-standard" @click="setFast(false)">{{ t('remote.viewer.lineUseStandard') }}</el-button>
+          </div>
         </div>
       </template>
     </div>

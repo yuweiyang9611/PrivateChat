@@ -48,6 +48,7 @@
     <Compile Include="..\..\src\PrivateChat.Agent\Session\SessionTelemetry.cs" Link="Agent\SessionTelemetry.cs" />
     <!-- 快速线路（经 Cloudflare Realtime）里的纯计算：H.264 的 RTP 分片、码率控制 -->
     <Compile Include="..\..\src\PrivateChat.Agent\Realtime\H264Rtp.cs" Link="Agent\H264Rtp.cs" />
+    <Compile Include="..\..\src\PrivateChat.Agent\Realtime\PublisherIceRetry.cs" Link="Agent\PublisherIceRetry.cs" />
     <Compile Include="..\..\src\PrivateChat.Agent\Session\RealtimeRateControl.cs" Link="Agent\RealtimeRateControl.cs" />
   </ItemGroup>
 

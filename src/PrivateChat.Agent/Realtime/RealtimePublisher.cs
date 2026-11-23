@@ -9,6 +9,9 @@ public readonly record struct RealtimeReception(bool Video, double FractionLost,
 
 public enum RealtimeLinkState { Connecting, Connected, Disconnected, Failed, Closed }
 
+// 这些消息只包含本程序的固定文字和协议状态，可以交给控制端和遥测。
+internal sealed class PublisherStartupException(string detail) : InvalidOperationException(detail) { }
+
 /// <summary>
 /// 快速线路的发送端：一条 WebRTC 连接，把已经编好的 H.264 画面和 Opus 声音发给 Cloudflare Realtime（SFU），只发不收。
 /// 信令不在这里：调用方拿 <see cref="CreateOfferAsync"/> 的 offer 去换 answer（经我们自己的服务器），再交给 <see cref="SetAnswer"/>。
@@ -32,6 +35,8 @@ public sealed class RealtimePublisher : IDisposable
     private readonly record struct SentPacket(ushort Sequence, byte[] Data, uint Timestamp, bool Marker, long SentAt);
 
     private readonly RTCPeerConnection _pc;
+    private readonly bool _relayOnly;
+    private readonly bool _hasTurn;
     private readonly VideoStream _video;
     /// <summary>接通后定期重申走哪条路（见 <see cref="IcePathKeeper"/>："接通约 35 秒后断流"的修法）</summary>
     private readonly IcePathKeeper _path;
@@ -56,11 +61,17 @@ public sealed class RealtimePublisher : IDisposable
     /// <summary>排查用：连每一帧发了哪些包也记（一秒最多三十行，只在要对包的时候开）。</summary>
     public bool TraceFrames { get; set; }
 
-    public RealtimePublisher(IReadOnlyList<RemoteIceServer> iceServers)
+    public RealtimePublisher(IReadOnlyList<RemoteIceServer> iceServers, bool relayOnly = false)
     {
+        _relayOnly = relayOnly;
+        _hasTurn = PublisherIceRetry.HasTurn(iceServers);
         var config = new RTCConfiguration
         {
-            iceServers = [.. iceServers.SelectMany(s => s.Urls.Select(url => new RTCIceServer { urls = url, username = s.Username, credential = s.Credential }))],
+            iceTransportPolicy = relayOnly ? RTCIceTransportPolicy.relay : RTCIceTransportPolicy.all,
+            iceServers = [.. iceServers.SelectMany(s => s.Urls.Where(url => !relayOnly || PublisherIceRetry.IsTurn(url))
+                .Select(url => new RTCIceServer { urls = url, username = s.Username, credential = s.Credential }))],
+            // createOffer 即使不等外部 ICE 服务器，也会同步等本机网卡枚举。
+            X_GatherTimeoutMs = 1500,
             bundlePolicy = RTCBundlePolicy.max_bundle,
             // 要用 SAVPF 这个 profile，对面才会发 NACK、PLI 这类反馈
             X_UseRtpFeedbackProfile = true,
@@ -112,10 +123,43 @@ public sealed class RealtimePublisher : IDisposable
     /// <summary>offer 里的两条轨道（给服务器登记用）。<see cref="CreateOfferAsync"/> 之后才有。</summary>
     public IReadOnlyList<RemoteRealtimeTrack> Tracks { get; private set; } = [];
 
-    public async Task<string> CreateOfferAsync()
+    public bool IceChecksPending => _pc.iceConnectionState is RTCIceConnectionState.@new or RTCIceConnectionState.checking;
+
+    /// <summary>只统计候选类型；不含地址或服务凭据。</summary>
+    public string CandidateSummary
     {
-        // 等候选收集完会阻塞（没有 STUN / TURN 时很快，有的话等它们回话或超时）
-        var offer = await Task.Run(() => _pc.createOffer(new RTCOfferOptions { X_WaitForIceGatheringToComplete = true }));
+        get
+        {
+            var candidates = _pc.GetRtpChannel().Candidates;
+            return $"{(_relayOnly ? "仅 TURN" : _hasTurn ? "含 TURN" : "无 TURN")} host={candidates.Count(c => c.type == RTCIceCandidateType.host)} " +
+                $"srflx={candidates.Count(c => c.type == RTCIceCandidateType.srflx)} relay={candidates.Count(c => c.type == RTCIceCandidateType.relay)}";
+        }
+    }
+
+    public async Task<string> CreateOfferAsync(CancellationToken ct = default)
+    {
+        // 10.0.19-pre 的同步“等全部候选”分支没有把取消令牌传给 Wait。订阅后再看状态，避免错过完成事件。
+        var gathered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnGathering(RTCIceGatheringState state)
+        {
+            if (state == RTCIceGatheringState.complete) gathered.TrySetResult();
+        }
+        _pc.onicegatheringstatechange += OnGathering;
+        try
+        {
+            OnGathering(_pc.iceGatheringState);
+            try { await gathered.Task.WaitAsync(TimeSpan.FromSeconds(5), ct); }
+            catch (TimeoutException) { /* 发已经收集到的候选 */ }
+        }
+        finally
+        {
+            _pc.onicegatheringstatechange -= OnGathering;
+        }
+        ct.ThrowIfCancellationRequested();
+        if (_relayOnly && !_pc.GetRtpChannel().Candidates.Any(c => c.type == RTCIceCandidateType.relay))
+            throw new PublisherStartupException("未取得 TURN 中转候选");
+        var offer = _pc.createOffer();
+        ct.ThrowIfCancellationRequested();
         await _pc.setLocalDescription(offer);
         Tracks = ParseTracks(offer.sdp);
         return offer.sdp;
@@ -124,7 +168,7 @@ public sealed class RealtimePublisher : IDisposable
     public void SetAnswer(string sdp)
     {
         var result = _pc.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.answer, sdp = sdp });
-        if (result != SetDescriptionResultEnum.OK) throw new InvalidOperationException($"对面的 answer 用不了：{result}");
+        if (result != SetDescriptionResultEnum.OK) throw new PublisherStartupException($"对面的应答用不了：{result}");
     }
 
     /// <summary>等连接建好（ICE 通了、DTLS 握完手）。超时或连接失败抛异常。</summary>
@@ -270,12 +314,12 @@ public sealed class RealtimePublisher : IDisposable
                 break;
             case RTCPeerConnectionState.failed:
                 _up = false;
-                _connected.TrySetException(new InvalidOperationException("连接没建起来（ICE 或 DTLS 失败）"));
+                _connected.TrySetException(new PublisherStartupException("连接没建起来（ICE 或 DTLS 失败）"));
                 Changed(RealtimeLinkState.Failed);
                 break;
             case RTCPeerConnectionState.closed:
                 _up = false;
-                _connected.TrySetException(new InvalidOperationException("连接已关闭"));
+                _connected.TrySetException(new PublisherStartupException("连接已关闭"));
                 Changed(RealtimeLinkState.Closed);
                 break;
         }

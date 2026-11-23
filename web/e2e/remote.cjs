@@ -570,7 +570,7 @@ async function moveOnCanvas(page, fx, fy) {
     const seen3 = new Set()
     const gaveUp = await until(async () => {
       seen3.add(await lineNow())
-      return (await retry.count()) > 0
+      return (await admin.locator('[data-testid=remote-line-problem][data-retrying=false]').count()) > 0
     }, 120000, 250)
     const stillNoPicture = (await fpsNow()) === 0
     check('快速线路接不上：不自动换到标准线路（中继上有画面帧来也不画），试几次之后停下来等用户决定，会话不断',
@@ -580,7 +580,7 @@ async function moveOnCanvas(page, fx, fy) {
     mark = agent.out.length
     await retry.click()
     const retried = await until(() => agent.out.slice(mark).includes('控制端要走快速线路'), 10000)
-    const failedAgain = await until(async () => (await lineProblem.count()) > 0 && (await lineProblem.textContent()).includes('正在重新接'), 20000)
+    const failedAgain = await until(async () => (await admin.locator('[data-testid=remote-line-problem][data-retrying=true]').count()) > 0, 20000)
     check('点"重试"：重新去接快速线路，接不上照样只是提示', !!retried && !!failedAgain && (await lineNow()) === 'connecting',
       { retried: !!retried, told: await lineProblem.textContent().catch(() => ''), line: await lineNow() })
 

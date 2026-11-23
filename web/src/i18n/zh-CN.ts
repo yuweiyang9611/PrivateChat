@@ -552,7 +552,7 @@ export default {
       lineConnecting: '正在接快速线路…',
       lineFastActive: '快速线路',
       lineTitle: '快速线路：画面和声音经 Cloudflare 直接过来，不绕回家里的服务器，更跟手。两条线路不会自动互换：快速线路出了问题会提示，可以在这里手动切到标准线路',
-      lineProblemRetrying: '快速线路接不上（{reason}），正在重新接…',
+      lineProblemRetrying: '快速线路接不上（{reason}），稍后会自动重试。',
       lineProblem: '快速线路接不上（{reason}）',
       lineRetry: '重试',
       lineUseStandard: '切到标准线路',
