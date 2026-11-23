@@ -74,7 +74,11 @@ public sealed record DeviceChangedDto(Guid DeviceId);
 /// 管理员的"诊断"（GET /api/telemetry/devices/{id}）：这台电脑的硬件和能力（被控端最近一次上报的，没报过为空），
 /// 和最近几次有遥测的远程（新的在前）。
 /// </summary>
-public sealed record DeviceTelemetryDto(Guid DeviceId, string DeviceName, DateTimeOffset? ReportedAt, AgentTelemetrySnapshot? Snapshot, IReadOnlyList<SessionTelemetryDto> Sessions);
+public sealed record DeviceTelemetryDto(Guid DeviceId, string DeviceName, DateTimeOffset? ReportedAt, AgentTelemetrySnapshot? Snapshot,
+    IReadOnlyList<SessionTelemetryDto> Sessions, RecentUpdateDto? RecentUpdate = null);
+
+public sealed record RecentUpdateDto(DateTimeOffset CheckedAt, DateTimeOffset ReceivedAt, string Source, string CurrentVersion,
+    string? TargetVersion, string State, int ElapsedMs, string? FailureStage, string? ErrorCode, DateTimeOffset? ConfirmedAt);
 
 /// <summary>一次远程：会话本身的记录（谁、何时、怎么结束的），加上被控端、控制端各自报的汇总（哪边没报过就是空）。</summary>
 public sealed record SessionTelemetryDto(Guid SessionId, DateTimeOffset StartedAt, DateTimeOffset? EndedAt, string? EndReason, RemoteSessionMode Mode, string ControllerName,

@@ -86,52 +86,123 @@ public sealed class Updater(string dataDir)
     /// 把清单里的那个版本下载到数据目录，核对大小和 SHA-256。对不上就删掉并报错，绝不留下一个没核对过的文件。
     /// 之前下好、核对过的（当时正在被远程没换成）直接用，不重复下载。
     /// </summary>
-    public async Task<string> DownloadAsync(ServerInfo server, UpdateManifest manifest, CancellationToken ct)
+    public async Task<string> DownloadAsync(ServerInfo server, UpdateManifest manifest, CancellationToken ct, IProgress<UpdateProgress>? progress = null)
     {
         Directory.CreateDirectory(UpdateDir);
         var target = Path.Combine(UpdateDir, $"PrivateChat.Agent-{manifest.Version}.exe");
-        if (await manifest.MatchesAsync(target, ct)) return target;
+        if (File.Exists(target))
+        {
+            progress?.Report(new(UpdateStage.CheckingCache, 0, manifest.Size));
+            var cacheCheck = Stopwatch.StartNew();
+            bool matches;
+            try { matches = await manifest.MatchesAsync(target, ct); }
+            catch
+            {
+                var ms = cacheCheck.ElapsedMilliseconds;
+                progress?.Report(new(UpdateStage.CheckingCache, 0, manifest.Size, VerifyMs: ms));
+                AgentLog.Info($"本机缓存核对未完成（{ms} ms），尚未下载安装包");
+                throw;
+            }
+            if (matches)
+            {
+                var ms = cacheCheck.ElapsedMilliseconds;
+                progress?.Report(new(UpdateStage.CacheHit, 0, manifest.Size, VerifyMs: ms));
+                AgentLog.Info($"更新安装包复用缓存，网络接收 0 字节，缓存 {manifest.Size} 字节，核对 {ms} ms");
+                return target;
+            }
+            AgentLog.Info($"更新缓存未通过核对（{cacheCheck.ElapsedMilliseconds} ms），重新下载");
+        }
 
         var partial = target + ".part";
+        var clock = Stopwatch.StartNew();
+        var meter = new UpdateTransferMeter(manifest.Size);
+        var last = meter.Sample(0);
+        progress?.Report(last);
         try
         {
-            using var http = Client(server);
-            using var request = new HttpRequestMessage(HttpMethod.Get, InstallerPath);
-            server.Apply(request.Headers, withToken: false);
-            using var stall = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            stall.CancelAfter(StallTimeout);
-            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, stall.Token);
-            if (!response.IsSuccessStatusCode) throw new ServerException(response.StatusCode, "下载安装包失败");
-            if (response.Content.Headers.ContentLength is { } length && length != manifest.Size)
-                throw new InvalidDataException($"安装包大小和清单对不上（{length} / {manifest.Size}）");
-
-            await using (var source = await response.Content.ReadAsStreamAsync(stall.Token))
-            await using (var file = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16, useAsync: true))
+            using (var sampling = new CancellationTokenSource())
             {
-                var buffer = new byte[1 << 16];
-                long total = 0;
-                while (true)
+                var samples = progress is null ? Task.CompletedTask : ReportTransferAsync(meter, clock, progress, sampling.Token);
+                try { await ReceiveInstallerAsync(server, manifest.Size, partial, meter, clock, ct); }
+                finally
                 {
-                    stall.CancelAfter(StallTimeout); // 每读到一块就重新计时：慢没关系，一分钟一个字节都没有才算卡住
-                    var read = await source.ReadAsync(buffer, stall.Token);
-                    if (read == 0) break;
-                    total += read;
-                    if (total > manifest.Size) throw new InvalidDataException("安装包比清单里写的大");
-                    await file.WriteAsync(buffer.AsMemory(0, read), stall.Token);
+                    var finishedAt = clock.ElapsedMilliseconds;
+                    await sampling.CancelAsync();
+                    await samples;
+                    last = meter.Sample(finishedAt);
+                    progress?.Report(last);
                 }
             }
-            if (!await manifest.MatchesAsync(partial, ct))
-                throw new InvalidDataException("下载到的安装包和清单里的 SHA-256 对不上（没下完整，或者半路被改了）");
+            last = last with { Stage = UpdateStage.Verifying, BytesPerSecond = null };
+            progress?.Report(last);
+            var verify = Stopwatch.StartNew();
+            try
+            {
+                if (!await manifest.MatchesAsync(partial, ct))
+                    throw new UpdateIntegrityException("下载到的安装包和清单里的 SHA-256 对不上（没下完整，或者半路被改了）");
+            }
+            finally
+            {
+                last = last with { VerifyMs = verify.ElapsedMilliseconds };
+                progress?.Report(last);
+            }
             File.Move(partial, target, overwrite: true);
+            progress?.Report(last with { Stage = UpdateStage.Verified });
             return target;
+        }
+        finally
+        {
+            static string Ms(long? value) => value is { } ms ? $"{ms} ms" : "—";
+            AgentLog.Info($"更新安装包来自网络，接收 {last.BytesReceived}/{manifest.Size} 字节，首字节 {Ms(last.FirstByteMs)}，传输 {Ms(last.TransferMs)}，核对 {Ms(last.VerifyMs)}");
+            TryDelete(partial);
+        }
+    }
+
+    private static async Task ReportTransferAsync(UpdateTransferMeter meter, Stopwatch clock, IProgress<UpdateProgress> progress, CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(UpdateTransferMeter.IntervalMs));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct)) progress.Report(meter.Sample(clock.ElapsedMilliseconds));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+    }
+
+    private static async Task ReceiveInstallerAsync(ServerInfo server, long expected, string partial, UpdateTransferMeter meter, Stopwatch clock, CancellationToken ct)
+    {
+        using var http = Client(server);
+        using var request = new HttpRequestMessage(HttpMethod.Get, InstallerPath);
+        server.Apply(request.Headers, withToken: false);
+        using var stall = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        stall.CancelAfter(StallTimeout);
+        try
+        {
+            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, stall.Token);
+            if (!response.IsSuccessStatusCode) throw new ServerException(response.StatusCode, "下载安装包失败");
+            if (response.Content.Headers.ContentLength is { } length && length != expected)
+                throw new UpdateIntegrityException($"安装包大小和清单对不上（{length} / {expected}）");
+
+            await using var source = await response.Content.ReadAsStreamAsync(stall.Token);
+            await using var file = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16, useAsync: true);
+            var buffer = new byte[1 << 16];
+            long total = 0;
+            while (true)
+            {
+                stall.CancelAfter(StallTimeout);
+                int read;
+                try { read = await source.ReadAsync(buffer, stall.Token); }
+                catch (IOException ex) { throw new HttpRequestException("读取安装包时网络连接中断", ex); }
+                if (read == 0) break;
+                meter.Received(read, clock.ElapsedMilliseconds);
+                total += read;
+                if (total > expected) throw new UpdateIntegrityException("安装包比清单里写的大");
+                await file.WriteAsync(buffer.AsMemory(0, read), ct);
+            }
+            if (total != expected) throw new UpdateIntegrityException($"安装包大小和清单对不上（{total} / {expected}）");
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             throw new TimeoutException("下载安装包时一分钟没有收到数据");
-        }
-        finally
-        {
-            TryDelete(partial);
         }
     }
 

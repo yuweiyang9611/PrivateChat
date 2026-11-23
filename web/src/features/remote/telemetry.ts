@@ -189,6 +189,21 @@ export interface DeviceTelemetryDto {
   reportedAt: string | null
   snapshot: AgentTelemetrySnapshot | null
   sessions: SessionTelemetryDto[]
+  recentUpdate?: RecentUpdateDto | null
+}
+
+export interface RecentUpdateDto {
+  checkedAt: string
+  receivedAt: string
+  source: 'auto' | 'manual'
+  currentVersion: string
+  targetVersion: string | null
+  state: 'checking' | 'available' | 'downloading' | 'verifying' | 'restarting' | 'current' | 'busy' | 'postponed' |
+    'cancelled' | 'failed' | 'noManifest' | 'unavailable'
+  elapsedMs: number
+  failureStage: 'check' | 'download' | 'verify' | 'install' | null
+  errorCode: 'network' | 'timeout' | 'integrity' | 'permission' | 'storage' | 'launch' | 'invalidManifest' | 'server' | 'unknown' | null
+  confirmedAt: string | null
 }
 
 /** 一次远程：会话本身的记录，加上被控端、控制端各自报的汇总（哪边没报过就是 null） */

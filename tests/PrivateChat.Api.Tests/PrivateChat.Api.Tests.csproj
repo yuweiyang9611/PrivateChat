@@ -23,6 +23,8 @@
   <!-- 被控端自动升级里不碰网络和进程的那部分（读清单、比版本、核对文件）：同样把源文件编进来测 -->
   <ItemGroup>
     <Compile Include="..\..\src\PrivateChat.Agent\UpdateManifest.cs" Link="Agent\UpdateManifest.cs" />
+    <Compile Include="..\..\src\PrivateChat.Agent\UpdateProgress.cs" Link="Agent\UpdateProgress.cs" />
+    <Compile Include="..\..\src\PrivateChat.Agent\Telemetry\UpdateCheckTrace.cs" Link="Agent\UpdateCheckTrace.cs" />
   </ItemGroup>
 
   <!-- 被控端程序是 net11.0-windows 的 WinForms 程序，这个测试项目引用不了它。
@@ -40,6 +42,7 @@
     <!-- 桌面复制截屏里的纯计算：变化区域 → 画面上的块、画鼠标指针（拿 Nv12.cs 的 BGRA → NV12 对照颜色公式；它用了指针，要允许 unsafe） -->
     <Compile Include="..\..\src\PrivateChat.Agent\Video\CaptureTiles.cs" Link="Agent\CaptureTiles.cs" />
     <Compile Include="..\..\src\PrivateChat.Agent\Video\Dxgi\CursorOverlay.cs" Link="Agent\CursorOverlay.cs" />
+    <Compile Include="..\..\src\PrivateChat.Agent\Video\Dxgi\MappedSubresource.cs" Link="Agent\MappedSubresource.cs" />
     <Compile Include="..\..\src\PrivateChat.Agent\Video\Nv12.cs" Link="Agent\Nv12.cs" />
     <!-- 选编码器、硬件编码器逐帧 QP 的换算、认"这一帧的输出"：同样是纯计算（IVideoEncoder.cs 里是接口和 ValidatedEncoder） -->
     <Compile Include="..\..\src\PrivateChat.Agent\Video\IVideoEncoder.cs" Link="Agent\IVideoEncoder.cs" />

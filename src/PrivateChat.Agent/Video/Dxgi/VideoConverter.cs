@@ -30,7 +30,7 @@ internal static class CaptureErrors
 /// 先 BGRA → BGRA 缩一半（可能几次，见 <see cref="CaptureTiles.Passes"/>），最后一步再转方向、缩放、转 NV12。
 /// 用的设备和上下文归 <see cref="DxgiScreenSource"/>，这里只管自己建的东西。只在采集线程上用。
 /// </summary>
-internal sealed unsafe class VideoConverter : IDisposable
+internal sealed class VideoConverter : IDisposable
 {
     /// <summary>
     /// 一步：一个视频处理器从 Input 读、写进 Output（中间几步是自己建的 BGRA 纹理，最后一步是 NV12 纹理）。
@@ -86,7 +86,7 @@ internal sealed unsafe class VideoConverter : IDisposable
     /// <summary>source（<paramref name="sourceDesc"/>）→ nv12（width × height × 1.5 字节，紧凑排列）。rotation：DXGI_MODE_ROTATION。</summary>
     public void Convert(IntPtr source, in Texture2DDesc sourceDesc, int rotation, int width, int height, Span<byte> nv12)
     {
-        if (nv12.Length < width * height * 3 / 2) throw new CaptureFallbackException($"NV12 缓冲区 {nv12.Length} 字节，放不下 {width}x{height}");
+        if (nv12.Length < width * (height + height / 2L)) throw new CaptureFallbackException($"NV12 缓冲区 {nv12.Length} 字节，放不下 {width}x{height}");
         Prepare(source, sourceDesc, rotation, width, height);
         // 立即上下文按顺序执行：后一步读前一步写好的纹理
         for (var i = 0; i < _passes.Count; i++)
@@ -99,18 +99,11 @@ internal sealed unsafe class VideoConverter : IDisposable
         CaptureErrors.Check(D3D11Native.Map(_context, _staging, D3D11Native.MapRead, out var mapped), "读回 NV12（Map）");
         try
         {
-            var pitch = (int)mapped.RowPitch;
-            if (pitch < width) throw new CaptureFallbackException($"读回 NV12 的行距 {pitch} 比宽度 {width} 还小");
-            // NV12 的暂存纹理：先是 height 行 Y，紧接着 height / 2 行交错的 UV，每行都是 RowPitch 字节（和 FFmpeg 读 D3D11 NV12 一样）
-            if (mapped.DepthPitch != 0 && mapped.DepthPitch < (long)pitch * height * 3 / 2)
-                throw new CaptureFallbackException($"读回 NV12 的大小不对（DepthPitch {mapped.DepthPitch}，行距 {pitch}，{width}x{height}）");
-            var data = (byte*)mapped.Data;
-            for (var y = 0; y < height; y++)
-                new ReadOnlySpan<byte>(data + (long)y * pitch, width).CopyTo(nv12.Slice(y * width, width));
-            var uv = data + (long)pitch * height;
-            var uvStart = width * height;
-            for (var y = 0; y < height / 2; y++)
-                new ReadOnlySpan<byte>(uv + (long)y * pitch, width).CopyTo(nv12.Slice(uvStart + y * width, width));
+            mapped.CopyNv12To(width, height, nv12);
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new CaptureFallbackException(ex.Message);
         }
         finally
         {

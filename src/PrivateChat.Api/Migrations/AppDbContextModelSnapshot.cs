@@ -623,6 +623,69 @@ namespace PrivateChat.Api.Migrations
                     b.ToTable("device_telemetry", (string)null);
                 });
 
+            modelBuilder.Entity("PrivateChat.Api.Domain.DeviceUpdateStatus", b =>
+                {
+                    b.Property<Guid>("DeviceId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("device_id");
+
+                    b.Property<Guid>("CheckId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("check_id");
+
+                    b.Property<DateTimeOffset>("CheckedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("checked_at");
+
+                    b.Property<DateTimeOffset?>("ConfirmedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("confirmed_at");
+
+                    b.Property<string>("CurrentVersion")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("current_version");
+
+                    b.Property<int>("ElapsedMs")
+                        .HasColumnType("integer")
+                        .HasColumnName("elapsed_ms");
+
+                    b.Property<string>("ErrorCode")
+                        .HasColumnType("text")
+                        .HasColumnName("error_code");
+
+                    b.Property<string>("FailureStage")
+                        .HasColumnType("text")
+                        .HasColumnName("failure_stage");
+
+                    b.Property<DateTimeOffset>("FirstReceivedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("first_received_at");
+
+                    b.Property<DateTimeOffset>("ReceivedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("received_at");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("source");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("state");
+
+                    b.Property<string>("TargetVersion")
+                        .HasColumnType("text")
+                        .HasColumnName("target_version");
+
+                    b.HasKey("DeviceId")
+                        .HasName("pk_device_update_statuses");
+
+                    b.ToTable("device_update_statuses", (string)null);
+                });
+
             modelBuilder.Entity("PrivateChat.Api.Domain.DriveNode", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1453,6 +1516,16 @@ namespace PrivateChat.Api.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired()
                         .HasConstraintName("fk_device_telemetry_devices_device_id");
+                });
+
+            modelBuilder.Entity("PrivateChat.Api.Domain.DeviceUpdateStatus", b =>
+                {
+                    b.HasOne("PrivateChat.Api.Domain.Device", null)
+                        .WithOne()
+                        .HasForeignKey("PrivateChat.Api.Domain.DeviceUpdateStatus", "DeviceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_device_update_statuses_devices_device_id");
                 });
 
             modelBuilder.Entity("PrivateChat.Api.Domain.MessageAttachment", b =>

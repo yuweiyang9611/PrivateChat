@@ -74,7 +74,7 @@ internal static class TelemetrySamples
 /// 远程协助遥测：谁能报（被控端自己 / 这次发起远程的人）、什么时候收（进行中到结束后 24 小时）、结束汇总不被晚到的中途汇总盖掉、请求体限长和清理、
 /// 只有管理员能看、90 天后删掉、吊销后不能再报。对真实数据库跑。
 /// </summary>
-public class RemoteTelemetryTests
+public partial class RemoteTelemetryTests
 {
     private sealed record Ctx(ApiFactory App, HttpClient Admin, Guid AdminId, User Bob, HttpClient BobClient, User Carol, HttpClient CarolClient) : IAsyncDisposable
     {

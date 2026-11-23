@@ -37,6 +37,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
     public DbSet<RemoteSession> RemoteSessions => Set<RemoteSession>();
     public DbSet<DeviceTelemetry> DeviceTelemetry => Set<DeviceTelemetry>();
+    public DbSet<DeviceUpdateStatus> DeviceUpdateStatuses => Set<DeviceUpdateStatus>();
     public DbSet<RemoteSessionTelemetry> RemoteSessionTelemetry => Set<RemoteSessionTelemetry>();
     public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<Job> Jobs => Set<Job>();
@@ -167,6 +168,11 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             e.HasKey(x => x.DeviceId);
             e.Property(x => x.Data).HasColumnType("jsonb");
             e.HasOne<Device>().WithOne().HasForeignKey<DeviceTelemetry>(x => x.DeviceId).OnDelete(DeleteBehavior.Cascade);
+        });
+        b.Entity<DeviceUpdateStatus>(e =>
+        {
+            e.HasKey(x => x.DeviceId);
+            e.HasOne<Device>().WithOne().HasForeignKey<DeviceUpdateStatus>(x => x.DeviceId).OnDelete(DeleteBehavior.Cascade);
         });
         b.Entity<RemoteSessionTelemetry>(e =>
         {

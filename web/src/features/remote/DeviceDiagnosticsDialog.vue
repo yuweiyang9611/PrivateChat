@@ -6,6 +6,7 @@ import { useMediaQuery } from '@vueuse/core'
 import type { DeviceDto } from '@/stores/remote'
 import { telemetryApi } from './telemetryApi'
 import SessionMediaDiagnostics from './SessionMediaDiagnostics.vue'
+import RecentUpdateDiagnostics from './RecentUpdateDiagnostics.vue'
 import { formatBytes, formatKbps, formatWhen } from './format'
 import { VIDEO_MODE_KEYS } from './protocol'
 import type {
@@ -228,6 +229,7 @@ function sides(s: SessionTelemetryDto): { key: string; label: string; empty: str
 
       <template v-if="data">
         <p class="text-xs leading-relaxed" style="color: var(--pc-text-muted)">{{ t('remote.diagnostics.privacy') }}</p>
+        <RecentUpdateDiagnostics :update="data.recentUpdate" />
 
         <!-- 这台电脑 -->
         <section data-testid="diagnostics-hardware">

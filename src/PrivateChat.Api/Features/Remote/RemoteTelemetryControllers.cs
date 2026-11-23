@@ -15,6 +15,21 @@ namespace PrivateChat.Api.Features.Remote;
 [Authorize]
 public sealed class RemoteTelemetryController(RemoteTelemetryService telemetry) : ControllerBase
 {
+    private static readonly JsonSerializerOptions UpdateJson = new(RemoteTelemetryService.Json)
+    {
+        UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow,
+    };
+
+    [HttpPut("/api/remote/agent/update-status")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> PutUpdateStatus([FromServices] DeviceUpdateStatusService updates, CancellationToken ct)
+    {
+        if (User.DeviceId() is not { } deviceId) throw ApiException.Forbidden("只有被控电脑上的远程协助程序可以上报");
+        var report = await TelemetryBody.ReadAsync<AgentUpdateStatusReport>(Request, ct, UpdateJson);
+        await updates.PutAsync(deviceId, report, ct);
+        return NoContent();
+    }
+
     /// <summary>
     /// 被控端上报这台电脑的硬件和能力（AgentTelemetrySnapshot，连上服务器后一次）。只认设备令牌，浏览器登录的人 403。
     /// /api/remote/agent 这个前缀在设备令牌能用的路径里，下面只放被控端自己用的接口。
@@ -78,7 +93,7 @@ public static class TelemetryBody
     /// <summary>硬件快照一般几 KB，字段都有长度上限；超过 64 KB 的不是正常的被控端 / 网页。</summary>
     public const int MaxBytes = 64 * 1024;
 
-    public static async Task<T> ReadAsync<T>(HttpRequest request, CancellationToken ct) where T : class
+    public static async Task<T> ReadAsync<T>(HttpRequest request, CancellationToken ct, JsonSerializerOptions? options = null) where T : class
     {
         if (!request.HasJsonContentType()) throw new ApiException(StatusCodes.Status415UnsupportedMediaType, "请求无效", "遥测数据要用 JSON（Content-Type: application/json）");
         if (request.ContentLength > MaxBytes) throw TooLarge();
@@ -93,7 +108,7 @@ public static class TelemetryBody
         T? value;
         try
         {
-            value = JsonSerializer.Deserialize<T>(body.GetBuffer().AsSpan(0, (int)body.Length), RemoteTelemetryService.Json);
+            value = JsonSerializer.Deserialize<T>(body.GetBuffer().AsSpan(0, (int)body.Length), options ?? RemoteTelemetryService.Json);
         }
         catch (JsonException)
         {

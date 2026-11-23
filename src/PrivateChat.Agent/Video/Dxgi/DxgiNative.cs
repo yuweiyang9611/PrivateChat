@@ -100,14 +100,6 @@ internal struct Texture2DDesc
     public uint BindFlags, CpuAccessFlags, MiscFlags;
 }
 
-/// <summary>D3D11_MAPPED_SUBRESOURCE（16 字节）。</summary>
-[StructLayout(LayoutKind.Sequential)]
-internal struct MappedSubresource
-{
-    public IntPtr Data;
-    public uint RowPitch, DepthPitch;
-}
-
 /// <summary>D3D11_VIDEO_PROCESSOR_CONTENT_DESC（40 字节；两个 DXGI_RATIONAL 展开写）。</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct VideoProcessorContentDesc

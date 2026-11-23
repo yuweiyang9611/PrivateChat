@@ -150,6 +150,11 @@ const killAgents = (dataDir) => { for (const pid of agentPids(dataDir, { probes:
   }
   const saysSince = (mark, text, timeout) => until(() => read().slice(mark).includes(text), timeout, 100)
   const device = async () => (await api('GET', '/api/devices')).find((d) => d.id === deviceId)
+  const recentUpdate = async () => (await api('GET', `/api/telemetry/devices/${deviceId}`)).recentUpdate
+  const matchingUpdate = (matches) => until(async () => {
+    const report = await recentUpdate()
+    return report && matches(report) ? report : null
+  }, 12000, 200)
 
   try {
     // ---- 发布出来的清单和安装包 ----
@@ -232,6 +237,9 @@ const killAgents = (dataDir) => { for (const pid of agentPids(dataDir, { probes:
       && afterTamper?.online && afterTamper.agentVersion === '0.0.1' && sha256(exe) === original
       && fs.readdirSync(path.dirname(exe)).length === 1 && fs.readdirSync(path.join(dataDir, 'update')).length === 0,
       { online: afterTamper?.online, version: afterTamper?.agentVersion, app: fs.readdirSync(path.dirname(exe)), update: fs.readdirSync(path.join(dataDir, 'update')) })
+    const integrity = await matchingUpdate(s => s.state === 'failed' && s.targetVersion === VERSION && s.source === 'auto' && s.errorCode === 'integrity')
+    check('管理员能看到本次升级因安装包校验失败，未误报安装成功',
+      integrity?.failureStage === 'verify' && integrity.confirmedAt == null, integrity?.state)
     await stopAll()
 
     // ---- 2. 新版本启动不了：换回原来的 ----
@@ -246,6 +254,8 @@ const killAgents = (dataDir) => { for (const pid of agentPids(dataDir, { probes:
       && afterBad?.online && sha256(exe) === original && agentPids(dataDir).length === 1
       && !fs.readdirSync(path.dirname(exe)).some((f) => f.endsWith('.old') || f.endsWith('.bad')),
       { said: out.slice(mark).match(/自动升级没有成功[^\r\n]*/)?.[0], online: afterBad?.online, app: fs.readdirSync(path.dirname(exe)) })
+    const rolledBackReport = await matchingUpdate(s => s.state === 'failed' && s.targetVersion === '99.0.0' && s.failureStage === 'install')
+    check('安装失败并回滚后，管理员收到失败阶段与类别', rolledBackReport?.errorCode === 'launch' && rolledBackReport.confirmedAt == null)
     await stopAll()
 
     // ---- 3. 正常升级 ----
@@ -280,6 +290,9 @@ const killAgents = (dataDir) => { for (const pid of agentPids(dataDir, { probes:
     const again = read().slice(mark).split('发现新版本').length - 1
     check('升级完不会反复升级：新版本查过一次，发现已是最新', again === 1 && entry.state.installerHits === 1 && entry.state.manifestHits >= 2,
       { found: again, installerDownloads: entry.state.installerHits, manifestChecks: entry.state.manifestHits })
+    const currentReport = await matchingUpdate(s => s.source === 'auto' && s.currentVersion === VERSION && s.targetVersion === VERSION && s.state === 'current')
+    check('新版用原设备身份上报已最新，管理员能看到本次检查时间',
+      !!currentReport && Number.isFinite(Date.parse(currentReport.checkedAt)) && Number.isFinite(Date.parse(currentReport.receivedAt)))
 
     const errors = execSync(`${COMPOSE} logs api --since ${startedAt}`, { maxBuffer: 256 * 1024 * 1024 }).toString().split('\n').filter((l) => /\bERR\b|Unhandled|Exception/.test(l))
     check('api 日志没有错误', errors.length === 0, errors.slice(0, 3))

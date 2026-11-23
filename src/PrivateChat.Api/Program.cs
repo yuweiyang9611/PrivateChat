@@ -140,6 +140,7 @@ builder.Services.AddSingleton<RemoteRealtimeStore>();
 builder.Services.AddScoped<RemoteRealtimeService>();
 builder.Services.AddScoped<RemoteService>();
 builder.Services.AddScoped<RemoteTelemetryService>();
+builder.Services.AddScoped<DeviceUpdateStatusService>();
 builder.Services.AddScoped<SearchService>();
 builder.Services.AddHostedService<RemoteMaintenanceWorker>();
 builder.Services.AddHostedService<RemoteTelemetryRetentionWorker>();

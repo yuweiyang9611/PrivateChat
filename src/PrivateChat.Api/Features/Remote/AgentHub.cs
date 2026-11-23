@@ -57,10 +57,18 @@ public sealed class AgentHub(AgentRegistry agents, RemoteService remote, RemoteN
         var screens = (report.Screens ?? []).Take(16)
             .Select(s => new AgentScreen(Math.Clamp(s.Width, 0, 16384), Math.Clamp(s.Height, 0, 16384), s.Primary)).ToList();
         agents.Reported(deviceId, Context.ConnectionId, new AgentReport(version, os, screens));
+        var entry = agents.Get(deviceId);
+        if (entry?.ConnectionId != Context.ConnectionId) return;
+        var now = DateTimeOffset.UtcNow;
+        await using var tx = await db.Database.BeginTransactionAsync();
         await db.Devices.Where(d => d.Id == deviceId).ExecuteUpdateAsync(set => set
             .SetProperty(d => d.AgentVersion, version)
             .SetProperty(d => d.Os, os)
-            .SetProperty(d => d.LastSeenAt, DateTimeOffset.UtcNow));
+            .SetProperty(d => d.LastSeenAt, now));
+        await db.DeviceUpdateStatuses.Where(s => s.DeviceId == deviceId && s.State == "restarting" &&
+            s.TargetVersion == version && s.FirstReceivedAt <= entry.Since && s.ConfirmedAt == null)
+            .ExecuteUpdateAsync(set => set.SetProperty(s => s.ConfirmedAt, now));
+        await tx.CommitAsync();
         await notifier.DeviceChangedAsync(deviceId);
     }
 

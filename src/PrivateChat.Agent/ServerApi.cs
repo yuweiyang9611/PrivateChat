@@ -128,6 +128,15 @@ public sealed class ServerApi(ServerInfo server) : IDisposable
         return true;
     }
 
+    public async Task<bool> PutUpdateStatusAsync(AgentUpdateStatusReport status, CancellationToken ct)
+    {
+        using var request = Request(HttpMethod.Put, "api/remote/agent/update-status", status);
+        using var res = await _http.SendAsync(request, ct);
+        if (res.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed) return false;
+        await EnsureAsync(res);
+        return true;
+    }
+
     /// <summary>
     /// 遥测：这次远程里被控端这边的汇总（中途每 60 秒、结束时各一次，服务器按会话覆盖）。
     /// 服务器是老版本、或者这次会话已经不收了（结束太久、会话不是这台电脑的）返回 false；别的错误照常抛。

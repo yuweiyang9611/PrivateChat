@@ -133,6 +133,9 @@ public sealed class RemoteTelemetryService(AppDbContext db, ILogger<RemoteTeleme
             .Select(d => new { d.Id, d.Name })
             .FirstOrDefaultAsync(ct) ?? throw ApiException.NotFound("设备");
         var snapshot = await db.DeviceTelemetry.AsNoTracking().FirstOrDefaultAsync(t => t.DeviceId == deviceId, ct);
+        var update = await db.DeviceUpdateStatuses.AsNoTracking().Where(t => t.DeviceId == deviceId)
+            .Select(t => new RecentUpdateDto(t.CheckedAt, t.ReceivedAt, t.Source, t.CurrentVersion, t.TargetVersion,
+                t.State, t.ElapsedMs, t.FailureStage, t.ErrorCode, t.ConfirmedAt)).SingleOrDefaultAsync(ct);
         var rows = await (from t in db.RemoteSessionTelemetry.AsNoTracking()
                           join s in db.RemoteSessions.AsNoTracking() on t.SessionId equals s.Id
                           join u in db.Users.AsNoTracking() on s.ControllerUserId equals u.Id into controllers
@@ -146,7 +149,7 @@ public sealed class RemoteTelemetryService(AppDbContext db, ILogger<RemoteTeleme
             device.Id, device.Name, snapshot?.ReportedAt, Parse<AgentTelemetrySnapshot>(snapshot?.Data),
             [.. rows.Select(r => new SessionTelemetryDto(
                 r.s.Id, r.s.StartedAt, r.s.EndedAt, r.s.EndReason, r.s.Mode, r.Controller ?? "", r.t.UpdatedAt,
-                Parse<AgentSessionTelemetry>(r.t.Agent), Parse<ViewerSessionTelemetry>(r.t.Viewer)))]);
+                Parse<AgentSessionTelemetry>(r.t.Agent), Parse<ViewerSessionTelemetry>(r.t.Viewer)))], update);
     }
 
     /// <summary>库里的 JSON 读不出来（以后改了格式、手工改过库）：这一块当作没有，别让整个诊断页打不开。</summary>

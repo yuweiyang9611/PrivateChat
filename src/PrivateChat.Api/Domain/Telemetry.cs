@@ -17,6 +17,24 @@ public class DeviceTelemetry
     public string Data { get; set; } = "{}";
 }
 
+/// <summary>最近一次安装包检查。首次到达和新版本上线时间都来自服务器。</summary>
+public class DeviceUpdateStatus
+{
+    public Guid DeviceId { get; set; }
+    public Guid CheckId { get; set; }
+    public DateTimeOffset CheckedAt { get; set; }
+    public DateTimeOffset FirstReceivedAt { get; set; }
+    public DateTimeOffset ReceivedAt { get; set; }
+    public string Source { get; set; } = "";
+    public string CurrentVersion { get; set; } = "";
+    public string? TargetVersion { get; set; }
+    public string State { get; set; } = "";
+    public int ElapsedMs { get; set; }
+    public string? FailureStage { get; set; }
+    public string? ErrorCode { get; set; }
+    public DateTimeOffset? ConfirmedAt { get; set; }
+}
+
 /// <summary>
 /// 一次远程的汇总：被控端那边（<c>AgentSessionTelemetry</c>）和控制端浏览器那边（<c>ViewerSessionTelemetry</c>）各一列，
 /// 两边各自每 60 秒覆盖一次、结束时再覆盖一次（Final）；结束汇总之后晚到、秒数又不比它多的中途汇总不覆盖（<c>RemoteTelemetryService</c>）。

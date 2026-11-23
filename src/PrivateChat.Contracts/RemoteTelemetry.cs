@@ -1,5 +1,10 @@
 namespace PrivateChat.Contracts.Remote;
 
+/// <summary>一台被控设备的最近一次更新检查。同次检查复用 ID 和起始时间，状态、阶段和错误仅使用固定类别。</summary>
+public sealed record AgentUpdateStatusReport(
+    Guid CheckId, DateTimeOffset CheckedAt, string Source, string CurrentVersion, string? TargetVersion,
+    string State, int ElapsedMs, string? FailureStage, string? ErrorCode);
+
 // 远程协助遥测（docs/DESIGN.md"远程协助遥测"）：被控端和控制端浏览器把性能数字、硬件型号报到我们自己的服务器上，管理员在设备页的"诊断"里看。
 // 只有数字、型号和出错的说明：不含屏幕内容、键盘输入、剪贴板、窗口标题、文件名。被控端设 PRIVATECHAT_AGENT_TELEMETRY=off 就全都不报。
 // 网页那份类型定义是照着这里手写的（web/src/features/remote/telemetry.ts）。
