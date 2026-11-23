@@ -126,6 +126,7 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         using var tray = new TrayUi(dataDir);
         var agent = new AgentService(options, tray);
+        tray.BindUpdateCheck(agent.CheckForUpdateAsync, cts.Token);
         agent.RestartRequested += cts.Cancel; // 自动升级：新版本已经起来了，下面的 run 结束后托盘跟着退出
         tray.ExitRequested += async () =>
         {

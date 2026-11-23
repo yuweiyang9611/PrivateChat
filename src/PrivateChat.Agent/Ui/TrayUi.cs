@@ -9,7 +9,7 @@ namespace PrivateChat.Agent.Ui;
 /// 托盘界面（WinForms，跑在主线程）。AgentService 在后台线程调用这里的方法，统一切回界面线程执行。
 /// 面向的是爸妈：字大、话直白、按钮少；同意请求的窗口默认焦点在"拒绝"上，回车不会误同意。
 /// </summary>
-public sealed class TrayUi : IAgentUi, IDisposable
+public sealed partial class TrayUi : IAgentUi, IDisposable
 {
     private static readonly Font BodyFont = new("Microsoft YaHei UI", 11f);
     private static readonly Font TitleFont = new("Microsoft YaHei UI", 14f, FontStyle.Bold);
@@ -24,6 +24,7 @@ public sealed class TrayUi : IAgentUi, IDisposable
     private readonly ToolStripMenuItem _showProblem = new("为什么连不上…") { Visible = false };
     private readonly ToolStripMenuItem _disconnect = new("断开远程") { Visible = false };
     private readonly ToolStripMenuItem _autostart = new("开机自动启动");
+    private readonly ToolStripMenuItem _checkUpdate = new("检查更新…") { Name = "CheckForUpdate", AccessibleName = "检查更新…", Enabled = false };
     private readonly Dictionary<AgentState, Icon> _icons = [];
     private readonly HotkeyWindow _hotkey;
     private DeviceCodeForm? _codeForm;
@@ -79,7 +80,7 @@ public sealed class TrayUi : IAgentUi, IDisposable
         logs.Click += (_, _) => Process.Start(new ProcessStartInfo("explorer.exe", $"\"{_dataDir}\"") { UseShellExecute = true });
         var exit = new ToolStripMenuItem("退出");
         exit.Click += (_, _) => ExitRequested?.Invoke();
-        menu.Items.AddRange([_status, new ToolStripSeparator(), _showCode, _showProblem, _disconnect, _autostart, setup, logs, new ToolStripSeparator(), exit]);
+        menu.Items.AddRange([_status, new ToolStripSeparator(), _showCode, _showProblem, _disconnect, _autostart, _checkUpdate, setup, logs, new ToolStripSeparator(), exit]);
 
         _tray = new NotifyIcon { Icon = _icons[AgentState.Connecting], Text = "PrivateChat 远程协助", ContextMenuStrip = menu, Visible = true };
         _tray.DoubleClick += (_, _) =>
@@ -117,6 +118,7 @@ public sealed class TrayUi : IAgentUi, IDisposable
 
     public void Exit() => Ui(() =>
     {
+        _updateForm?.Close();
         _tray.Visible = false;
         Context.ExitThread();
     });
@@ -262,6 +264,7 @@ public sealed class TrayUi : IAgentUi, IDisposable
 
     public void Dispose()
     {
+        _updateForm?.Close();
         _hotkey.Dispose();
         _tray.Dispose();
         foreach (var icon in _icons.Values) icon.Dispose();

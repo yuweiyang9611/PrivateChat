@@ -35,6 +35,10 @@ public sealed class AgentService
     private readonly InputController _input;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Updater _updater;
+    private readonly SemaphoreSlim _updateGate = new(1, 1);
+    private readonly CancellationTokenSource _stopping = new();
+    private CancellationTokenSource? _updateSettings = new(); // 重新设置期间为 null，旧配置的检查与确认随之取消
+    private (CancellationToken Settings, string Version, long Until)? _postponed;
     /// <summary>有理由现在就查一次更新（刚连上服务器——服务器多半刚部署过新版本）。</summary>
     private readonly SemaphoreSlim _updateSignal = new(0, 1);
     /// <summary>新版本已经启动、自己正要退出：新来的请求不接了（新版本连上服务器时会收到补发的）。</summary>
@@ -71,7 +75,7 @@ public sealed class AgentService
         if (SessionTelemetry.Disabled) AgentLog.Info($"遥测已用环境变量 {SessionTelemetry.SwitchVariable} 关闭：不探测硬件，也不上报");
         else _telemetry = new HardwareTelemetry(options.DataDir, () => _runner is not null, _firstUpdateCheck.Task);
         ui.DisconnectRequested += () => _ = DisconnectLocallyAsync();
-        ui.SetupRequested += () => _reset?.Cancel();
+        ui.SetupRequested += () => _ = RequestSetupAsync();
     }
 
     /// <summary>
@@ -89,6 +93,7 @@ public sealed class AgentService
 
     public async Task RunAsync(CancellationToken ct)
     {
+        using var stopUpdates = ct.Register(() => _stopping.Cancel());
         _ = UpdateLoopAsync(ct);
         _telemetry?.Start(ct);
         string? setupError = null;
@@ -98,7 +103,7 @@ public sealed class AgentService
             _reset = reset;
             try
             {
-                if (!_config.HasServer || setupError is not null)
+                if (!_config.HasServer || setupError is not null || _updateSettings is null)
                 {
                     _ui.SetState(AgentState.NeedsSetup, "需要设置服务器");
                     var text = await _ui.AskSetupAsync(setupError, ct);
@@ -114,11 +119,18 @@ public sealed class AgentService
                         continue;
                     }
                     setupError = null;
-                    if (url != _config.ServerUrl) _config = new AgentConfig();
-                    _config.ServerUrl = url;
-                    _config.AccessClientId = id ?? "";
-                    _config.AccessClientSecret = secret ?? "";
-                    _config.Save(_options.DataDir);
+                    await _gate.WaitAsync(ct);
+                    try
+                    {
+                        if (_updating) return;
+                        if (url != _config.ServerUrl) _config = new AgentConfig();
+                        _config.ServerUrl = url;
+                        _config.AccessClientId = id ?? "";
+                        _config.AccessClientSecret = secret ?? "";
+                        _config.Save(_options.DataDir);
+                        _updateSettings ??= new CancellationTokenSource();
+                    }
+                    finally { _gate.Release(); }
                 }
                 if (_config.DeviceToken.Length == 0)
                 {
@@ -154,23 +166,64 @@ public sealed class AgentService
 
     // ---- 自动升级 ----
 
+    private async Task RequestSetupAsync()
+    {
+        await _gate.WaitAsync();
+        CancellationTokenSource? prior;
+        Task cancelled;
+        try
+        {
+            if (_updating) return;
+            prior = _updateSettings;
+            _updateSettings = null;
+            cancelled = prior?.CancelAsync() ?? Task.CompletedTask;
+            try { _reset?.Cancel(); } catch (ObjectDisposedException) { /* 主循环正在开始下一轮，会检查 _updateSettings。 */ }
+        }
+        finally { _gate.Release(); }
+        try { await cancelled; }
+        finally { prior?.Dispose(); }
+    }
+
+    /// <summary>托盘手动检查；找到可安装的新版后由调用方在界面线程确认。安装过程在后台运行。</summary>
+    public Task<string> CheckForUpdateAsync(Func<string, long, CancellationToken, Task<bool>> confirmInstall, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(confirmInstall);
+        return Task.Run(async () =>
+        {
+            using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct, _stopping.Token);
+            var result = await TryUpdateAsync(confirmInstall, lifetime.Token);
+            return result.Message;
+        }, ct);
+    }
+
+    private readonly record struct UpdateCheck(UpdateOutcome Outcome, string Message, TimeSpan? RetryAfter = null);
+
     /// <summary>
     /// 启动后、每次连上服务器时、之后每 6 小时查一次：服务器上的安装包比自己新就下载、核对、换掉自己并重启（见 <see cref="Updater"/>）。
     /// 正在被远程的时候不换，等结束了再说。
     /// </summary>
     private async Task UpdateLoopAsync(CancellationToken ct)
     {
+        // 手动升级也会留下旧 exe；即使关了定时检查，也在取得单实例后清理。不能和检查、下载或换包并行。
+        if (Updater.InstallationUnavailable() is null)
+        {
+            await _updateGate.WaitAsync(ct);
+            try
+            {
+                if (_updating) return;
+                if (!_updater.CleanUpOldExecutables())
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(8), ct);
+                    _updater.CleanUpOldExecutables();
+                }
+            }
+            finally { _updateGate.Release(); }
+        }
         if (Updater.DisabledReason() is { } reason)
         {
             AgentLog.Info($"自动升级没有启用：{reason}");
             _firstUpdateCheck.TrySetResult();
             return;
-        }
-        // 单实例已交接，但 Windows 可能仍占着旧 exe。只在第一次检查前串行重试清理。
-        if (!_updater.CleanUpOldExecutables())
-        {
-            await Task.Delay(TimeSpan.FromSeconds(8), ct);
-            _updater.CleanUpOldExecutables();
         }
         var wait = TimeSpan.FromSeconds(10);
         while (!ct.IsCancellationRequested)
@@ -189,13 +242,9 @@ public sealed class AgentService
             {
                 try
                 {
-                    var outcome = await TryUpdateAsync(ct);
-                    if (outcome == UpdateOutcome.Restarting)
-                    {
-                        RestartRequested?.Invoke();
-                        return;
-                    }
-                    if (outcome == UpdateOutcome.Deferred) wait = TimeSpan.FromMinutes(2);
+                    var result = await TryUpdateAsync(null, ct);
+                    if (result.Outcome == UpdateOutcome.Restarting) return;
+                    if (result.Outcome == UpdateOutcome.Deferred) wait = result.RetryAfter ?? TimeSpan.FromMinutes(2);
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
@@ -208,20 +257,71 @@ public sealed class AgentService
         }
     }
 
-    private async Task<UpdateOutcome> TryUpdateAsync(CancellationToken ct)
+    private async Task<UpdateCheck> TryUpdateAsync(Func<string, long, CancellationToken, Task<bool>>? confirmInstall, CancellationToken ct)
     {
-        var server = ServerFromConfig();
+        if (confirmInstall is null) await _updateGate.WaitAsync(ct);
+        else if (!await _updateGate.WaitAsync(0, ct)) return new(UpdateOutcome.Deferred, "正在检查或安装更新，请稍后再试。");
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            ServerInfo server;
+            CancellationToken settings;
+            await _gate.WaitAsync(ct);
+            try
+            {
+                if (_updating) return new(UpdateOutcome.Restarting, "新版本已启动，正在重新打开。");
+                if (!_config.HasServer) return new(UpdateOutcome.Deferred, "请先设置服务器，再检查更新。");
+                if (_updateSettings is null) return new(UpdateOutcome.Deferred, "正在重新设置服务器，请设置后再检查更新。");
+                settings = _updateSettings.Token;
+                // 版本清单和安装包只需服务器地址与 Access 凭据。
+                server = new ServerInfo(_config.ServerUrl, _config.AccessClientId, _config.AccessClientSecret, "");
+            }
+            finally { _gate.Release(); }
+            using var active = CancellationTokenSource.CreateLinkedTokenSource(ct, settings);
+            try { return await CheckAndInstallAsync(server, settings, confirmInstall, active.Token); }
+            catch (OperationCanceledException) when (settings.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                return new(UpdateOutcome.Deferred, "服务器设置已变更，请重新检查更新。");
+            }
+        }
+        finally { _updateGate.Release(); }
+    }
+
+    private async Task<UpdateCheck> CheckAndInstallAsync(ServerInfo server, CancellationToken settings,
+        Func<string, long, CancellationToken, Task<bool>>? confirmInstall, CancellationToken ct)
+    {
         var manifest = await _updater.FetchManifestAsync(server, ct);
-        if (manifest is null) return UpdateOutcome.UpToDate;
+        ct.ThrowIfCancellationRequested();
+        if (manifest is null) return new(UpdateOutcome.UpToDate, "服务器尚未提供版本清单。");
         var newer = UpdateManifest.IsNewer(manifest.Version, Version);
+        if (confirmInstall is not null && Updater.InstallationUnavailable() is { } unavailable)
+            return new(UpdateOutcome.UpToDate, newer ? $"有新版本 {manifest.Version}。{unavailable}，无法在此安装更新。" : $"当前已是最新版本（{Version}）。");
         _updater.CleanUpDownloads(newer ? manifest.Version : null);
-        if (!newer) return UpdateOutcome.UpToDate;
-        if (_runner is not null)
+        if (!newer) return new(UpdateOutcome.UpToDate, $"当前已是最新版本（{Version}）。");
+        if (confirmInstall is null && _postponed is { } later && later.Settings == settings && later.Version == manifest.Version)
+        {
+            var remaining = later.Until - Environment.TickCount64;
+            if (remaining > 0) return new(UpdateOutcome.Deferred, "已暂缓本次更新。", TimeSpan.FromMilliseconds(remaining));
+        }
+        var busy = new UpdateCheck(UpdateOutcome.Deferred, $"有新版本 {manifest.Version}。正在远程协助，请在会话结束后更新。");
+        if (Volatile.Read(ref _runner) is not null)
         {
             AgentLog.Info($"有新版本 {manifest.Version}，等这次远程结束后再升级");
-            return UpdateOutcome.Deferred;
+            return busy;
+        }
+        if (confirmInstall is not null)
+        {
+            var confirmed = await confirmInstall(manifest.Version, manifest.Size, ct).WaitAsync(ct);
+            ct.ThrowIfCancellationRequested();
+            if (!confirmed)
+            {
+                _postponed = (settings, manifest.Version, Environment.TickCount64 + (long)TimeSpan.FromMinutes(30).TotalMilliseconds);
+                return new(UpdateOutcome.Deferred, $"已暂缓更新到 {manifest.Version}，可随时再次手动检查。");
+            }
+            if (Volatile.Read(ref _runner) is not null) return busy;
         }
 
+        ct.ThrowIfCancellationRequested();
         AgentLog.Info($"发现新版本 {manifest.Version}（现在是 {Version}），开始下载");
         var downloaded = await _updater.DownloadAsync(server, manifest, ct);
         AgentLog.Info($"新版本 {manifest.Version} 下载完成，大小和 SHA-256 核对无误");
@@ -229,7 +329,8 @@ public sealed class AgentService
         await _gate.WaitAsync(ct);
         try
         {
-            if (_runner is not null) return UpdateOutcome.Deferred; // 下载的工夫开始了远程：文件留着，结束后直接换
+            ct.ThrowIfCancellationRequested();
+            if (_runner is not null) return busy; // 下载的工夫开始了远程：文件留着，结束后直接换
             // 新版本马上要起来：正在跑的硬件探测先杀掉、删掉它的结果文件（新版本连上以后自己探测）；换不成就接着可以探测
             _telemetry?.Suspend();
             try
@@ -242,14 +343,16 @@ public sealed class AgentService
                 throw;
             }
             _updating = true;
+            _postponed = null;
             _consent?.Cancel();
             AgentLog.Info($"已换成新版本 {manifest.Version} 并启动，这个进程退出");
-            return UpdateOutcome.Restarting;
         }
         finally
         {
             _gate.Release();
         }
+        RestartRequested?.Invoke();
+        return new(UpdateOutcome.Restarting, $"已更新到 {manifest.Version}，正在重新打开。");
     }
 
     // ---- 设备码登记 ----

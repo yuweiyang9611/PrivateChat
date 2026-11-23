@@ -47,6 +47,11 @@ public sealed class Updater(string dataDir)
     {
         if (Environment.GetEnvironmentVariable(SwitchVariable)?.Trim().ToLowerInvariant() is "off" or "0" or "false")
             return $"已用环境变量 {SwitchVariable} 关闭";
+        return InstallationUnavailable();
+    }
+
+    internal static string? InstallationUnavailable()
+    {
         if (!IsPublishedSingleFile) return "这是开发时直接运行的版本，不是发布出来的安装包";
         if (string.IsNullOrEmpty(Environment.ProcessPath)) return "找不到自己的程序文件";
         return null;

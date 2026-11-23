@@ -167,6 +167,9 @@ const killAgents = (dataDir) => { for (const pid of agentPids(dataDir, { probes:
     // ---- 先登记一次（不升级），拿到设备令牌 ----
     entry = await startEntry()
     await api('POST', '/api/auth/local/login', { usernameOrEmail: 'admin@example.com', password: 'admin123' })
+    // 手动安装后，新进程也可能关闭了自动检查。仍应清掉前一版的备份。
+    const previousExe = exe + '.old'
+    fs.writeFileSync(previousExe, 'previous test installation')
     start([], { PRIVATECHAT_AGENT_AUTOUPDATE: 'off' })
     const codeFile = path.join(dataDir, 'device-code.txt')
     const code = await until(() => (fs.existsSync(codeFile) ? fs.readFileSync(codeFile, 'utf8').trim() : null), 30000)
@@ -176,6 +179,8 @@ const killAgents = (dataDir) => { for (const pid of agentPids(dataDir, { probes:
     const reported = registered ? await until(async () => (await device())?.agentVersion === VERSION, 10000) : null
     check('发布出来的安装包能登记上线；关掉自动升级时明说没有启用', !!registered && out.includes('自动升级没有启用') && !!reported,
       { version: (await device())?.agentVersion, connected: !!registered, saidDisabled: out.includes('自动升级没有启用') })
+    check('关闭自动检查仍清理旧程序，启动时没有请求更新清单或安装包',
+      !fs.existsSync(previousExe) && entry.state.manifestHits === 0 && entry.state.installerHits === 0)
     await stopAll()
 
     // 首次检查已经发出 GET 时，启动时的清理已结束，旧版 8 秒后的第二次清理已安排。
