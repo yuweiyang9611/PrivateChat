@@ -25,6 +25,9 @@
     <Compile Include="..\..\src\PrivateChat.Agent\UpdateManifest.cs" Link="Agent\UpdateManifest.cs" />
     <Compile Include="..\..\src\PrivateChat.Agent\UpdateProgress.cs" Link="Agent\UpdateProgress.cs" />
     <Compile Include="..\..\src\PrivateChat.Agent\Telemetry\UpdateCheckTrace.cs" Link="Agent\UpdateCheckTrace.cs" />
+    <Compile Include="..\..\src\PrivateChat.Agent\ReleaseSignature.cs" Link="Agent\ReleaseSignature.cs" />
+    <Compile Include="..\..\src\PrivateChat.Agent\Platform\CommandLines.cs" Link="Agent\CommandLines.cs" />
+    <Compile Include="..\..\src\PrivateChat.Agent\Session\DesktopPolicy.cs" Link="Agent\DesktopPolicy.cs" />
   </ItemGroup>
 
   <!-- 被控端程序是 net11.0-windows 的 WinForms 程序，这个测试项目引用不了它。
@@ -34,6 +37,7 @@
     <!-- 远程画面的码率控制和画质规划、声音的响度拉平：同样是纯计算 -->
     <Compile Include="..\..\src\PrivateChat.Agent\Session\RateControl.cs" Link="Agent\RateControl.cs" />
     <Compile Include="..\..\src\PrivateChat.Agent\Session\QualityPlanner.cs" Link="Agent\QualityPlanner.cs" />
+    <Compile Include="..\..\src\PrivateChat.Agent\Session\NormalDesktopGuard.cs" Link="Agent\NormalDesktopGuard.cs" />
     <Compile Include="..\..\src\PrivateChat.Agent\Audio\AudioLeveler.cs" Link="Agent\AudioLeveler.cs" />
     <!-- 画质设置、自动档的分辨率（用到 FrameSource.cs 里的 FrameGeometry.Fit）：同样是纯计算 -->
     <Compile Include="..\..\src\PrivateChat.Agent\Session\VideoSettings.cs" Link="Agent\VideoSettings.cs" />

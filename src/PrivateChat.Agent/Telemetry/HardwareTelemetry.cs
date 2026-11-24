@@ -30,8 +30,10 @@ namespace PrivateChat.Agent.Telemetry;
 /// PRIVATECHAT_AGENT_TELEMETRY=off 时 AgentService 不创建它（远程就一律 GDI + 软件编码器，除非用环境变量强制）。
 /// </summary>
 /// <param name="updateChecked">启动后自动升级的第一次检查做完了（见 AgentService.UpdateLoopAsync）；换成新版本了的话一直不完成。</param>
-internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive, Task updateChecked)
+/// <param name="environment">在哪儿、怎么探测（null：普通模式，就在这个进程的会话里，见 <see cref="TelemetryEnvironment"/>）。</param>
+internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive, Task updateChecked, TelemetryEnvironment? environment = null)
 {
+    private readonly TelemetryEnvironment _environment = environment ?? TelemetryEnvironment.Local;
     private const string CacheFile = "telemetry.json";
     private const int MaxAttempts = 3;
     /// <summary>服务器收 64 KB：超过这么多就把说明截短再报。</summary>
@@ -62,12 +64,11 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
     private readonly SemaphoreSlim _wake = new(0, 1);
     private readonly Lock _gate = new();
     private readonly string _output = Path.Combine(dataDir, $"telemetry-probe-{Environment.ProcessId}.json");
-    private Process? _probe;
+    private IProbeProcess? _probe;
     /// <summary>正在跑的探测被打断了（远程开始了、要换版本 / 退出了）：要记进日志的那句话。</summary>
     private string? _interrupted;
     /// <summary>要换版本 / 退出了：不再起新的探测（换版本没成功时 <see cref="Resume"/>）。</summary>
     private bool _suspended;
-    private bool _jobFailureLogged;
     private ServerInfo? _server;
     /// <summary>最近一次连上服务器的时候（Stopwatch 时间戳）。</summary>
     private long _connectedAt;
@@ -133,11 +134,7 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
         {
             if (_probe is not { } probe) return;
             _interrupted = "远程开始了，探测先停下，远程结束后再探测";
-            try
-            {
-                probe.Kill();
-            }
-            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException) { }
+            probe.Kill(wait: false);
         }
     }
 
@@ -191,7 +188,7 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
             if (_probe is { } probe)
             {
                 _interrupted = "要换新版本或者退出了，探测停下";
-                Kill(probe); // 拿着锁杀：ProbeAsync 收尾（Dispose）要等这把锁，杀的时候这个进程对象还在
+                probe.Kill(wait: true); // 拿着锁杀：ProbeAsync 收尾（Dispose）要等这把锁，杀的时候这个进程对象还在
             }
         }
         TryDelete(_output);
@@ -296,7 +293,7 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
         var probed = await ProbeAsync(fingerprint, ct);
         if (probed is null) return null;
         _snapshot = probed;
-        var locked = HardwareInfo.ScreenLocked() || probed.Problems.Contains(HardwareProbe.LockedProblem);
+        var locked = _environment.ScreenLocked() || probed.Problems.Contains(HardwareProbe.LockedProblem);
         var denied = probed.Capture.Duplication.Any(d => d.Error?.Contains(AccessDenied, StringComparison.Ordinal) == true);
         if (locked || (denied && !reprobe))
         {
@@ -312,8 +309,8 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
     }
 
     /// <summary>这台电脑的指纹（<see cref="HardwareInfo.Fingerprint"/>）再加上探测做法的版本（<see cref="ProbeMethod"/>），还是 64 位十六进制。</summary>
-    private static string Fingerprint()
-        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{HardwareInfo.Fingerprint()}\n{ProbeMethod}"))).ToLowerInvariant();
+    private string Fingerprint()
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{_environment.Fingerprint()}\n{ProbeMethod}"))).ToLowerInvariant();
 
     /// <summary>
     /// 按最新的快照定远程能用哪些显示器的桌面复制、哪些硬件编码器（<see cref="ValidatedOutputs"/>、<see cref="ValidatedEncoders"/>）：
@@ -372,7 +369,7 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
 
     /// <summary>手上的临时结果放了 <see cref="ProvisionalFor"/> 以上、现在没锁屏：该重探了。</summary>
     private bool ReprobeDue()
-        => _provisionalSince is { } since && Stopwatch.GetElapsedTime(since) > ProvisionalFor && !HardwareInfo.ScreenLocked();
+        => _provisionalSince is { } since && Stopwatch.GetElapsedTime(since) > ProvisionalFor && !_environment.ScreenLocked();
 
     /// <summary>
     /// 起探测子进程之前先等：启动后自动升级的第一次检查做完（换成了新版本就一直等到退出），再等到这次连上服务器满 <see cref="ProbeAfterConnect"/>
@@ -426,28 +423,13 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
     {
         var output = _output;
         TryDelete(output);
-        var start = ProbeCommand(output);
-        Process process;
-        string? jobFailure = null;
+        IProbeProcess process;
         lock (_gate)
         {
             if (sessionActive() || _suspended) return null;
             _interrupted = null;
-            process = Process.Start(start) ?? throw new InvalidOperationException("探测进程没有起来");
+            process = _environment.StartProbe(output);
             _probe = process;
-            try
-            {
-                KillOnCloseJob.Add(process);
-            }
-            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
-            {
-                jobFailure = ex.Message; // 子进程还有自己的 75 秒上限；Agent 正常退出时也会杀它
-            }
-        }
-        if (jobFailure is not null && !_jobFailureLogged)
-        {
-            _jobFailureLogged = true;
-            AgentLog.Warn($"探测子进程放不进作业对象（Agent 被强行结束时它不会跟着结束）：{jobFailure}");
         }
         AgentLog.Info("开始探测这台电脑的显卡、编码器和截屏（子进程，最多 60 秒）");
         var clock = Stopwatch.StartNew();
@@ -455,16 +437,11 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
         string? interrupted;
         try
         {
-            try
-            {
-                process.PriorityClass = ProcessPriorityClass.BelowNormal;
-            }
-            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { } // 已经退出了
             var exited = process.WaitForExitAsync(ct);
             if (await Task.WhenAny(exited, Task.Delay(ProbeTimeout, ct)) != exited)
             {
                 ct.ThrowIfCancellationRequested();
-                Kill(process);
+                process.Kill(wait: true);
                 failure = TimeoutFailure;
             }
             else
@@ -475,7 +452,7 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
         }
         catch (OperationCanceledException)
         {
-            Kill(process); // Agent 要退出了
+            process.Kill(wait: true); // Agent 要退出了
             TryDelete(output);
             throw;
         }
@@ -509,29 +486,7 @@ internal sealed class HardwareTelemetry(string dataDir, Func<bool> sessionActive
         return snapshot;
     }
 
-    private static ProcessStartInfo ProbeCommand(string output)
-    {
-        var exe = Environment.ProcessPath ?? throw new InvalidOperationException("找不到自己的程序文件");
-        var start = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true };
-        // dotnet PrivateChat.Agent.dll 这样跑的（开发时）：子进程也得这样跑
-        if (Path.GetFileNameWithoutExtension(exe).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
-            start.ArgumentList.Add(typeof(HardwareTelemetry).Assembly.Location);
-        start.ArgumentList.Add("--probe-hardware");
-        start.ArgumentList.Add(output);
-        return start;
-    }
-
     private static string ExitCodeText(int code) => code is >= 0 and < 0x10000 ? code.ToString() : $"0x{code:X8}";
-
-    private static void Kill(Process process)
-    {
-        try
-        {
-            process.Kill(entireProcessTree: true);
-            process.WaitForExit(5000);
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException) { }
-    }
 
     /// <summary>超时 / 崩溃：子进程最后一条"探测没做完，停在：……"换成原因加停在哪一步。</summary>
     private static AgentTelemetrySnapshot WithFailure(AgentTelemetrySnapshot snapshot, string failure)

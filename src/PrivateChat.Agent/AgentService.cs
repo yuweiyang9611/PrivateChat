@@ -14,6 +14,16 @@ using PrivateChat.Contracts.Remote;
 
 namespace PrivateChat.Agent;
 
+/// <summary>
+/// 装成系统服务时换掉的几样（见 Service/AgentServiceHost）：远程在哪儿跑（SYSTEM 工作进程）、硬件探测在哪儿做（控制台会话）、
+/// 显示器从哪儿来（界面进程报的：服务在会话 0 里看不到真显示器）、新版本怎么换（交给 --apply-update 换文件、重启服务）。都是 null 就是普通模式。
+/// </summary>
+internal sealed record AgentHooks(
+    Func<AgentSessionRequest, ServerInfo, ISessionHost>? SessionFactory = null,
+    TelemetryEnvironment? Telemetry = null,
+    Func<IReadOnlyList<ScreenInfo>>? Screens = null,
+    Action<string, string, string>? ApplyUpdate = null);
+
 /// <summary>启动参数（Program 解析命令行）。</summary>
 public sealed record AgentOptions(string DataDir, string DeviceName, bool UsePattern, string? DryInputPath, bool Headless, bool BusyPattern = false);
 
@@ -45,7 +55,10 @@ public sealed class AgentService
     private volatile bool _updating;
     private AgentConfig _config;
     private ServerInfo? _server;
-    private SessionRunner? _runner;
+    private ISessionHost? _runner;
+    private readonly AgentHooks _hooks;
+    /// <summary>现在连着的 hub（显示器变了要重报）。</summary>
+    private volatile HubConnection? _hub;
     private (AgentState State, string Detail) _connectionState = (AgentState.Connecting, "正在连接");
     private CancellationTokenSource? _consent;
     private Guid? _consentFor;
@@ -66,17 +79,20 @@ public sealed class AgentService
     /// </summary>
     private readonly TaskCompletionSource _firstUpdateCheck = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    public AgentService(AgentOptions options, IAgentUi ui)
+    public AgentService(AgentOptions options, IAgentUi ui) : this(options, ui, new AgentHooks()) { }
+
+    internal AgentService(AgentOptions options, IAgentUi ui, AgentHooks hooks)
     {
         _options = options;
         _ui = ui;
+        _hooks = hooks;
         _input = new InputController(options.DryInputPath is { } path ? new DryRunInputSink(path) : new SendInputSink());
         _config = AgentConfig.Load(options.DataDir);
         _updater = new Updater(options.DataDir);
         if (SessionTelemetry.Disabled) AgentLog.Info($"遥测已用环境变量 {SessionTelemetry.SwitchVariable} 关闭：不探测硬件，也不上报");
         else
         {
-            _telemetry = new HardwareTelemetry(options.DataDir, () => _runner is not null, _firstUpdateCheck.Task);
+            _telemetry = new HardwareTelemetry(options.DataDir, () => _runner is not null, _firstUpdateCheck.Task, hooks.Telemetry);
             _updateStatus = new UpdateStatusReporter(options.DataDir);
         }
         ui.DisconnectRequested += () => _ = DisconnectLocallyAsync();
@@ -91,7 +107,17 @@ public sealed class AgentService
         : ScreenCaptures.Create(_telemetry?.ValidatedOutputs ?? FrozenSet<string>.Empty);
 
     /// <summary>最近一次探测里试编成功的硬件编码器：远程每次重建编码器时现问（<see cref="VideoEncoders"/>）。</summary>
-    private IReadOnlyList<ValidatedEncoder> ValidatedEncoders() => _telemetry?.ValidatedEncoders ?? [];
+    internal IReadOnlyList<ValidatedEncoder> ValidatedEncoders() => _telemetry?.ValidatedEncoders ?? [];
+
+    /// <summary>最近一次探测里验证过桌面复制的显示器（服务模式下交给工作进程）。</summary>
+    internal IReadOnlyList<string> ValidatedOutputs() => [.. _telemetry?.ValidatedOutputs ?? FrozenSet<string>.Empty];
+
+    /// <summary>显示设置变了（插拔显示器、换主显示器）：验证过的先对一次指纹、重报显示器。服务模式下由界面进程报过来。</summary>
+    internal void DisplayChanged()
+    {
+        _telemetry?.Recheck();
+        if (_hub is { } hub) _ = ReportAsync(hub);
+    }
 
     /// <summary>电脑正在播放的声音；测试画面配测试音（一直响的 440 Hz），不碰声卡。</summary>
     private IAudioSource CreateAudioSource() => _options.UsePattern ? new TestToneSource() : new WasapiLoopback();
@@ -367,7 +393,8 @@ public sealed class AgentService
             try
             {
                 trace.Installing();
-                _updater.SwapAndRelaunch(downloaded, Version, Environment.GetCommandLineArgs()[1..]);
+                if (_hooks.ApplyUpdate is { } apply) apply(downloaded, manifest.Version, Version);
+                else _updater.SwapAndRelaunch(downloaded, Version, Environment.GetCommandLineArgs()[1..]);
             }
             catch
             {
@@ -592,6 +619,7 @@ public sealed class AgentService
             return Outcome.Retry;
         }
         _lastProblem = null;
+        _hub = hub;
         AgentLog.Info("已连接服务器，等待远程请求");
         try { _updateSignal.Release(); } catch (SemaphoreFullException) { } // 顺便查一下有没有新版本
         await SetConnectionStateAsync(AgentState.Online, "在线");
@@ -616,6 +644,7 @@ public sealed class AgentService
         }
         finally
         {
+            _hub = null;
             if (!_options.Headless) SystemEvents.DisplaySettingsChanged -= displayChanged;
             _telemetry?.Disconnected();
         }
@@ -625,8 +654,14 @@ public sealed class AgentService
     {
         try
         {
-            using var source = CreateSource();
-            var screens = source.Screens().Select(s => new AgentScreen(s.Bounds.Width, s.Bounds.Height, s.IsPrimary)).ToList();
+            IReadOnlyList<ScreenInfo> list;
+            if (_hooks.Screens is { } provider) list = provider();
+            else
+            {
+                using var source = CreateSource();
+                list = source.Screens();
+            }
+            var screens = list.Select(s => new AgentScreen(s.Bounds.Width, s.Bounds.Height, s.IsPrimary)).ToList();
             await hub.InvokeAsync(AgentHubEvents.Report, new AgentReport(Version, RuntimeInformation.OSDescription, screens));
         }
         catch (Exception ex)
@@ -703,7 +738,7 @@ public sealed class AgentService
 
     private void StartRunner(AgentSessionRequest request)
     {
-        var runner = new SessionRunner(request, _server!, CreateSource, ValidatedEncoders, CreateAudioSource, _input, _ui);
+        var runner = _hooks.SessionFactory?.Invoke(request, _server!) ?? new SessionRunner(request, _server!, CreateSource, ValidatedEncoders, CreateAudioSource, _input, _ui);
         _runner = runner;
         // 建截屏、问验证过的编码器（runner.Start 之后在采集线程上）之前再对一次指纹：连着服务器时装了新显卡驱动、换了显示器，
         // 这次远程就别用旧探测验证过的（GDI + 软件编码器），远程结束后重探。放在 _runner 之后：叫醒的后台循环看得到正在远程
@@ -716,7 +751,7 @@ public sealed class AgentService
         _ = WatchAsync(runner);
     }
 
-    private async Task WatchAsync(SessionRunner runner)
+    private async Task WatchAsync(ISessionHost runner)
     {
         var reason = await runner.Finished;
         var stoppedHere = false;

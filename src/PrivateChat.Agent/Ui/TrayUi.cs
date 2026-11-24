@@ -38,7 +38,8 @@ public sealed partial class TrayUi : IAgentUi, IDisposable
     public event Action? SetupRequested;
     public event Action? ExitRequested;
 
-    public TrayUi(string dataDir)
+    /// <param name="serviceMode">装成系统服务后的界面进程：开机自启、退出由服务管（菜单里不放），"重新设置"要管理员（由调用方处理 SetupRequested）。</param>
+    public TrayUi(string dataDir, bool serviceMode = false)
     {
         _dataDir = dataDir;
         _invoker = new Control();
@@ -78,8 +79,11 @@ public sealed partial class TrayUi : IAgentUi, IDisposable
         };
         var logs = new ToolStripMenuItem("打开日志目录");
         logs.Click += (_, _) => Process.Start(new ProcessStartInfo("explorer.exe", $"\"{_dataDir}\"") { UseShellExecute = true });
-        var exit = new ToolStripMenuItem("退出");
+        var exit = new ToolStripMenuItem("退出") { Visible = !serviceMode };
         exit.Click += (_, _) => ExitRequested?.Invoke();
+        _autostart.Visible = !serviceMode;
+        // 服务模式下由服务自己升级（只装签过名的版本）：托盘里不放"检查更新"（它走的是按用户运行时换掉自己的那一套）
+        _checkUpdate.Visible = !serviceMode;
         menu.Items.AddRange([_status, new ToolStripSeparator(), _showCode, _showProblem, _disconnect, _autostart, _checkUpdate, setup, logs, new ToolStripSeparator(), exit]);
 
         _tray = new NotifyIcon { Icon = _icons[AgentState.Connecting], Text = "PrivateChat 远程协助", ContextMenuStrip = menu, Visible = true };
@@ -250,15 +254,20 @@ public sealed partial class TrayUi : IAgentUi, IDisposable
             $"{request.ControllerName} 正在{(request.Mode == RemoteSessionMode.View ? "查看" : "控制")}这台电脑。随时可以点屏幕顶部的「断开」或按 Ctrl+Alt+Shift+Q。", ToolTipIcon.Info);
     });
 
-    public Task<string?> ReadClipboardAsync() => UiAsync(() =>
+    public Task<string?> ReadClipboardAsync() => ReadClipboardAsync(() => true);
+
+    public Task<string?> ReadClipboardAsync(Func<bool> allowed) => UiAsync(() =>
     {
+        if (!allowed()) return null;
         try { return Clipboard.ContainsText() ? Clipboard.GetText() : null; }
         catch (System.Runtime.InteropServices.ExternalException) { return null; } // 别的程序正占着剪贴板
     });
 
-    public Task WriteClipboardAsync(string text) => UiAsync(() =>
+    public Task WriteClipboardAsync(string text) => WriteClipboardAsync(text, () => true);
+
+    public Task WriteClipboardAsync(string text, Func<bool> allowed) => UiAsync(() =>
     {
-        Clipboard.SetText(text.Length == 0 ? " " : text);
+        if (allowed()) Clipboard.SetText(text.Length == 0 ? " " : text);
         return true;
     });
 

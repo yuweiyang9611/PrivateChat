@@ -18,6 +18,7 @@ namespace PrivateChat.Agent;
 ///                          wait = 同意窗口一直挂着没人点，直到请求被取消或超时）
 /// PrivateChat.Agent.exe --selftest [out.h264] [--capture dxgi|gdi|pattern] [--encoder auto|hardware|software]
 ///                          编码器 / 截屏自检：打印用了哪个编码器、哪种截屏和每帧耗时（见 SelfTest）
+/// PrivateChat.Agent.exe --secure-desktop-test   锁屏 / UAC 实验：要管理员，临时装个服务看看以 SYSTEM 能不能截、点 UAC 提示和锁屏（见 Diagnostics/SecureDesktopTest）
 /// PrivateChat.Agent.exe --probe-hardware OUT.json   探测显卡、编码器、截屏，结果写进 OUT.json 后退出（遥测用：Agent 连上服务器后
 ///                          自己在子进程里跑，见 Telemetry/HardwareTelemetry；也可以手动跑来看）。远程只用这里验证过的桌面复制和硬件编码器
 /// 环境变量：
@@ -45,6 +46,71 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        string? Option(string name)
+        {
+            var i = Array.IndexOf(args, name);
+            return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+        }
+
+        // 锁屏 / UAC 实验（Diagnostics/SecureDesktopTest）：窗口、临时服务、服务起的子进程
+        switch (args)
+        {
+            case ["--secure-desktop-test", ..]:
+                return Diagnostics.SecureDesktopTest.Launch(args);
+            case [] when Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? "").Contains("DesktopTest", StringComparison.OrdinalIgnoreCase):
+                // 给测试电脑的那份改名叫 PrivateChatDesktopTest.exe：双击就是实验，不会变成普通的远程协助程序
+                return Diagnostics.SecureDesktopTest.Launch(["--secure-desktop-test"]);
+            // 装成系统服务后的几种进程（Service/）：服务本身、每次远程的工作进程、登录用户的界面进程、换版本
+            case ["--service", ..]:
+                SetProcessDpiAwarenessContext(-4);
+                return Service.AgentServiceHost.Run();
+            case ["--session-worker", var workerPipe, var workerService, var workerLogs, ..]:
+                SetProcessDpiAwarenessContext(-4);
+                return Service.SessionWorker.Run(workerPipe, int.Parse(workerService), workerLogs, console: args.Contains("--console"));
+            case ["--helper", var helperPipe, var helperService, ..]:
+            {
+                SetProcessDpiAwarenessContext(-4);
+                var headlessUi = Option("--headless-ui");
+                return Service.HelperProcess.Run(helperPipe, int.Parse(helperService),
+                    headlessUi is not null && Environment.GetEnvironmentVariable("PRIVATECHAT_AGENT_TEST") == "1" ? headlessUi : null, Option("--consent") ?? "ignore");
+            }
+            case ["--service-dev", ..] when Environment.GetEnvironmentVariable("PRIVATECHAT_AGENT_TEST") == "1":
+                SetProcessDpiAwarenessContext(-4);
+                return Service.AgentServiceHost.RunDev(new Service.AgentServiceHost.DevOptions(
+                    Path.GetFullPath(Option("--data-dir") ?? "service-dev"), Option("--server") ?? "", Option("--name") ?? Environment.MachineName,
+                    Option("--consent") ?? "ignore", Option("--source") is "pattern" or "busy", Option("--dry-input")));
+            case ["--install" or "--uninstall" or "--configure", ..]:
+                SetProcessDpiAwarenessContext(-4);
+                return Service.Installer.Run(args);
+            case ["--apply-update", var staged, var newVersion, var fromVersion, var oldService, ..]:
+                return Service.ServiceUpdate.Apply(staged, newVersion, fromVersion, int.Parse(oldService));
+            case ["--verify-signature", var signedFile, ..]:
+                // 看一个 exe 末尾的发布签名（打印版本号和用的哪把钥匙，或者为什么不对）
+                Console.OutputEncoding = Encoding.UTF8;
+                try
+                {
+                    var signed = ReleaseSignature.Verify(signedFile);
+                    Console.WriteLine($"签名有效：版本 {signed.Version}，钥匙 {signed.KeyId}");
+                    return 0;
+                }
+                catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
+                {
+                    Console.WriteLine($"签名无效：{ex.Message}");
+                    return 1;
+                }
+            case ["--secure-desktop-test-dry", var dryReport, ..]:
+                SetProcessDpiAwarenessContext(-4);
+                return Diagnostics.SecureDesktopTest.Dry(dryReport);
+            case ["--secure-desktop-test-service", var report, ..]:
+                return Diagnostics.SecureDesktopTest.Service(report);
+            case ["--secure-desktop-test-worker", var pipe, var servicePid, var label, var report, ..]:
+                SetProcessDpiAwarenessContext(-4);
+                return Diagnostics.SecureDesktopTest.Worker(pipe, int.Parse(servicePid), label, report);
+            case ["--secure-desktop-test-helper", var pipe, var servicePid, var report, ..]:
+                SetProcessDpiAwarenessContext(-4);
+                return Diagnostics.SecureDesktopTest.Helper(pipe, int.Parse(servicePid), report);
+        }
+
         // 探测子进程：不要界面、不要单实例锁、不写日志，做完就退出
         if (args is ["--probe-hardware", var probeOutput, ..])
         {
@@ -65,6 +131,13 @@ internal static class Program
 
         var headless = args.Contains("--headless");
         if (headless) Console.OutputEncoding = Encoding.UTF8;
+        // 这台电脑装了系统服务（管理员装的）：托盘由服务起，自己这个按用户装的老方式不再跑，开机自启也去掉
+        if (!headless && ServiceInstalled())
+        {
+            try { Autostart.Enabled = false; }
+            catch (Exception) { }
+            return 0;
+        }
         var dataDir = Path.GetFullPath(Value("--data-dir") ?? AgentConfig.DefaultDirectory);
         AgentLog.Init(dataDir, console: headless);
 
@@ -140,11 +213,33 @@ internal static class Program
             if (t.IsFaulted) AgentLog.Error("Agent 异常退出", t.Exception);
             tray.Exit();
         }, TaskScheduler.Default);
+        // 跑着的时候管理员装上了系统服务：这个按用户运行的退出、去掉开机自启（不然两个同时在线，托盘也有两个）
+        using var serviceWatch = new System.Threading.Timer(_ =>
+        {
+            if (!ServiceInstalled() || cts.IsCancellationRequested) return;
+            AgentLog.Info("这台电脑装了远程协助的系统服务，按用户运行的这个退出");
+            try { Autostart.Enabled = false; }
+            catch (Exception) { }
+            cts.Cancel();
+        }, null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
         Application.Run(tray.Context);
         cts.Cancel();
         try { run.Wait(TimeSpan.FromSeconds(5)); }
         catch (AggregateException) { }
         return 0;
+    }
+
+    /// <summary>这台电脑装了远程协助的系统服务（问不到当没装：老方式照常跑）。</summary>
+    private static bool ServiceInstalled()
+    {
+        try
+        {
+            return Platform.ServiceControl.State(Service.ServicePaths.ServiceName) is not null;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     [DllImport("user32.dll")] private static extern bool SetProcessDpiAwarenessContext(nint value);

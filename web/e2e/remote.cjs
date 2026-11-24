@@ -94,7 +94,9 @@ function apiHealthy() {
 function startAgent(dir, consent, source = 'pattern', extraEnv = {}) {
   fs.mkdirSync(dir, { recursive: true })
   const inputLog = path.join(dir, 'input.jsonl')
-  const args = ['--headless', '--server', tls ? tls.url : BASE, '--data-dir', dir, '--name', 'E2E 测试电脑', '--consent', consent]
+  // E2E_AGENT_MODE=service-dev：按装成系统服务后的结构跑（服务流程 + 每次远程一个工作进程 + 界面进程，都以当前用户起，见 Service/AgentServiceHost.RunDev）
+  const mode = process.env.E2E_AGENT_MODE === 'service-dev' ? '--service-dev' : '--headless'
+  const args = [mode, '--server', tls ? tls.url : BASE, '--data-dir', dir, '--name', 'E2E 测试电脑', '--consent', consent]
   if (source === 'pattern') args.push('--source', 'pattern', '--dry-input', inputLog)
   else args.push('--dry-input', inputLog) // 真实屏幕也不注入真实键鼠
   const env = { ...process.env, PRIVATECHAT_AGENT_TEST: '1' }
@@ -1098,6 +1100,7 @@ async function moveOnCanvas(page, fx, fy) {
     return until(() => (agent.out.slice(from).includes(text) ? Date.now() - t + 1 : null), timeout, 50)
   }
 
+  const consentFrom = agent.out.length
   let mark = agent.out.length
   await card.locator('[data-testid=device-control]').click()
   await admin.locator('[data-testid=remote-pending]').waitFor({ timeout: 10000 })
@@ -1105,7 +1108,8 @@ async function moveOnCanvas(page, fx, fy) {
   mark = agent.out.length
   await admin.locator('[data-testid=remote-pending] button').click()
   const closedAfter = await agentSays(mark, '同意窗口关闭', 3000)
-  check('误点"远程控制"后取消：对方电脑上的同意窗口马上收起，不用等 30 秒', !!popped && !!closedAfter, { closedAfterMs: closedAfter })
+  check('误点"远程控制"后取消：对方电脑上的同意窗口马上收起，不用等 30 秒', !!popped && !!closedAfter,
+    popped && closedAfter ? { closedAfterMs: closedAfter } : { poppedMs: popped, closedAfterMs: closedAfter, agent: agent.out.slice(consentFrom).slice(-3000) })
 
   // 设一个 PIN
   await admin.goto(BASE + '/devices')

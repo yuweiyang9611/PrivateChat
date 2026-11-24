@@ -183,13 +183,16 @@ internal static class HardwareInfo
     /// 不含分辨率：全屏游戏改分辨率不该触发重新探测（分辨率、刷新率、缩放每次上报前都会重新读）。
     /// 全是便宜的读取，Agent 进程每次连上服务器时算一遍，和上次探测时的比。
     /// </summary>
-    public static string Fingerprint()
+    public static string Fingerprint() => Fingerprint(Screen.AllScreens.Select(s => (s.DeviceName, s.Primary)));
+
+    /// <summary>同上，显示器由调用方给（服务在会话 0 里看不到真显示器，用界面进程报的）。</summary>
+    public static string Fingerprint(IEnumerable<(string Device, bool Primary)> displays)
     {
         var text = new StringBuilder();
         text.Append("agent ").Append(AgentVersion).Append('\n');
         foreach (var driver in DisplayDrivers().Order(StringComparer.Ordinal)) text.Append("gpu ").Append(driver).Append('\n');
-        foreach (var screen in Screen.AllScreens.OrderBy(s => s.DeviceName, StringComparer.OrdinalIgnoreCase))
-            text.Append("display ").Append(screen.DeviceName).Append(screen.Primary ? " primary" : "").Append('\n');
+        foreach (var (device, primary) in displays.OrderBy(s => s.Device, StringComparer.OrdinalIgnoreCase))
+            text.Append("display ").Append(device).Append(primary ? " primary" : "").Append('\n');
         text.Append("rdp ").Append(RemoteDesktopSession());
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text.ToString()))).ToLowerInvariant();
     }

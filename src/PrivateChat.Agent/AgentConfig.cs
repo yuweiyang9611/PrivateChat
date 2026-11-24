@@ -179,10 +179,11 @@ public static class AgentLog
     private static string? _path;
     private static bool _console;
 
-    public static void Init(string dir, bool console)
+    /// <summary>日志写到 dirileName（超过 2 MB 换成 .old）；console：同时打印到标准输出（无界面模式）。</summary>
+    public static void Init(string dir, bool console, string fileName = "agent.log")
     {
         Directory.CreateDirectory(dir);
-        _path = Path.Combine(dir, "agent.log");
+        _path = Path.Combine(dir, fileName);
         _console = console;
         try
         {

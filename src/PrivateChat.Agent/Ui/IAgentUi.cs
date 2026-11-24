@@ -32,6 +32,13 @@ public interface IAgentUi
     Task<string?> ReadClipboardAsync();
     Task WriteClipboardAsync(string text);
 
+    // 普通托盘在 UI 线程真正读写时再检查一次，避免排队期间锁屏或更换控制端。
+    Task<string?> ReadClipboardAsync(Func<bool> allowed) => allowed() ? ReadClipboardAsync() : Task.FromResult<string?>(null);
+    Task WriteClipboardAsync(string text, Func<bool> allowed) => allowed() ? WriteClipboardAsync(text) : Task.CompletedTask;
+
+    /// <summary>剪贴板变了没有（GetClipboardSequenceNumber，同一个窗口站共用）：变了才去读，会话循环里经常问，要便宜。</summary>
+    uint ClipboardSequence => Desktop.ClipboardSequence;
+
     /// <summary>用户在本机要求断开（红条上的按钮、Ctrl+Alt+Shift+Q、托盘菜单）。</summary>
     event Action? DisconnectRequested;
 

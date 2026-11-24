@@ -133,8 +133,9 @@ function onPageHide(): void {
 }
 
 const session = computed(() => remote.sessions[props.id])
-const control = computed(() => session.value?.mode === 'Control')
 const state = computed(() => session.value?.state)
+const secureDesktop = computed(() => blocked.value?.code === StatusCode.SecureDesktop)
+const control = computed(() => session.value?.mode === 'Control' && state.value === 'Active' && !replaced.value && !secureDesktop.value)
 const secondsLeft = computed(() => (session.value ? Math.max(0, Math.ceil((new Date(session.value.expiresAt).getTime() - now.value) / 1000)) : 0))
 const ownerName = computed(() => (session.value ? family.nameOf(session.value.deviceOwnerId) : ''))
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
@@ -342,16 +343,31 @@ function startClient(): void {
       audioInfo.value = c.audioProgress
     },
     status: (code, message) => {
-      if (code === StatusCode.Unsupported) toast('warning', message)
-      else blocked.value = code === StatusCode.Ok ? null : { code, message }
+      if (client !== c) return
+      if (code === StatusCode.Unsupported) {
+        toast('warning', message)
+        return
+      }
+      if (code === StatusCode.SecureDesktop) {
+        clearPendingInput()
+        textOpen.value = false
+        textValue.value = ''
+      } else if (secureDesktop.value) {
+        if (code !== StatusCode.Ok) return
+        // 两条线路共用 canvas。恢复显示前清掉上次的画面，等新画面到达后再展示。
+        const surface = canvas.value
+        surface?.getContext('2d')?.clearRect(0, 0, surface.width, surface.height)
+      }
+      blocked.value = code === StatusCode.Ok ? null : { code, message }
     },
     clipboard: (text) => {
+      if (!control.value || client !== c) return
       navigator.clipboard?.writeText(text).then(() => toast('success', t('remote.viewer.clipboardIn')), () => undefined)
     },
     ended: (why) => {
       if (client !== c) return
       client = null
-      sentButtons.clear()
+      clearPendingInput()
       if (why === 'replaced') {
         // 在别的窗口 / 设备上接着用了：把这边看到的先报上去，之后由那边报
         reportTelemetry(false)
@@ -378,9 +394,10 @@ function startClient(): void {
 }
 
 function stopClient(): void {
-  client?.close()
+  if (!client) return
+  client.close()
   client = null
-  sentButtons.clear()
+  clearPendingInput()
 }
 
 /** 在这个窗口接着用（把别处的控制连接顶掉） */
@@ -533,13 +550,14 @@ function toggleSound(): void {
 }
 
 function special(command: string): void {
+  if (!control.value) return
   const id = { win: SpecialKey.Win, taskManager: SpecialKey.TaskManager, altTab: SpecialKey.AltTab, printScreen: SpecialKey.PrintScreen }[command]
   if (id) client?.send(encode.specialKey(id))
   stage.value?.focus()
 }
 
 function sendText(e?: Event): void {
-  if ((e as KeyboardEvent | undefined)?.isComposing) return
+  if (!control.value || (e as KeyboardEvent | undefined)?.isComposing) return
   if (textValue.value) {
     if (utf8Length(textValue.value) > MAX_TEXT_BYTES) toast('warning', t('remote.viewer.textTruncated'))
     client?.send(encode.text(textValue.value))
@@ -583,7 +601,7 @@ function point(e: { clientX: number; clientY: number }): { x: number; y: number 
 function flushMove(): void {
   if (moveFrame) cancelAnimationFrame(moveFrame)
   moveFrame = 0
-  if (pendingMove) client?.send(encode.mouseMove(pendingMove.x, pendingMove.y), true)
+  if (pendingMove && control.value) client?.send(encode.mouseMove(pendingMove.x, pendingMove.y), true)
   pendingMove = null
 }
 
@@ -708,16 +726,24 @@ function onPaste(e: ClipboardEvent): void {
 
 function flushPaste(): void {
   window.clearTimeout(pasteTimer)
-  if (pendingPaste === null) return
+  if (pendingPaste === null || !control.value) return
   client?.send(encode.key(pendingPaste, true, 2))
   if (isMac) client?.send(encode.key(pendingPaste, false, 2))
   pendingPaste = null
 }
 
-/** 失焦、切到后台：松开所有键和鼠标键（不然对方电脑上会卡着一个 Ctrl） */
-function releaseAll(): void {
+function clearPendingInput(): void {
+  if (moveFrame) cancelAnimationFrame(moveFrame)
+  moveFrame = 0
+  pendingMove = null
+  window.clearTimeout(pasteTimer)
   pendingPaste = null
   sentButtons.clear()
+}
+
+/** 失焦、切到后台：松开所有键和鼠标键（不然对方电脑上会卡着一个 Ctrl） */
+function releaseAll(): void {
+  clearPendingInput()
   if (control.value) client?.send(encode.releaseAll())
 }
 
@@ -733,16 +759,18 @@ watch(textOpen, (open) => {
     <header class="flex shrink-0 flex-wrap items-center gap-2 px-3 py-2" style="background: #1c1a19">
       <div class="min-w-0 flex-1 truncate text-sm">
         <span class="font-medium">{{ session?.deviceName }}</span>
-        <span v-if="session && !control" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #3a3530">{{ t('remote.viewer.viewOnly') }}</span>
-        <span
-          v-if="statsText" class="ml-2 text-xs text-gray-400" :data-line="line" :title="statsTitle"
-          :data-capture-ms="stats?.captureMs" :data-encode-ms="stats?.encodeMs" :data-flags="stats?.flags" data-testid="remote-stats"
-        >{{ statsText }}</span>
-        <span v-if="slow" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #5c4514; color: #ffd98a" :title="t('remote.viewer.slowTitle', { target: formatKbps(stats!.target), max: formatKbps(stats!.max) })" data-testid="remote-slow">{{ t('remote.viewer.slow') }}</span>
-        <span v-else-if="oldAgent" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #3a3530" :title="t('remote.viewer.oldAgentTitle')" data-testid="remote-old-agent">{{ t('remote.viewer.oldAgent') }}</span>
-        <span v-if="busy" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #5c4514; color: #ffd98a" :title="busyTitle" data-testid="remote-busy">{{ busyText }}</span>
+        <span v-if="session?.mode === 'View'" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #3a3530">{{ t('remote.viewer.viewOnly') }}</span>
+        <template v-if="!secureDesktop">
+          <span
+            v-if="statsText" class="ml-2 text-xs text-gray-400" :data-line="line" :title="statsTitle"
+            :data-capture-ms="stats?.captureMs" :data-encode-ms="stats?.encodeMs" :data-flags="stats?.flags" data-testid="remote-stats"
+          >{{ statsText }}</span>
+          <span v-if="slow" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #5c4514; color: #ffd98a" :title="t('remote.viewer.slowTitle', { target: formatKbps(stats!.target), max: formatKbps(stats!.max) })" data-testid="remote-slow">{{ t('remote.viewer.slow') }}</span>
+          <span v-else-if="oldAgent" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #3a3530" :title="t('remote.viewer.oldAgentTitle')" data-testid="remote-old-agent">{{ t('remote.viewer.oldAgent') }}</span>
+          <span v-if="busy" class="ml-2 rounded px-1.5 py-0.5 text-xs" style="background: #5c4514; color: #ffd98a" :title="busyTitle" data-testid="remote-busy">{{ busyText }}</span>
+        </template>
       </div>
-      <template v-if="state === 'Active' && !replaced">
+      <template v-if="state === 'Active' && !replaced && !secureDesktop">
         <!-- 老版本的程序只认识两档 -->
         <el-radio-group v-if="legacyQuality" :model-value="quality" size="small" @update:model-value="(q) => setQuality(q as QualityPreset)">
           <el-radio-button :value="Quality.Smooth" data-testid="remote-quality-smooth">{{ t('remote.viewer.smooth') }}</el-radio-button>
@@ -765,7 +793,6 @@ watch(textOpen, (open) => {
           <el-radio-button :value="true" data-testid="remote-line-fast">{{ line === 'connecting' ? t('remote.viewer.lineConnecting') : t('remote.viewer.lineFast') }}</el-radio-button>
           <el-radio-button :value="false" data-testid="remote-line-standard">{{ t('remote.viewer.lineStandard') }}</el-radio-button>
         </el-radio-group>
-        <el-button v-if="video" size="small" :icon="Headset" :type="sound && canSound ? 'primary' : 'default'" :disabled="!canSound" :title="soundTitle" :data-audio="audioState" :data-scheduled="audioInfo.scheduled" :data-peak="audioInfo.peak.toFixed(3)" data-testid="remote-sound" @click="toggleSound">{{ soundLabel }}</el-button>
         <!-- 全屏时弹层要留在全屏元素里面，不能挂到 body 上 -->
         <el-select v-if="monitors.length > 1" :model-value="video?.monitor" size="small" class="!w-36" :teleported="false" data-testid="remote-monitor" @update:model-value="selectMonitor">
           <el-option v-for="m in monitors" :key="m.index" :value="m.index" :label="`${t('remote.viewer.monitor', { n: m.index + 1 })} ${m.width}×${m.height}`" />
@@ -784,19 +811,20 @@ watch(textOpen, (open) => {
           </el-dropdown>
           <el-button size="small" :icon="EditPen" data-testid="remote-type" @click="textOpen = !textOpen">{{ t('remote.viewer.typeText') }}</el-button>
         </template>
-        <el-button size="small" :icon="FullScreen" @click="toggleFullscreen">{{ fullscreen ? t('remote.viewer.exitFullscreen') : t('remote.viewer.fullscreen') }}</el-button>
       </template>
+      <el-button v-if="state === 'Active' && !replaced && video" size="small" :icon="Headset" :type="sound && canSound ? 'primary' : 'default'" :disabled="!canSound" :title="soundTitle" :data-audio="audioState" :data-scheduled="audioInfo.scheduled" :data-peak="audioInfo.peak.toFixed(3)" data-testid="remote-sound" @click="toggleSound">{{ soundLabel }}</el-button>
+      <el-button v-if="state === 'Active' && !replaced && (!secureDesktop || fullscreen)" size="small" :icon="FullScreen" @click="toggleFullscreen">{{ fullscreen ? t('remote.viewer.exitFullscreen') : t('remote.viewer.fullscreen') }}</el-button>
       <el-button v-if="session && !session.endedAt" size="small" type="danger" :icon="Close" data-testid="remote-end" @click="end">{{ t('remote.viewer.end') }}</el-button>
     </header>
 
-    <div v-if="textOpen && state === 'Active' && !replaced" class="flex shrink-0 gap-2 px-3 py-2" style="background: #26231f">
+    <div v-if="textOpen && control" class="flex shrink-0 gap-2 px-3 py-2" style="background: #26231f">
       <el-input ref="textInput" v-model="textValue" :placeholder="t('remote.viewer.typePlaceholder')" data-testid="remote-text" @keydown.enter="sendText" />
       <el-button type="primary" data-testid="remote-text-send" @click="sendText()">{{ t('remote.viewer.send') }}</el-button>
     </div>
 
     <!-- 自定义画质：改一项马上用上 -->
     <div
-      v-if="customOpen && state === 'Active' && !replaced && !legacyQuality"
+      v-if="customOpen && state === 'Active' && !replaced && !secureDesktop && !legacyQuality"
       class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2 text-xs" style="background: #26231f" data-testid="remote-video-custom-row"
     >
       <div class="flex items-center gap-1.5">
@@ -835,7 +863,7 @@ watch(textOpen, (open) => {
       @focusout="releaseAll"
     >
       <canvas
-        v-show="state === 'Active' && !replaced"
+        v-show="state === 'Active' && !replaced && !secureDesktop"
         ref="canvas"
         class="h-full w-full"
         :style="{ objectFit: 'contain', touchAction: control ? 'none' : 'auto' }"
@@ -872,8 +900,12 @@ watch(textOpen, (open) => {
       </div>
       <template v-else-if="state === 'Active'">
         <div v-if="unsupported" class="absolute inset-0 flex items-center justify-center p-6 text-center">{{ t('remote.viewer.unsupported') }}</div>
+        <div v-else-if="secureDesktop" class="absolute inset-0 flex flex-col items-center justify-center gap-2 p-6 text-center" role="status" data-testid="remote-blocked">
+          <div class="text-lg">{{ t('remote.viewer.secureDesktop') }}</div>
+          <div class="max-w-md text-sm text-gray-300">{{ t('remote.viewer.secureDesktopHint') }}</div>
+        </div>
         <div v-else-if="blocked" class="absolute inset-x-0 top-0 p-3 text-center text-sm" style="background: rgba(217, 48, 37, 0.85)" data-testid="remote-blocked">
-          {{ blocked.code === StatusCode.SecureDesktop ? t('remote.viewer.secureDesktop') : t('remote.viewer.captureFailed', { msg: blocked.message }) }}
+          {{ t('remote.viewer.captureFailed', { msg: blocked.message }) }}
         </div>
         <div v-else-if="link !== 'streaming' || !video" class="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-gray-300" data-testid="remote-link">
           {{ link === 'reconnecting' ? t('remote.viewer.reconnecting') : link === 'waiting-agent' ? t('remote.viewer.waitingAgent') : t('remote.viewer.connecting') }}

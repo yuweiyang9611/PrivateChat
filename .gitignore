@@ -38,3 +38,6 @@ web/e2e/fixtures/*.png
 
 # 测试服务器的连接参数（node web/e2e/test-host.cjs 用），每人自己写
 web/e2e/.test-host.json
+
+# 笔记本上构建、签过名的被控端（tools/build-agent-release.mjs 生成，部署时拷到服务器上的同一位置）
+deploy/agent-release/*.exe

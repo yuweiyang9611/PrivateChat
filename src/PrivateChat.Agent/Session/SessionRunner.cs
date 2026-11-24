@@ -32,7 +32,7 @@ namespace PrivateChat.Agent.Session;
 /// - 遥测：这次远程的汇总（<see cref="SessionTelemetry"/>：帧率、码率、采集 / 编码用时、线路、出的问题）中途每 60 秒、结束时各报一次给服务器，
 ///   管理员在设备页的"诊断"里看。环境变量 PRIVATECHAT_AGENT_TELEMETRY=off 时不收集也不报。
 /// </summary>
-public sealed class SessionRunner : IAsyncDisposable
+public sealed class SessionRunner : ISessionHost
 {
     /// <summary>
     /// 帧率按画质设置的发（最高 30）：画面不动时不发，变化大时码率预算不够也会少发；控制端跟不上时它会请这边少发（MaxFps）。
@@ -101,6 +101,7 @@ public sealed class SessionRunner : IAsyncDisposable
     private const string DdaFallbackPrefix = "GDI（桌面复制不能用";
 
     private readonly AgentSessionRequest _request;
+    private readonly NormalDesktopGuard _desktop;
     private readonly ServerInfo _server;
     private readonly HttpMessageInvoker? _invoker;
     private readonly Func<IFrameSource> _sourceFactory;
@@ -213,6 +214,7 @@ public sealed class SessionRunner : IAsyncDisposable
         InputController input, IAgentUi ui)
     {
         _request = request;
+        _desktop = new NormalDesktopGuard(request.Mode);
         _server = server;
         _invoker = AgentTransport.CreateInvoker(new Uri(server.Url));
         _sourceFactory = sourceFactory;
@@ -230,7 +232,7 @@ public sealed class SessionRunner : IAsyncDisposable
 
     public void Start()
     {
-        _clipboardSeq = Desktop.ClipboardSequence;
+        _clipboardSeq = _ui.ClipboardSequence;
         _main = Task.Run(RunAsync);
         _video = new Thread(VideoLoop) { IsBackground = true, Name = "remote-video" };
         _video.Start();
@@ -375,9 +377,10 @@ public sealed class SessionRunner : IAsyncDisposable
                 continue;
             }
             var frame = RemoteFrames.ParseControl(buffer.AsSpan(0, count));
-            if (frame is not (null or ControlFrame.FrameAck or ControlFrame.Pong or ControlFrame.Clipboard) && !_clipboardWrite.IsCompleted)
+            var generation = _desktop.Generation;
+            if (frame is not (null or ControlFrame.FrameAck or ControlFrame.Pong or ControlFrame.Clipboard or ControlFrame.ReleaseAll) && !_clipboardWrite.IsCompleted)
                 await Task.WhenAny(_clipboardWrite, Task.Delay(1000, ct));
-            Handle(frame);
+            Handle(frame, generation);
         }
     }
 
@@ -391,7 +394,12 @@ public sealed class SessionRunner : IAsyncDisposable
         _audioOn = false;
         // 帧率限制是上一个控制端要的（它的设备慢）；新来的会不会说、要不要限，等它自己说
         _clientMaxFps = -1;
-        _input.ReleaseAll();
+        lock (_desktop)
+        {
+            _desktop.ResetPeer();
+            _peer = false;
+            _input.ReleaseAll();
+        }
         // 快速线路是上一个控制端要的：先回到中继，新来的想用会再说
         StopRealtime(null);
         if (connected)
@@ -418,7 +426,7 @@ public sealed class SessionRunner : IAsyncDisposable
 
     // ---- 控制端发来的帧 ----
 
-    private void Handle(ControlFrame? frame)
+    private void Handle(ControlFrame? frame, int generation)
     {
         switch (frame)
         {
@@ -510,8 +518,15 @@ public sealed class SessionRunner : IAsyncDisposable
                 return;
         }
 
-        // 以下都是输入：只看模式下不执行（中继已经丢掉一遍，这里再防一道）
-        if (_request.Mode != RemoteSessionMode.Control) return;
+        lock (_desktop)
+        {
+            if (frame is ControlFrame.ReleaseAll) _input.ReleaseAll();
+            else if (_peer && !_cts.IsCancellationRequested && _desktop.CanControl(generation)) HandleInput(frame, generation);
+        }
+    }
+
+    private void HandleInput(ControlFrame frame, int generation)
+    {
         switch (frame)
         {
             case ControlFrame.MouseMove m when _current is { } screen:
@@ -533,21 +548,28 @@ public sealed class SessionRunner : IAsyncDisposable
                 if (!_input.Special(s.Id)) Send(RemoteFrames.Status(RemoteStatusCode.Unsupported, "Ctrl+Alt+Del 只能在那台电脑上按"));
                 break;
             case ControlFrame.Clipboard c:
-                _clipboardWrite = WriteClipboardAsync(c.Value);
-                break;
-            case ControlFrame.ReleaseAll:
-                _input.ReleaseAll();
+                _clipboardWrite = WriteClipboardAsync(c.Value, generation);
                 break;
         }
     }
 
-    private async Task WriteClipboardAsync(string text)
+    private bool CanUseClipboard(int generation)
+    {
+        lock (_desktop) return _peer && !_cts.IsCancellationRequested && _desktop.CanControl(generation);
+    }
+
+    private async Task WriteClipboardAsync(string text, int generation)
     {
         try
         {
+            // 调用方已持有桌面状态锁；读剪贴板的轮询可能比写完后的 continuation 更早拿到新文字。
             _clipboardText = text;
-            await _ui.WriteClipboardAsync(text);
-            _clipboardSeq = Desktop.ClipboardSequence; // 自己写的不再同步回去
+            await _ui.WriteClipboardAsync(text, () => CanUseClipboard(generation));
+            lock (_desktop)
+            {
+                if (!_desktop.CanControl(generation)) return;
+                _clipboardSeq = _ui.ClipboardSequence; // 自己写的不再同步回去
+            }
         }
         catch (Exception ex)
         {
@@ -952,15 +974,24 @@ public sealed class SessionRunner : IAsyncDisposable
     /// <summary>这台电脑上复制了新文字 → 发给控制端。会话开始前剪贴板里已有的内容不发（可能是密码）。</summary>
     private async Task SyncClipboardAsync()
     {
-        var seq = Desktop.ClipboardSequence;
-        if (seq == _clipboardSeq) return;
-        _clipboardSeq = seq;
+        int generation;
+        lock (_desktop)
+        {
+            generation = _desktop.Generation;
+            if (!CanUseClipboard(generation)) return;
+            var seq = _ui.ClipboardSequence;
+            if (seq == _clipboardSeq) return;
+            _clipboardSeq = seq;
+        }
         try
         {
-            var text = await _ui.ReadClipboardAsync();
-            if (string.IsNullOrEmpty(text) || text == _clipboardText) return;
-            _clipboardText = text;
-            Send(RemoteFrames.Clipboard(text));
+            var text = await _ui.ReadClipboardAsync(() => CanUseClipboard(generation));
+            lock (_desktop)
+            {
+                if (!CanUseClipboard(generation) || string.IsNullOrEmpty(text) || text == _clipboardText) return;
+                _clipboardText = text;
+                Send(RemoteFrames.Clipboard(text));
+            }
         }
         catch (Exception ex)
         {
@@ -987,6 +1018,7 @@ public sealed class SessionRunner : IAsyncDisposable
         // 下一帧最早什么时候采：按小数毫秒排（30 fps 是 33.3 ms 一帧，取整成 33 ms 实际会到 30.3 fps，超过上限）
         double nextDue = 0;
         long lastDesktopCheck = -10_000;
+        var lastCheckedPeer = -1;
         long lastChangeAt = -10_000;
         long lastSentAt = -10_000;
         uint lastTimestamp = 0;
@@ -1077,10 +1109,6 @@ public sealed class SessionRunner : IAsyncDisposable
                     encoder = null;
                     Interlocked.Exchange(ref _encodedSize, 0);
                     hasPrevious = false;
-                    // 控制端重新连上来时重新检查一遍锁屏状态并告诉它（不然它只看到"正在连接"）
-                    secure = false;
-                    _secureDesktop = false;
-                    lastDesktopCheck = -10_000;
                     sourceSecureSince = -1;
                     Thread.Sleep(50);
                     continue;
@@ -1119,16 +1147,32 @@ public sealed class SessionRunner : IAsyncDisposable
                 nextDue = Math.Max(nextDue + frameInterval, now);
 
                 // 锁屏 / UAC 提示：截不到桌面（GDI 截到黑屏，桌面复制被拒），告诉控制端原因
-                if (realScreen && now - lastDesktopCheck >= 1000)
+                var peer = _desktop.PeerGeneration;
+                if (peer != lastCheckedPeer || now - lastDesktopCheck >= 1000)
                 {
                     lastDesktopCheck = now;
+                    lastCheckedPeer = peer;
                     // 输入桌面不是普通桌面（UAC、Ctrl+Alt+Del），或者这个会话锁着屏（Windows 11 的锁屏有时输入桌面还是 Default，
                     // 见 HardwareInfo.SessionLocked）；再加上截屏自己知道的：桌面复制被拒（E_ACCESSDENIED），它比这个每秒一次的检查先知道
-                    var locked = HardwareInfo.ScreenLocked();
+                    var locked = realScreen && HardwareInfo.ScreenLocked();
                     // 系统已经不锁屏了、桌面复制还说被拒：它得再采一次才知道现在能不能用了（采到的不要；解锁后从整幅比较重新开始）
-                    if (!locked && secure && source.SecureDesktop && lastScreen is { } retry && lastFrame is { } last)
+                    if (realScreen && !locked && secure && source.SecureDesktop && lastScreen is { } retry && lastFrame is { } last)
                         source.Capture(retry, last.Width, last.Height);
-                    var s = locked || source.SecureDesktop;
+                    var s = realScreen && (locked || source.SecureDesktop);
+                    lock (_desktop)
+                    {
+                        if (!_peer || peer != _desktop.PeerGeneration) continue;
+                        if (_desktop.Observe(s))
+                        {
+                            if (s) _input.ReleaseAll();
+                            // 只同步恢复普通桌面之后新复制的内容。
+                            else _clipboardSeq = _ui.ClipboardSequence;
+                            _clipboardText = null;
+                        }
+                        _secureDesktop = s;
+                        _desktop.Report(blocked => Send(RemoteFrames.Status(
+                            blocked ? RemoteStatusCode.SecureDesktop : RemoteStatusCode.Ok, blocked ? "对方电脑在锁屏或系统安全提示界面" : "")));
+                    }
                     if (s && !locked)
                     {
                         if (sourceSecureSince < 0) sourceSecureSince = now;
@@ -1143,8 +1187,6 @@ public sealed class SessionRunner : IAsyncDisposable
                     if (s != secure)
                     {
                         secure = s;
-                        _secureDesktop = s;
-                        Send(RemoteFrames.Status(s ? RemoteStatusCode.SecureDesktop : RemoteStatusCode.Ok, s ? "对方电脑在锁屏或系统安全提示界面" : ""));
                         if (s)
                         {
                             // 留下锁屏前的最后一帧给快速线路保活：桌面复制给的 NV12 是来源的缓冲区（下一次采集就变了），拷一份。

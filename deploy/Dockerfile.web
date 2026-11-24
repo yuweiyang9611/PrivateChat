@@ -12,7 +12,23 @@ WORKDIR /src
 COPY Directory.Build.props Directory.Packages.props ./
 COPY src/PrivateChat.Contracts/ src/PrivateChat.Contracts/
 COPY src/PrivateChat.Agent/ src/PrivateChat.Agent/
-RUN dotnet publish src/PrivateChat.Agent/PrivateChat.Agent.csproj -c Release -r win-x64 -o /agent
+# 开发者笔记本上构建、签过名的发布版（tools/build-agent-release.mjs → deploy/agent-release/PrivateChat.Agent.exe，不进仓库，部署时拷过来）有就用它：
+# 装成系统服务的电脑只装签名有效的版本（docs/DESIGN.md"远程协助：UAC、锁屏"），签名的私钥不在服务器上。
+# 没有（测试栈、CI）就在这里编一个不带签名的（按用户运行的老方式照样能自动升级，系统服务不会装它）。
+# 用现成的那份时，签名里的版本号必须和这份代码的版本一样：不一样说明拷错了文件，停下（不然老方式的电脑会反复"升级"到一个旧版本）。
+COPY deploy/agent-release/ /prebuilt/
+RUN version="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' src/PrivateChat.Agent/PrivateChat.Agent.csproj | head -n 1)" \
+ && test -n "$version" \
+ && if [ -f /prebuilt/PrivateChat.Agent.exe ]; then \
+      f=/prebuilt/PrivateChat.Agent.exe; \
+      test "$(tail -c 8 "$f")" = "PCSIGN01" || { echo "deploy/agent-release/PrivateChat.Agent.exe 没有发布签名"; exit 1; }; \
+      n=$(tail -c 12 "$f" | head -c 2 | od -An -tu2 | tr -d ' \n'); \
+      signed="$(tail -c $((12 + 64 + n)) "$f" | head -c "$n")"; \
+      test "$signed" = "$version" || { echo "签名里的版本 $signed 和代码的版本 $version 不一样"; exit 1; }; \
+      mkdir -p /agent && cp "$f" /agent/PrivateChat.Agent.exe && echo "用笔记本上签过名的 $signed"; \
+    else \
+      dotnet publish src/PrivateChat.Agent/PrivateChat.Agent.csproj -c Release -r win-x64 -o /agent; \
+    fi
 # 安装包旁边放一份清单（版本、大小、SHA-256）：已经装出去的程序靠它知道有没有新版本，并核对下载到的文件（自动升级）
 RUN version="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' src/PrivateChat.Agent/PrivateChat.Agent.csproj | head -n 1)" \
  && test -n "$version" \
