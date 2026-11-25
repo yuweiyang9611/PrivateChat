@@ -475,6 +475,23 @@ internal static partial class SecureDesktopTest
                     if (limited is not null) step["curtainRestricted"] = await Probe(limited, "4-lock-curtain-restricted");
                     step["focusCurtain"] = await Focus(worker);
                     step["threads"] = await ThreadSwitch("4-lock");
+                    // Windows 11：锁屏先是一层"幕布"——LockApp 在平常桌面上、是前台（2026-11-26 在虚拟机里看到的），按个键才换到 Winlogon 上的密码框。
+                    // 只在确实锁着、前台确实是 LockApp 时按空格；先用去掉特权的进程按（要求最低的那种），没反应再用 SYSTEM 按
+                    async Task<bool> OnCurtain()
+                        => ConsoleSession.Lock(_session) == ConsoleSession.LockState.Locked && await DesktopName() == InputDesktop.Default
+                           && (await Focus(worker))["focus"]?["foreground"]?["process"]?.GetValue<string>() == "LockApp";
+                    if (await OnCurtain())
+                    {
+                        var by = limited ?? worker;
+                        step["curtainSpaceBy"] = limited is not null ? "restricted" : "system";
+                        step["curtainSpace"] = await Key(by, scan: 0x39);
+                        step["curtainGone"] = await WaitDesktop(wantDefault: false, timeoutMs: 3000);
+                        if (limited is not null && await OnCurtain())
+                        {
+                            step["curtainSpaceSystem"] = await Key(worker, scan: 0x39);
+                            step["curtainGoneSystem"] = await WaitDesktop(wantDefault: false, timeoutMs: 3000);
+                        }
+                    }
                     try
                     {
                         if (limited is not null && await OnLockScreen())
@@ -537,7 +554,9 @@ internal static partial class SecureDesktopTest
                     {
                         if (Interlocked.Read(ref _unlockEventAt) >= 0) unlockedBy = "解锁通知";
                         else if (ConsoleSession.Lock(_session) == ConsoleSession.LockState.Unlocked && await DesktopName() == InputDesktop.Default) unlockedBy = "锁屏标志";
-                        else if ((await Safe(() => helper.Call("desktop", ct: ct)))["name"]?.GetValue<string>() == InputDesktop.Default) unlockedBy = "用户进程打开了输入桌面";
+                        // 锁屏标志读不到时才看这个：Windows 11 的幕布就在平常桌面上，锁着时用户进程也打得开输入桌面
+                        else if (ConsoleSession.Lock(_session) != ConsoleSession.LockState.Locked
+                                 && (await Safe(() => helper.Call("desktop", ct: ct)))["name"]?.GetValue<string>() == InputDesktop.Default) unlockedBy = "用户进程打开了输入桌面";
                         if (unlockedBy.Length > 0) break;
                         await Task.Delay(500, ct);
                     }
