@@ -59,7 +59,7 @@ public class AgentReleaseSignatureTests
 
         Assert.Equal(new ReleaseSignature.Signed("1.2.3", TestKeyId), Verify(file, keys));
         using var stream = new MemoryStream(file);
-        Assert.Throws<InvalidDataException>(() => ReleaseSignature.Verify(stream));
+        Assert.Throws<ReleaseSignatureException>(() => ReleaseSignature.Verify(stream));
     }
 
     [Fact]
@@ -69,7 +69,7 @@ public class AgentReleaseSignatureTests
         var file = Sign(RandomNumberGenerator.GetBytes(10_000), "0.9.0", key);
         file[1234] ^= 1;
 
-        Assert.Throws<InvalidDataException>(() => Verify(file, keys));
+        Assert.Throws<ReleaseSignatureException>(() => Verify(file, keys));
     }
 
     [Fact]
@@ -81,7 +81,7 @@ public class AgentReleaseSignatureTests
         var at = file.Length - 12 - 64 - 5;
         Encoding.UTF8.GetBytes("0.9.9").CopyTo(file, at);
 
-        Assert.Throws<InvalidDataException>(() => Verify(file, keys));
+        Assert.Throws<ReleaseSignatureException>(() => Verify(file, keys));
     }
 
     [Fact]
@@ -90,7 +90,7 @@ public class AgentReleaseSignatureTests
         var (_, keys) = NewKey();
         var (other, _) = NewKey();
 
-        Assert.Throws<InvalidDataException>(() => Verify(Sign(RandomNumberGenerator.GetBytes(10_000), "0.9.0", other), keys));
+        Assert.Throws<ReleaseSignatureException>(() => Verify(Sign(RandomNumberGenerator.GetBytes(10_000), "0.9.0", other), keys));
     }
 
     [Fact]
@@ -98,7 +98,7 @@ public class AgentReleaseSignatureTests
     {
         var (key, keys) = NewKey();
 
-        Assert.Throws<InvalidDataException>(() => Verify(Sign(RandomNumberGenerator.GetBytes(10_000), "0.9.0", key, keyId: 9), keys));
+        Assert.Throws<ReleaseSignatureException>(() => Verify(Sign(RandomNumberGenerator.GetBytes(10_000), "0.9.0", key, keyId: 9), keys));
     }
 
     [Fact]
@@ -106,8 +106,8 @@ public class AgentReleaseSignatureTests
     {
         var (_, keys) = NewKey();
 
-        Assert.Throws<InvalidDataException>(() => Verify(RandomNumberGenerator.GetBytes(10_000), keys));
-        Assert.Throws<InvalidDataException>(() => Verify([1, 2, 3], keys));
+        Assert.Throws<ReleaseSignatureException>(() => Verify(RandomNumberGenerator.GetBytes(10_000), keys));
+        Assert.Throws<ReleaseSignatureException>(() => Verify([1, 2, 3], keys));
     }
 
     [Theory]
@@ -119,7 +119,7 @@ public class AgentReleaseSignatureTests
         keys[keyId] = keys[TestKeyId];
         var file = Sign(RandomNumberGenerator.GetBytes(1000), "0.9.0", key, keyId);
 
-        var error = Assert.Throws<InvalidDataException>(() => Verify(file, keys));
+        var error = Assert.Throws<ReleaseSignatureException>(() => Verify(file, keys));
         Assert.Contains("签名不对", error.Message);
     }
 }

@@ -33,7 +33,7 @@ internal static class ReleaseSignature
     /// <summary>签名里的版本号、用的哪把钥匙。</summary>
     public sealed record Signed(string Version, int KeyId);
 
-    /// <summary>核对文件末尾的签名；没有签名、签名不对都抛 InvalidDataException（说明原因）。</summary>
+    /// <summary>核对文件末尾的签名；没有签名、签名不对都抛 <see cref="ReleaseSignatureException"/>（说明原因）。</summary>
     public static Signed Verify(string path)
     {
         using var file = File.OpenRead(path);
@@ -45,16 +45,16 @@ internal static class ReleaseSignature
     {
         var length = file.Length;
         const int fixedTail = SignatureBytes + 2 + 1 + 1 + 8;
-        if (length < fixedTail + 1) throw new InvalidDataException("没有发布签名（文件太短）");
+        if (length < fixedTail + 1) throw new ReleaseSignatureException("没有发布签名（文件太短）");
         var tail = new byte[12];
         file.Seek(length - 12, SeekOrigin.Begin);
         file.ReadExactly(tail);
-        if (Encoding.ASCII.GetString(tail, 4, 8) != Magic) throw new InvalidDataException("没有发布签名");
+        if (Encoding.ASCII.GetString(tail, 4, 8) != Magic) throw new ReleaseSignatureException("没有发布签名");
         var versionLength = BitConverter.ToUInt16(tail, 0);
         var keyId = tail[2];
-        if (tail[3] != Format) throw new InvalidDataException($"发布签名的格式 {tail[3]} 认不出来");
+        if (tail[3] != Format) throw new ReleaseSignatureException($"发布签名的格式 {tail[3]} 认不出来");
         var trailer = versionLength + fixedTail;
-        if (versionLength is 0 or > 64 || trailer > length) throw new InvalidDataException("发布签名坏了");
+        if (versionLength is 0 or > 64 || trailer > length) throw new ReleaseSignatureException("发布签名坏了");
         var payloadLength = length - trailer;
         var block = new byte[versionLength + SignatureBytes];
         file.Seek(payloadLength, SeekOrigin.Begin);
@@ -75,14 +75,20 @@ internal static class ReleaseSignature
         var message = Message(version, hash.GetHashAndReset());
 
         var key = (keyId < Keys.Length ? Keys[keyId] : extraKeys?.GetValueOrDefault(keyId))
-            ?? throw new InvalidDataException($"发布签名用的钥匙 {keyId} 不认识");
+            ?? throw new ReleaseSignatureException($"发布签名用的钥匙 {keyId} 不认识");
         using var ecdsa = ECDsa.Create();
         ecdsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(key), out _);
         if (!ecdsa.VerifyData(message, signature, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation))
-            throw new InvalidDataException("发布签名不对（文件被改过，或者不是我们签的）");
+            throw new ReleaseSignatureException("发布签名不对（文件被改过，或者不是我们签的）");
         return new Signed(version, keyId);
     }
 
     /// <summary>签名的内容（tools/sign-agent-release.mjs 照这个拼）。</summary>
     internal static byte[] Message(string version, byte[] payloadSha256) => [.. Encoding.UTF8.GetBytes($"{Domain}{version}\n"), .. payloadSha256];
 }
+
+/// <summary>
+/// 发布签名不让装：没有签名、签名不对、钥匙不认识，或者签名里的版本号和清单对不上 / 不比现在的新（Service/ServiceUpdate）。
+/// 管理员诊断里单独算一类"签名"（UpdateCheckTrace），不混在"原因未知"里。
+/// </summary>
+internal sealed class ReleaseSignatureException(string message) : Exception(message);

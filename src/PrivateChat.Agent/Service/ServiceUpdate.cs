@@ -39,8 +39,8 @@ internal static class ServiceUpdate
     private static void CheckSigned(string staged, string version, string fromVersion)
     {
         var signed = ReleaseSignature.Verify(staged);
-        if (signed.Version != version) throw new InvalidDataException($"签名里的版本是 {signed.Version}，清单说的是 {version}");
-        if (!UpdateManifest.IsNewer(signed.Version, fromVersion)) throw new InvalidDataException($"签名里的版本 {signed.Version} 不比现在的 {fromVersion} 新");
+        if (signed.Version != version) throw new ReleaseSignatureException($"签名里的版本是 {signed.Version}，清单说的是 {version}");
+        if (!UpdateManifest.IsNewer(signed.Version, fromVersion)) throw new ReleaseSignatureException($"签名里的版本 {signed.Version} 不比现在的 {fromVersion} 新");
     }
 
     /// <summary>新服务起来了：告诉在等的 --apply-update。</summary>
@@ -90,12 +90,28 @@ internal static class ServiceUpdate
         try
         {
             File.Move(target, old); // 正在运行的 exe（就是这个进程自己）可以改名，不能覆盖
-            File.Move(staged, target);
+            // 拷过去，不是挪过去：挪过去的文件带着 update 目录的权限（只有 SYSTEM 和管理员能读），登录用户的界面进程就起不来——
+            // .NET 单文件程序要读自己的 exe 才能解包，读不了就以 0x800080A0 退出（2026-11-26 在虚拟机里升级后托盘没了）。
+            // 拷出来的是新文件，权限跟 Program Files 走，和安装时一样
+            File.Copy(staged, target);
+            try { File.Delete(staged); }
+            catch (Exception) { }
         }
         catch (Exception ex)
         {
             AgentLog.Error("换文件失败，启动原来的服务", ex);
-            if (!File.Exists(target) && File.Exists(old)) File.Move(old, target);
+            try
+            {
+                if (File.Exists(old))
+                {
+                    if (File.Exists(target)) File.Delete(target); // 拷了一半的
+                    File.Move(old, target);
+                }
+            }
+            catch (Exception restore)
+            {
+                AgentLog.Error("换回原来的文件失败", restore);
+            }
             TryStart();
             return 1;
         }

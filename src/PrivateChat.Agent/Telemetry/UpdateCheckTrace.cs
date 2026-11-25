@@ -63,6 +63,7 @@ internal sealed class UpdateCheckTrace(string source, string currentVersion, Act
         _lastState = "failed";
         string code;
         if (ex is UpdateIntegrityException) code = "integrity";
+        else if (ex is ReleaseSignatureException) code = "signature"; // 服务模式拒装没签名 / 签名不对的版本（2026-11-26 虚拟机里原来报成 unknown）
         else if (ex is OperationCanceledException or TimeoutException) code = "timeout";
         else if (_stage == "check" && ex is InvalidDataException) code = "invalidManifest";
         else if (ex is ServerException { Status: System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden }) code = "permission";

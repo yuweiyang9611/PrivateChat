@@ -93,7 +93,7 @@ internal static class Program
                     Console.WriteLine($"签名有效：版本 {signed.Version}，钥匙 {signed.KeyId}");
                     return 0;
                 }
-                catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
+                catch (Exception ex) when (ex is ReleaseSignatureException or InvalidDataException or IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
                 {
                     Console.WriteLine($"签名无效：{ex.Message}");
                     return 1;

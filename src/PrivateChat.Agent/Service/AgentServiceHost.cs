@@ -74,6 +74,7 @@ internal static class AgentServiceHost
     {
         {
             AgentLog.Info($"PrivateChat Agent {AgentService.Version} 服务启动{(dev is null ? "" : "（开发模式，不是真的服务）")}，数据目录 {dataDir}");
+            if (dev is null) Installer.RecordVersion(AgentService.Version, Environment.ProcessPath!);
             var bridge = new HelperBridgeUi();
             var helpers = new HelperSupervisor(bridge, dev is null ? [] : ["--headless-ui", dataDir, "--consent", dev.Consent]);
             AgentService? agent = null;

@@ -31,7 +31,10 @@ internal static class HelperProcess
         PipeChannel channel;
         try
         {
-            channel = PipeChannel.ConnectAsync(pipe, servicePid, TokenImpersonationLevel.Identification, 20_000, CancellationToken.None).GetAwaiter().GetResult();
+            // 放到线程池上连再等：这个线程上已经有托盘（WinForms 的同步上下文），ConnectAsync 里的 await 会想回到这个线程接着跑，
+            // 而这个线程正堵在这里等它、消息循环还没开始 —— 互相等死，托盘一直"正在启动"、菜单点了不收（2026-11-26 在虚拟机里真装服务时碰到；
+            // 开发模式 --service-dev 用的是没有同步上下文的 HeadlessUi，所以 e2e 没测出来）
+            channel = Task.Run(() => PipeChannel.ConnectAsync(pipe, servicePid, TokenImpersonationLevel.Identification, 20_000, CancellationToken.None)).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {

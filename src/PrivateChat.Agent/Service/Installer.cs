@@ -150,6 +150,26 @@ internal static class Installer
         progress("装好了。");
     }
 
+    /// <summary>
+    /// 服务每次启动时调：「设置 → 应用」里显示的版本号和大小跟上现在的程序（自动升级换了版本后，不然一直是安装时的版本）。
+    /// 放在新版本的服务里做，不放在换版本的进程（旧版本的代码）里：2026-11-26 虚拟机里放在后者时没改成，原因没查清。出错只记日志。
+    /// </summary>
+    public static void RecordVersion(string version, string exe)
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(UninstallKey, writable: true);
+            if (key is null || key.GetValue("DisplayVersion") as string == version) return;
+            key.SetValue("DisplayVersion", version);
+            key.SetValue("EstimatedSize", (int)(new FileInfo(exe).Length / 1024), RegistryValueKind.DWord);
+            AgentLog.Info($"「设置 → 应用」里的版本号改成了 {version}");
+        }
+        catch (Exception ex)
+        {
+            AgentLog.Warn($"「设置 → 应用」里的版本号没改成：{ex.Message}");
+        }
+    }
+
     /// <summary>卸载：停掉删掉服务、还原策略、删程序和数据。返回 true = 有文件正被占用，重启后删。</summary>
     public static bool Uninstall()
     {
@@ -202,6 +222,14 @@ internal static class Installer
                 leftovers = true;
             }
         }
+        // 上一层 Program Files\PrivateChat 空了也删掉（2026-11-26 虚拟机里卸载后留了个空目录）；Agent 要等重启才删的，它也排在后面等重启
+        var programParent = Path.GetDirectoryName(ServicePaths.ProgramDir)!;
+        try
+        {
+            if (Directory.Exists(programParent) && !Directory.EnumerateFileSystemEntries(programParent).Any()) Directory.Delete(programParent);
+            else if (leftovers && Directory.Exists(programParent)) Native.MoveFileExW(programParent, null, Native.MOVEFILE_DELAY_UNTIL_REBOOT);
+        }
+        catch (Exception) { }
         return leftovers;
     }
 

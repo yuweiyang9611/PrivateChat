@@ -63,6 +63,8 @@ public sealed class AgentService
     private CancellationTokenSource? _consent;
     private Guid? _consentFor;
     private CancellationTokenSource? _reset;
+    /// <summary>主循环正在等配置串（<see cref="IAgentUi.AskSetupAsync"/>）：这时"重新设置"没什么可重来的，<see cref="RequestSetupAsync"/> 什么都不做。</summary>
+    private volatile bool _askingSetup;
     /// <summary>最近结束的会话：迟到的"开始"通知（同意之后对方立刻挂了、重连补发）不再开红条。</summary>
     private readonly Queue<Guid> _endedOrder = new();
     private readonly HashSet<Guid> _ended = [];
@@ -143,7 +145,10 @@ public sealed class AgentService
                 if (!_config.HasServer || setupError is not null || _updateSettings is null)
                 {
                     _ui.SetState(AgentState.NeedsSetup, "需要设置服务器");
-                    var text = await _ui.AskSetupAsync(setupError, ct);
+                    string? text;
+                    _askingSetup = true;
+                    try { text = await _ui.AskSetupAsync(setupError, ct); }
+                    finally { _askingSetup = false; }
                     if (text is null)
                     {
                         // 关掉了设置窗口：等用户从托盘菜单再打开
@@ -211,7 +216,9 @@ public sealed class AgentService
         Task cancelled;
         try
         {
-            if (_updating) return;
+            // 正在等配置串：已经是"重新设置"的状态了。装成服务时安装程序先叫"重新设置"、再把配置串交过来（HelperBridgeUi.AdminSetup）：
+            // 这里要是照样取消，刚拿到配置串开始登记的那一轮会被打断、回去干等一个不会再来的配置串（2026-11-26 在虚拟机里装服务时卡在"正在启动"）
+            if (_updating || _askingSetup) return;
             prior = _updateSettings;
             _updateSettings = null;
             _updateStatus?.Forget();

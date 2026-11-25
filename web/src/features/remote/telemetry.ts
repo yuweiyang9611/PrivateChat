@@ -202,7 +202,7 @@ export interface RecentUpdateDto {
     'cancelled' | 'failed' | 'noManifest' | 'unavailable'
   elapsedMs: number
   failureStage: 'check' | 'download' | 'verify' | 'install' | null
-  errorCode: 'network' | 'timeout' | 'integrity' | 'permission' | 'storage' | 'launch' | 'invalidManifest' | 'server' | 'unknown' | null
+  errorCode: 'network' | 'timeout' | 'integrity' | 'signature' | 'permission' | 'storage' | 'launch' | 'invalidManifest' | 'server' | 'unknown' | null
   confirmedAt: string | null
 }
 

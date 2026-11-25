@@ -84,7 +84,7 @@ public sealed class DeviceUpdateStatusService(AppDbContext db, AgentRegistry age
             r.State is not ("checking" or "available" or "downloading" or "verifying" or "restarting" or "current" or
                 "busy" or "postponed" or "cancelled" or "failed" or "noManifest" or "unavailable") ||
             r.FailureStage is not (null or "check" or "download" or "verify" or "install") ||
-            r.ErrorCode is not (null or "network" or "timeout" or "integrity" or "permission" or "storage" or "launch" or
+            r.ErrorCode is not (null or "network" or "timeout" or "integrity" or "signature" or "permission" or "storage" or "launch" or
                 "invalidManifest" or "server" or "unknown"))
             throw ApiException.BadRequest("更新状态字段无效");
         if (r.State == "restarting" && (r.TargetVersion is null || Version.Parse(r.TargetVersion) <= Version.Parse(r.CurrentVersion)))

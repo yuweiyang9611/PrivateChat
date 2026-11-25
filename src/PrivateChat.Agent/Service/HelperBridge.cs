@@ -75,9 +75,11 @@ internal sealed class HelperBridgeUi : IAgentUi
     /// </summary>
     public void AdminSetup(string text)
     {
+        // 先叫"重新设置"再交配置串：AgentService 正在等配置串时"重新设置"什么都不做（同步就判断完了），配置串到了它直接拿去用；
+        // 连着服务器时先被打断、回到等配置串，再拿到这一份。反过来的话，等着的那边拿到配置串刚开始登记就被"重新设置"打断，又回去干等
         while (_setup.Reader.TryRead(out _)) { } // 只留最新的
-        _setup.Writer.TryWrite(text);
         SetupRequested?.Invoke();
+        _setup.Writer.TryWrite(text);
     }
 
     private PipePeer? Peer

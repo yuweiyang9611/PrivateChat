@@ -595,7 +595,7 @@ export default {
         },
         stages: { check: '检查清单', download: '下载安装包', verify: '校验安装包', install: '安装或重启' },
         errors: {
-          network: '网络连接失败', timeout: '等待超时', integrity: '安装包校验未通过', permission: '权限不足',
+          network: '网络连接失败', timeout: '等待超时', integrity: '安装包校验未通过', signature: '发布签名不对，没有安装', permission: '权限不足',
           storage: '读写文件失败', launch: '新版启动失败', invalidManifest: '版本清单无效', server: '服务器返回错误', unknown: '原因未知',
         },
       },
